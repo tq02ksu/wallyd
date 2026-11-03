@@ -1,0 +1,299 @@
+"""事件内核：序号、订阅竞态、补发窗口、过滤、终态不可回转、内部字段剔除。"""
+
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from robotd.core.errors import ErrorCode, RobotdError
+from robotd.core.kernel import EventKernel, matches_filter
+from robotd.core.state import RobotStateStore
+from robotd.core.types import Exclusivity, TaskState
+
+
+def make_kernel(**kwargs) -> EventKernel:
+    st = RobotStateStore(robot_id="test-bot", transport="sim", **kwargs.pop("state_kwargs", {}))
+    return EventKernel(state=st, instance_id="inst-test", **kwargs)
+
+
+# ---------------------------------------------------------------- 过滤语义
+@pytest.mark.parametrize(
+    "filters,event_type,expected",
+    [
+        (["task.*"], "task.started", True),
+        (["task.*"], "device.ready", False),
+        (["task.started"], "task.started", True),
+        (["task.started"], "task.progress", False),
+        (["*"], "anything.at_all", True),
+        # 「前缀写法不带点」的常见错误：task* 不应匹配 task.started
+        (["task*"], "task.started", False),
+        ([], "task.started", False),
+    ],
+)
+def test_matches_filter(filters, event_type, expected):
+    assert matches_filter(filters, event_type) is expected
+
+
+# ---------------------------------------------------------------- 序号与封套
+def test_seq_is_strictly_increasing():
+    k = make_kernel()
+    seqs = [k.emit("device.changed", device="pump", state="on").seq for _ in range(5)]
+    assert seqs == sorted(seqs)
+    assert len(set(seqs)) == 5
+    assert k.last_seq == 5
+
+
+def test_event_id_is_instance_scoped():
+    k = make_kernel()
+    ev = k.emit("device.changed", device="pump", state="on")
+    assert ev.event_id == f"evt_inst-test_{ev.seq}"
+
+
+def test_timestamp_is_iso_utc_with_milliseconds():
+    ev = make_kernel().emit("device.changed", device="pump", state="on")
+    assert ev.timestamp.endswith("Z")
+    assert "." in ev.timestamp
+
+
+def test_invalid_event_name_rejected():
+    k = make_kernel()
+    for bad in ("taskstarted", "Task.Started", ""):
+        with pytest.raises(RobotdError):
+            k.emit(bad)
+
+
+# ---------------------------------------------------------------- 内部字段不外泄
+def test_internal_keys_are_scrubbed_recursively():
+    k = make_kernel()
+    ev = k.emit(
+        "speech.partial",
+        payload={
+            "utterance_id": "u1",
+            "revision": 2,
+            "text": "你好",
+            "ts_mono_ns": 12345,
+            "nested": {"mono_ns": 9, "keep": 1},
+        },
+    )
+    pub = ev.to_public()
+    flat = str(pub)
+    assert "ts_mono_ns" not in flat
+    assert "mono_ns" not in flat
+    assert pub["payload"]["nested"] == {"keep": 1}
+    assert pub["payload"]["text"] == "你好"
+
+
+def test_event_object_keeps_mono_ns_but_public_view_drops_it():
+    ev = make_kernel().emit("device.changed", device="pump", state="on")
+    assert ev.mono_ns > 0
+    assert "mono_ns" not in ev.to_public()
+
+
+# ---------------------------------------------------------------- 订阅与竞态
+def test_subscription_gets_snapshot_and_no_cursor_gap():
+    """核心断言：值回放 seq>cursor。用 seq==cursor 的事件边界防差一。"""
+    k = make_kernel()
+    for i in range(3):
+        k.emit("device.changed", device="pump", state=f"s{i}")
+    got: list = []
+    handle = k.subscribe(["device.*"], got.append)
+    assert handle.snapshot["event_seq"] == 3
+    assert handle.backlog == []
+    for i in range(2):
+        k.emit("device.changed", device="pump", state=f"late{i}")
+    handle.close()
+    assert [e.seq for e in got] == [4, 5]
+    # 快照游标之后的事件全收到了 → 没有洞
+    assert got[0].seq == handle.snapshot["event_seq"] + 1
+
+
+def test_subscription_registered_inside_lock_no_interleaving():
+    """并发下快照与订阅之间不能丢事件。"""
+
+    k = make_kernel()
+    delivered: list = []
+    errors: list[BaseException] = []
+
+    def subscribe_many():
+        try:
+            for _ in range(20):
+                k.subscribe(["*"], delivered.append).close()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def emit_many():
+        for i in range(50):
+            k.emit("device.changed", device="pump", state=f"v{i}")
+
+    threads = [threading.Thread(target=subscribe_many), threading.Thread(target=emit_many)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+
+
+def test_dead_subscriber_is_dropped_not_blocking():
+    k = make_kernel()
+    good: list = []
+    k.subscribe(["*"], lambda _ev: (_ for _ in ()).throw(RuntimeError("boom")))
+    k.subscribe(["*"], good.append)
+    k.emit("device.changed", device="pump", state="on")
+    k.emit("device.changed", device="pump", state="off")
+    assert len(good) == 2  # 坏的被摘掉，好的照收
+    assert k.stats()["subscriptions"] == 1
+
+
+# ---------------------------------------------------------------- 补发判定
+def test_resume_ok_within_window():
+    k = make_kernel()
+    for _ in range(5):
+        k.emit("device.changed", device="pump", state="on")
+    verdict, events = k.resume("inst-test", 2)
+    assert verdict == "ok"
+    assert [e.seq for e in events] == [3, 4, 5]
+
+
+def test_resume_instance_changed():
+    k = make_kernel()
+    k.emit("device.changed", device="pump", state="on")
+    verdict, events = k.resume("inst-other", 0)
+    assert verdict == "instance_changed"
+    assert events == []
+
+
+def test_resume_cursor_expired():
+    k = make_kernel(event_log_max=4)
+    for _ in range(10):
+        k.emit("device.changed", device="pump", state="on")
+    verdict, events = k.resume("inst-test", 1)
+    assert verdict == "cursor_expired"
+    assert events == []
+
+
+def test_resume_invalid_cursor():
+    k = make_kernel()
+    assert k.resume("inst-test", 999)[0] == "invalid_cursor"
+    assert k.resume("inst-test", -1)[0] == "invalid_cursor"
+
+
+# ---------------------------------------------------------------- 任务语义
+def test_only_one_motion_task():
+    k = make_kernel()
+    k.new_task("robot.follow", Exclusivity.MOTION)
+    with pytest.raises(RobotdError) as ei:
+        k.new_task("robot.follow", Exclusivity.MOTION)
+    assert ei.value.code is ErrorCode.BUSY
+    assert ei.value.http_status == 409
+
+
+def test_soft_tasks_can_coexist_with_motion():
+    k = make_kernel()
+    k.new_task("robot.follow", Exclusivity.MOTION)
+    k.new_task("robot.speak", Exclusivity.SOFT)  # 听得见、说得动
+    assert len(k.list_tasks()) == 2
+
+
+def test_same_soft_capability_is_deduplicated():
+    k = make_kernel()
+    k.new_task("speech.listen", Exclusivity.SOFT)
+    with pytest.raises(RobotdError):
+        k.new_task("speech.listen", Exclusivity.SOFT)
+
+
+def test_finish_is_idempotent_and_terminal_never_reverses():
+    k = make_kernel()
+    t = k.new_task("robot.follow", Exclusivity.MOTION)
+    k.mark_running(t.task_id)
+    k.finish(t.task_id, TaskState.COMPLETED)
+    again = k.finish(t.task_id, TaskState.FAILED, reason="late")
+    assert again.state is TaskState.COMPLETED
+    assert again.error is None
+
+
+def test_progress_after_terminal_is_ignored():
+    k = make_kernel()
+    t = k.new_task("robot.follow", Exclusivity.MOTION)
+    k.finish(t.task_id, TaskState.CANCELLED, reason="stop")
+    k.set_progress(t.task_id, 0.9)
+    assert k.get_task(t.task_id).progress == 0.0
+
+
+def test_unknown_task_raises_no_task():
+    k = make_kernel()
+    with pytest.raises(RobotdError) as ei:
+        k.get_task("t-9999")
+    assert ei.value.code is ErrorCode.NO_TASK
+    assert ei.value.http_status == 404
+
+
+def test_motion_task_clears_task_id_and_mode_on_finish():
+    k = make_kernel()
+    k.state.link_ready = True
+    t = k.new_task("robot.follow", Exclusivity.MOTION)
+    assert k.snapshot()["mode"] == "moving"
+    assert k.snapshot()["task_id"] == t.task_id
+    k.finish(t.task_id, TaskState.COMPLETED)
+    snap = k.snapshot()
+    assert snap["mode"] == "idle"
+    assert snap["task_id"] is None
+
+
+def test_task_lifecycle_events_emitted_in_order():
+    k = make_kernel()
+    seen: list[str] = []
+    k.subscribe(["task.*"], lambda ev: seen.append(ev.type))
+    t = k.new_task("robot.follow", Exclusivity.MOTION)
+    k.set_progress(t.task_id, 0.5)
+    k.finish(t.task_id, TaskState.CANCELLED, reason="stop")
+    assert seen == ["task.started", "task.progress", "task.cancelled"]
+
+
+# ---------------------------------------------------------------- 归并与状态
+def test_device_ready_drives_state_and_mode():
+    k = make_kernel()
+    k.state.link_ready = False
+    k.emit("device.ready", device="esp32", firmware="poc-2.1", after="connect")
+    snap = k.snapshot()
+    assert snap["devices"]["esp32"] == "ready"
+    assert snap["firmware"] == "poc-2.1"
+    assert snap["mode"] == "idle"
+
+
+def test_device_lost_degrades_mode():
+    k = make_kernel()
+    k.emit("device.ready", device="esp32", firmware="poc-2.1")
+    k.emit("device.lost", device="esp32", reason="timeout")
+    assert k.snapshot()["mode"] == "degraded"
+
+
+def test_board_reset_invalidates_pose_and_resets_odometry():
+    k = make_kernel()
+    k.emit("device.ready", device="esp32", firmware="poc-2.1")
+    from robotd.core.state import Odometry
+    from robotd.core.types import Pose
+
+    k.state._apply_pose(Pose(x=1.2))
+    k.state._apply_odometry(left_commanded=500, right_commanded=500)
+    k.emit("device.reset", device="esp32", firmware="poc-2.1", pose_valid=False, odometry_reset=True)
+    snap = k.snapshot()
+    assert snap["pose"]["valid"] is False
+    assert snap["odometry"]["left_commanded"] == 0
+    assert isinstance(k.state.odometry, Odometry)
+
+
+def test_motion_plan_does_not_move_pose():
+    """应发步数不冒充实走位移。"""
+    k = make_kernel()
+    before = k.snapshot()["pose"]
+    k.emit("motion.plan", task_id="t-1", left_steps=800, right_steps=800)
+    assert k.snapshot()["pose"] == before
+
+
+def test_snapshot_cursor_matches_last_seq():
+    k = make_kernel()
+    for _ in range(7):
+        k.emit("device.changed", device="pump", state="on")
+    snap = k.snapshot()
+    assert snap["event_seq"] == k.last_seq == 7

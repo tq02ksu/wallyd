@@ -1,0 +1,431 @@
+{
+  "version": 1,
+  "source": "contracts/events.json",
+  "envelope": {
+    "required": [
+      "version",
+      "type",
+      "event_id",
+      "seq",
+      "timestamp",
+      "payload"
+    ],
+    "forbidden_payload_keys": [
+      "ts_mono_ns",
+      "mono_ns",
+      "model_text",
+      "self_check_text"
+    ],
+    "forbidden_payload_keys_reason": "内部单调时钟与模型自检中间文本不得外泄给 Agent；它们只用于进程内对齐与调试。"
+  },
+  "filter_semantics": {
+    "exact": "事件名完全相等",
+    "prefix": "形如 task.* 匹配 task. 开头的全部事件",
+    "star": "* 匹配全部",
+    "gap_not_loss": "经过滤的订阅看不到某些全局 seq 不代表丢包"
+  },
+  "retention": {
+    "log_max": 1000,
+    "note": "有限内存日志，尽力而为补发；不是持久事件存储。cursor 早于窗口 → resync_required/cursor_expired。"
+  },
+  "supported_event_types": [
+    "*",
+    "audio.*",
+    "device.*",
+    "motion.*",
+    "safety.*",
+    "speech.*",
+    "task.*"
+  ],
+  "events": [
+    {
+      "type": "task.started",
+      "category": "task",
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "capability",
+        "exclusivity"
+      ],
+      "required_fields": [
+        "task_id",
+        "capability",
+        "exclusivity"
+      ]
+    },
+    {
+      "type": "task.progress",
+      "category": "task",
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "progress"
+      ],
+      "required_fields": [
+        "task_id",
+        "progress"
+      ]
+    },
+    {
+      "type": "task.completed",
+      "category": "task",
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "capability"
+      ],
+      "required_fields": [
+        "task_id",
+        "capability"
+      ]
+    },
+    {
+      "type": "task.failed",
+      "category": "task",
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "capability",
+        "error",
+        "reason"
+      ],
+      "required_fields": [
+        "task_id",
+        "capability",
+        "error"
+      ]
+    },
+    {
+      "type": "task.cancelled",
+      "category": "task",
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "capability",
+        "reason"
+      ],
+      "required_fields": [
+        "task_id",
+        "capability",
+        "reason"
+      ]
+    },
+    {
+      "type": "motion.plan",
+      "category": "motion",
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "left_steps",
+        "right_steps",
+        "eta_ms",
+        "note"
+      ],
+      "required_fields": [
+        "task_id",
+        "left_steps",
+        "right_steps"
+      ]
+    },
+    {
+      "type": "safety.stopped",
+      "category": "safety",
+      "payload_ref": null,
+      "payload_fields": [
+        "reason",
+        "source",
+        "task_id"
+      ],
+      "required_fields": [
+        "reason",
+        "source"
+      ]
+    },
+    {
+      "type": "device.ready",
+      "category": "device",
+      "payload_ref": null,
+      "payload_fields": [
+        "device",
+        "firmware",
+        "after"
+      ],
+      "required_fields": [
+        "device"
+      ]
+    },
+    {
+      "type": "device.lost",
+      "category": "device",
+      "payload_ref": null,
+      "payload_fields": [
+        "device",
+        "reason"
+      ],
+      "required_fields": [
+        "device"
+      ]
+    },
+    {
+      "type": "device.recovered",
+      "category": "device",
+      "payload_ref": null,
+      "payload_fields": [
+        "device"
+      ],
+      "required_fields": [
+        "device"
+      ]
+    },
+    {
+      "type": "device.reset",
+      "category": "device",
+      "payload_ref": null,
+      "payload_fields": [
+        "device",
+        "firmware",
+        "pose_valid",
+        "odometry_reset"
+      ],
+      "required_fields": [
+        "device",
+        "pose_valid",
+        "odometry_reset"
+      ]
+    },
+    {
+      "type": "device.changed",
+      "category": "device",
+      "payload_ref": null,
+      "payload_fields": [
+        "device",
+        "state",
+        "reason"
+      ],
+      "required_fields": [
+        "device",
+        "state"
+      ]
+    },
+    {
+      "type": "audio.state",
+      "category": "audio",
+      "payload_ref": "AudioState",
+      "payload_fields": [
+        "mode",
+        "muted",
+        "speaking",
+        "bridge",
+        "calibrated",
+        "partial",
+        "last_final",
+        "ambient_db",
+        "speech_db",
+        "silence_db",
+        "mic_format",
+        "ts"
+      ],
+      "required_fields": [
+        "mode",
+        "muted",
+        "speaking",
+        "bridge"
+      ]
+    },
+    {
+      "type": "speech.ready",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "utterance_id",
+        "locale",
+        "auto_endpoint"
+      ],
+      "required_fields": [
+        "utterance_id"
+      ]
+    },
+    {
+      "type": "speech.started",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "utterance_id",
+        "task_id",
+        "rms_db"
+      ],
+      "required_fields": [
+        "utterance_id"
+      ]
+    },
+    {
+      "type": "speech.speech_ended",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "utterance_id",
+        "audio_ms"
+      ],
+      "required_fields": [
+        "utterance_id"
+      ]
+    },
+    {
+      "type": "speech.partial",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "utterance_id",
+        "revision",
+        "text"
+      ],
+      "required_fields": [
+        "utterance_id",
+        "revision",
+        "text"
+      ]
+    },
+    {
+      "type": "speech.endpoint",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "utterance_id",
+        "reason",
+        "speech_ms",
+        "silence_ms"
+      ],
+      "required_fields": [
+        "utterance_id",
+        "reason"
+      ]
+    },
+    {
+      "type": "speech.final",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "utterance_id",
+        "text",
+        "stop_reason",
+        "no_speech"
+      ],
+      "required_fields": [
+        "utterance_id",
+        "text"
+      ]
+    },
+    {
+      "type": "speech.interrupted",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "response_id",
+        "task_id",
+        "reason"
+      ],
+      "required_fields": [
+        "response_id",
+        "reason"
+      ]
+    },
+    {
+      "type": "speech.tts_started",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "response_id",
+        "task_id",
+        "voice",
+        "chunks"
+      ],
+      "required_fields": [
+        "response_id"
+      ]
+    },
+    {
+      "type": "speech.tts_chunk_started",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "response_id",
+        "index"
+      ],
+      "required_fields": [
+        "response_id",
+        "index"
+      ]
+    },
+    {
+      "type": "speech.tts_chunk_finished",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "response_id",
+        "index"
+      ],
+      "required_fields": [
+        "response_id",
+        "index"
+      ]
+    },
+    {
+      "type": "speech.tts_finished",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "response_id",
+        "chunks",
+        "played"
+      ],
+      "required_fields": [
+        "response_id"
+      ]
+    },
+    {
+      "type": "speech.tts_cancelled",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "response_id",
+        "reason",
+        "played"
+      ],
+      "required_fields": [
+        "response_id",
+        "reason"
+      ]
+    }
+  ],
+  "reserved_unimplemented": [
+    {
+      "type": "vision.*",
+      "category": "vision",
+      "status": "unimplemented",
+      "why": "R15 接 macOS Vision 快速检测后才产生；现在不得编造观测。"
+    },
+    {
+      "type": "camera.*",
+      "category": "camera",
+      "status": "unimplemented",
+      "why": "R12 相机采集才有帧级事件；当前只有抓帧一次性返回。"
+    },
+    {
+      "type": "people.* / person.*",
+      "category": "vision",
+      "status": "unimplemented",
+      "why": "需要 track 生命周期（R15）；track id 不是人物身份。"
+    }
+  ],
+  "excluded_from_public": [
+    {
+      "type": "board.log",
+      "why": "原始串口文本行；只允许出现在 debug 旁路（--debug）"
+    },
+    {
+      "type": "board.tx / board.rx",
+      "why": "调试面板观察串口用；不得进入 Agent 可见事件流"
+    }
+  ]
+}

@@ -1,0 +1,293 @@
+{
+  "$comment": "robotd 公开事件登记表（R03 产出）。这是 contracts/openapi.yaml 之外的第二份机器可读契约，理由见文件末尾 notes：OpenAPI 3.0 无法表达 WS 事件的 payload 变体，用独立登记表替代『在散文里列事件名』。由 contracts/tools/generate.mjs 一并产出 generated/robotd-events.json。",
+  "version": 1,
+  "envelope": {
+    "required": ["version", "type", "event_id", "seq", "timestamp", "payload"],
+    "forbidden_payload_keys": ["ts_mono_ns", "mono_ns", "model_text", "self_check_text"],
+    "forbidden_payload_keys_reason": "内部单调时钟与模型自检中间文本不得外泄给 Agent；它们只用于进程内对齐与调试。"
+  },
+  "filter_semantics": {
+    "exact": "事件名完全相等",
+    "prefix": "形如 task.* 匹配 task. 开头的全部事件",
+    "star": "* 匹配全部",
+    "gap_not_loss": "经过滤的订阅看不到某些全局 seq 不代表丢包"
+  },
+  "retention": {
+    "log_max": 1000,
+    "note": "有限内存日志，尽力而为补发；不是持久事件存储。cursor 早于窗口 → resync_required/cursor_expired。"
+  },
+  "events": [
+    {
+      "type": "task.started",
+      "category": "task",
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "capability": {"type": "string", "required": true},
+        "exclusivity": {"type": "string", "enum": ["motion", "soft"], "required": true}
+      }
+    },
+    {
+      "type": "task.progress",
+      "category": "task",
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "progress": {"type": "number", "minimum": 0, "maximum": 1, "required": true}
+      }
+    },
+    {
+      "type": "task.completed",
+      "category": "task",
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "capability": {"type": "string", "required": true}
+      }
+    },
+    {
+      "type": "task.failed",
+      "category": "task",
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "capability": {"type": "string", "required": true},
+        "error": {"type": "object", "required": true, "$ref": "TaskError"},
+        "reason": {
+          "type": "string",
+          "required": false,
+          "enum": ["board_reset", "timeout", "lost_link", "device_fault", "internal", "unspecified"]
+        }
+      }
+    },
+    {
+      "type": "task.cancelled",
+      "category": "task",
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "capability": {"type": "string", "required": true},
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": ["requested", "stop", "preempted", "deadline"]
+        }
+      }
+    },
+    {
+      "type": "motion.plan",
+      "category": "motion",
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "left_steps": {"type": "integer", "required": true},
+        "right_steps": {"type": "integer", "required": true},
+        "eta_ms": {"type": "integer", "required": false},
+        "note": {"type": "string", "required": false}
+      },
+      "notes": "计划摘要，不代表已到位；应发步数不是实际位移证明。"
+    },
+    {
+      "type": "safety.stopped",
+      "category": "safety",
+      "payload": {
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": ["stop", "watchdog", "watchdog_release", "task_cancel", "link_lost", "startup"]
+        },
+        "source": {"type": "string", "required": true, "enum": ["host", "board"]},
+        "task_id": {"type": "string", "required": false}
+      },
+      "notes": "只表示停止动作已发生，不表示物理静止（板侧应答 ≠ 物理静止证明）。"
+    },
+    {
+      "type": "device.ready",
+      "category": "device",
+      "payload": {
+        "device": {"type": "string", "required": true, "enum": ["esp32", "camera", "audio", "pump"]},
+        "firmware": {"type": "string", "required": false},
+        "after": {"type": "string", "required": false, "enum": ["connect", "reset", "recover"]}
+      }
+    },
+    {
+      "type": "device.lost",
+      "category": "device",
+      "payload": {
+        "device": {"type": "string", "required": true, "enum": ["esp32", "camera", "audio", "pump"]},
+        "reason": {"type": "string", "required": false}
+      }
+    },
+    {
+      "type": "device.recovered",
+      "category": "device",
+      "payload": {
+        "device": {"type": "string", "required": true, "enum": ["esp32", "camera", "audio", "pump"]}
+      }
+    },
+    {
+      "type": "device.reset",
+      "category": "device",
+      "payload": {
+        "device": {"type": "string", "required": true},
+        "firmware": {"type": "string", "required": false},
+        "pose_valid": {"type": "boolean", "required": true},
+        "odometry_reset": {"type": "boolean", "required": true}
+      },
+      "notes": "板复位会清零板侧步数：必须作废 pose 与里程，并终止相关任务，不自动续跑。"
+    },
+    {
+      "type": "device.changed",
+      "category": "device",
+      "payload": {
+        "device": {"type": "string", "required": true},
+        "state": {"type": "string", "required": true},
+        "reason": {"type": "string", "required": false}
+      }
+    },
+    {
+      "type": "audio.state",
+      "category": "audio",
+      "payload": {"$ref": "AudioState"}
+    },
+    {
+      "type": "speech.ready",
+      "category": "speech",
+      "payload": {
+        "task_id": {"type": "string", "required": false},
+        "utterance_id": {"type": "string", "required": true},
+        "locale": {"type": "string", "required": false},
+        "auto_endpoint": {"type": "boolean", "required": false}
+      }
+    },
+    {
+      "type": "speech.started",
+      "category": "speech",
+      "payload": {
+        "utterance_id": {"type": "string", "required": true},
+        "task_id": {"type": "string", "required": false},
+        "rms_db": {"type": "number", "required": false}
+      }
+    },
+    {
+      "type": "speech.speech_ended",
+      "category": "speech",
+      "payload": {
+        "utterance_id": {"type": "string", "required": true},
+        "audio_ms": {"type": "integer", "required": false}
+      }
+    },
+    {
+      "type": "speech.partial",
+      "category": "speech",
+      "payload": {
+        "utterance_id": {"type": "string", "required": true},
+        "revision": {"type": "integer", "required": true},
+        "text": {"type": "string", "required": true}
+      },
+      "notes": "partial 必须带 revision，且不得与 final 混淆。"
+    },
+    {
+      "type": "speech.endpoint",
+      "category": "speech",
+      "payload": {
+        "utterance_id": {"type": "string", "required": true},
+        "reason": {"type": "string", "required": true},
+        "speech_ms": {"type": "integer", "required": false},
+        "silence_ms": {"type": "integer", "required": false}
+      }
+    },
+    {
+      "type": "speech.final",
+      "category": "speech",
+      "payload": {
+        "utterance_id": {"type": "string", "required": true},
+        "text": {"type": "string", "required": true},
+        "stop_reason": {"type": "string", "required": false},
+        "no_speech": {"type": "boolean", "required": false}
+      }
+    },
+    {
+      "type": "speech.interrupted",
+      "category": "speech",
+      "payload": {
+        "response_id": {"type": "string", "required": true},
+        "task_id": {"type": "string", "required": false},
+        "reason": {"type": "string", "required": true}
+      }
+    },
+    {
+      "type": "speech.tts_started",
+      "category": "speech",
+      "payload": {
+        "response_id": {"type": "string", "required": true},
+        "task_id": {"type": "string", "required": false},
+        "voice": {"type": "string", "required": false},
+        "chunks": {"type": "integer", "required": false}
+      }
+    },
+    {
+      "type": "speech.tts_chunk_started",
+      "category": "speech",
+      "payload": {
+        "response_id": {"type": "string", "required": true},
+        "index": {"type": "integer", "required": true}
+      }
+    },
+    {
+      "type": "speech.tts_chunk_finished",
+      "category": "speech",
+      "payload": {
+        "response_id": {"type": "string", "required": true},
+        "index": {"type": "integer", "required": true}
+      }
+    },
+    {
+      "type": "speech.tts_finished",
+      "category": "speech",
+      "payload": {
+        "response_id": {"type": "string", "required": true},
+        "chunks": {"type": "integer", "required": false},
+        "played": {"type": "integer", "required": false}
+      }
+    },
+    {
+      "type": "speech.tts_cancelled",
+      "category": "speech",
+      "payload": {
+        "response_id": {"type": "string", "required": true},
+        "reason": {"type": "string", "required": true},
+        "played": {"type": "integer", "required": false}
+      }
+    }
+  ],
+  "reserved_unimplemented": [
+    {
+      "type": "vision.*",
+      "category": "vision",
+      "status": "unimplemented",
+      "why": "R15 接 macOS Vision 快速检测后才产生；现在不得编造观测。"
+    },
+    {
+      "type": "camera.*",
+      "category": "camera",
+      "status": "unimplemented",
+      "why": "R12 相机采集才有帧级事件；当前只有抓帧一次性返回。"
+    },
+    {
+      "type": "people.* / person.*",
+      "category": "vision",
+      "status": "unimplemented",
+      "why": "需要 track 生命周期（R15）；track id 不是人物身份。"
+    }
+  ],
+  "excluded_from_public": [
+    {
+      "type": "board.log",
+      "why": "原始串口文本行；只允许出现在 debug 旁路（--debug）"
+    },
+    {
+      "type": "board.tx / board.rx",
+      "why": "调试面板观察串口用；不得进入 Agent 可见事件流"
+    }
+  ],
+  "notes": [
+    "为什么单独一份 JSON 而不是塞进 OpenAPI：OpenAPI 3.0 的 oneOf + discriminator 无法表达『type 取值决定 payload 形状』这一组 20+ 变体，塞进去会让 schema 比散文更难读。独立登记表仍可被 generate.mjs 校验与生成。",
+    "登记表与 openapi.yaml 的 components.schemas 共用 envelope：WsEvent。两份文件的 version 必须一致。",
+    "新增事件时必须同时改本文件与 doc/spec/robotd-interface-contract.md §6.2 的类别表。"
+  ]
+}

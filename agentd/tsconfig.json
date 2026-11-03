@@ -1,0 +1,26 @@
+{
+  "//": "只做类型检查，不产出（noEmit）。运行期靠 node --experimental-strip-types 直接跑 .ts。",
+  "//why": "这个配置的存在是为了守住第二道契约门禁：实现里的类型如果跟 contracts/generated 生成物不一致，tsc 必须红。",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUncheckedIndexedAccess": false,
+
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.mjs", "contracts/generated/**/*.ts"],
+  "exclude": ["node_modules", "ui"]
+}

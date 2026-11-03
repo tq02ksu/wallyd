@@ -1,0 +1,4 @@
+workspace = "wally"
+project = "wallyd"
+project_strategy = "repo-root"
+

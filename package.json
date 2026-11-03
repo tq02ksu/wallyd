@@ -1,0 +1,30 @@
+{
+  "name": "wallyd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WALLY mobile robot and AI-assisted engineering harness",
+  "scripts": {
+    "contract:generate": "node contracts/tools/generate.mjs",
+    "contract:agentd": "node contracts/tools/generate-agentd.mjs",
+    "contract:all": "npm run contract:generate && npm run contract:agentd",
+    "contract:check": "node contracts/tools/check.mjs",
+    "robotd": "PYTHONPATH=robotd/src robotd/.venv/bin/python -m robotd --port /dev/cu.usbserial-A5069RR4 --http 8787 serve",
+    "robotd:sim": "PYTHONPATH=robotd/src robotd/.venv/bin/python -m robotd --sim --http 8787 serve",
+    "agentd": "npm --prefix agentd run -s start -- --robotd http://127.0.0.1:8787 --port 8791",
+    "agentd:manual": "npm --prefix agentd run -s start:manual -- --robotd http://127.0.0.1:8787 --port 8791",
+    "modeld": "/usr/bin/python3 src/modeld.py --port 8790",
+    "test:robotd": "cd robotd && PYTHONPATH=src .venv/bin/python -m pytest -q",
+    "typecheck:agentd": "npm --prefix agentd run -s typecheck",
+    "test:agentd": "npm --prefix agentd run -s test",
+    "test:agentd:live": "npm --prefix agentd run -s test:live",
+    "test:e2e": "npm --prefix agentd run -s test:e2e"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0",
+    "yaml": "^2.9.1"
+  },
+  "dependencies": {
+    "openapi-backend": "^5.21.3"
+  }
+}

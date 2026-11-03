@@ -1,0 +1,32 @@
+# Mac mini 机器人文档
+
+- [历史文档归档](archive/README.md) - 已过时的 POC 运行说明与设计验证记录
+- [Mac mini 移动机器人 — 架构设计（C4）](architecture.md) - **总架构 + 软件架构单一口径**（C4 四层视图 + 动态视图、目标与判据、硬件边界、模块与数据模型、关键能力）
+- [Mac mini 移动机器人 — 层与模块关系（唯一口径）](layers-and-modules.md) - 4 层执行位置、模块交互类型四分类、层↔模块↔进程映射、边界命名 B1–B4 与接口面 A–C
+- [Mac mini 移动机器人 — 分层通信与接口设计](communication-protocol.md) - 通信协议与接口
+- [Mac mini 移动机器人 — 语音输入输出改造方案（流式优先）](voice-architecture.md) - 语音从 request/response 改为流式管线（audio-bridge + VAD + 说话人分段 + 分句 TTS 与打断）
+- [Mac mini 移动机器人 — LLM / TTS / ASR 模型选型（苹果生态优先）](model-selection.md) - 模型选型
+- [视觉延迟实测 — VLM 与系统检测器（2026-10-06）](../eval/vision-latency.md) - 两条感知路径的实测数字（VLM 0.84s/帧 vs 系统检测器 4–20ms）
+- [视觉评测脚本 — 使用说明](../eval/README.md) - 上面那份实测怎么复跑（数据取用、基准脚本与两个坑）
+- [R14 语音链路落地实测（2026-10-24）](../eval/r14-voice-bringup-2026-10-24.md) - ASR/TTS 在 Python robotd 重新跑通的证据、TCC 责任进程根因、AEC 实测（VPIO 12–14dB 不达标，AEC3 离线 45dB）、barge-in 限制与踩坑记录
+- [AEC 实验脚本 — 使用说明](../eval/aec3/README.md) - 回声消除怎么量化复跑（ABAB 对照、真实录音采集、AEC3 离线评估、四条实验纪律）
+- [本地大脑全链路实测（2026-10-25）](../eval/brain-qwen3-toolcalling-2026-10-25.md) - Codex→moon-bridge→mlx_lm→Qwen3-4B 端到端可用；关思考后工具调用 14/14（开思考 12/14）、输出 token 降为 1/5
+- [Mac mini 移动机器人 — 硬件选型与采购方案](hardware-selection.md) - 硬件选型
+- [实现规范与方案](spec/README.md) - 按能力组织的实现与验收方案
+- [robotd 对外接口契约 v1（设计稿）](spec/robotd-interface-contract.md) - Python 迁移后的 HTTP/MCP、状态、WebSocket 事件、任务与安全时序约定
+- [robotd Python 模块开发计划与任务清单](spec/robotd-development-plan.md) - 六阶段 20 项任务、依赖、逐项 checklist 与仿真/真机验收门槛
+- [robotd TS→Python 迁移差异矩阵（R01 产出）](spec/robotd-migration-matrix.md) - 逐项登记 operationId/事件/桥/板侧依赖的现状、判定与承接任务，含三处「复制即错误」
+- [agentd 详细功能与用户界面设计（草案）](spec/agentd-functional-design.md) - 大脑编排、独立高级模型配置、日常总览、任务进度与易读事件历史，含界面线框与异常状态
+- [agentd 开发任务清单与界面交付计划](spec/agentd-development-plan.md) - 六阶段 20 项首版任务、依赖与逐项完成标准，以及只读界面到安全动作链的分批交付门槛
+- [ADR-0010 robotd Python 控制隔离与串口所有权](decisions/0010-robotd-python-control-isolation.md) - R02 产出（proposed）：三方案对比、候选结论 A 独立控制进程、失效时序与验证断言
+- [Mac mini 移动机器人 — 电气系统架构（分层 · 功率树 · 电源域 · I/O 规划）](electrical-architecture.md) - 电气系统架构
+- [Mac mini 移动机器人 — 电源架构（12V 稳定电源 + 逆变器 220V/100V）](power-architecture.md) - 电源架构
+- [Mac mini 移动机器人 — 步进驱动接线与供电（ESP32-S3 + TB6600）](stepper-wiring.md) - 步进接线
+- [Mac mini 移动机器人 — 接线端子与防呆规划（测试期 + 扩展）](wiring-connectors.md) - 接线端子
+- [Mac mini 移动机器人 — 可行性评估与技术风险清单](risk-assessment.md) - 风险清单
+- [Mac mini 移动机器人 — 产品定位与套件化约束](product-positioning.md) - 产品定位
+- [时间约束与接口契约 — 现状核实](timing-contract-review.md) - 按两条判据核实「已实现 / 已定稿未实现 / 真空白」三态
+- [接口契约升级方案 — 从「散文协议」到「可发现 + 可断言」](contract-upgrade.md) - 板侧线协议与模型帧的 spec 骨架、漂移证据与门禁设计
+- [ADR-0008 robotd 用 Control Worker 隔离导航与管理事件循环](decisions/0008-robotd-control-worker.md) - 原 Node 隔离方案（superseded by ADR-0009），时序与安全要求保留
+- [ADR-0009 robotd 新架构采用 Python，为感知与 SLAM 扩展准备](decisions/0009-robotd-python-runtime.md) - 新语言方向（accepted）、模型进程边界与迁移验收条件；现有 TS POC 尚未迁移
+- [decisions/README](decisions/README.md) - 架构决策记录

@@ -1,0 +1,324 @@
+[
+  {
+    "name": "robot_health",
+    "description": "服务存活与版本信息",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "GET",
+      "path": "/v1/health",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "robot_state",
+    "description": "机器人整体状态快照",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "GET",
+      "path": "/v1/robot/state",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "robot_calibration_get",
+    "description": "读取当前标定参数（steps_per_m / wheelbase_mm）与生效层\n标定值归属与下发见 ADR-0002：`steps_per_m` / `wheelbase_mm` 由 robotd 掌握并下发给板侧，\n改参数**不需要重刷固件**。返回 `source` 表示当前值来自默认、板侧回读还是 host 覆盖。\n",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "GET",
+      "path": "/v1/robot/odometry/calibration",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "robot_calibration_set",
+    "description": "设置标定参数并下发到板侧（无需重刷固件）",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "steps_per_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "wheelbase_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "persist": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否要求板侧持久化（掉电保留）；默认仅本次运行有效"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": true,
+    "operation": {
+      "method": "PUT",
+      "path": "/v1/robot/odometry/calibration",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "robot_speak",
+    "description": "请求机器人播报",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "voice": {
+          "type": "string"
+        },
+        "rate": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 1
+        },
+        "interruptible": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "requiresApproval": true,
+    "operation": {
+      "method": "POST",
+      "path": "/v1/robot/speak",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "audio_state",
+    "description": "音频现状（常听开关 / 识别状态 / 本底门限 / 最近一句），识别结果经 /v1/events 事件流实时推送",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "GET",
+      "path": "/v1/audio/state",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "audio_mute",
+    "description": "暂停常听（不产生 utterance、不跑 ASR）",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "POST",
+      "path": "/v1/audio/mute",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "audio_unmute",
+    "description": "恢复常听",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "POST",
+      "path": "/v1/audio/unmute",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "speech_listen",
+    "description": "开始流式听音（默认说完自动收尾），识别结果经 /v1/events 推送",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "max_seconds": {
+          "type": "number",
+          "minimum": 5,
+          "maximum": 1800,
+          "default": 300
+        },
+        "locale": {
+          "type": "string",
+          "default": "zh_CN"
+        },
+        "auto_endpoint": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "POST",
+      "path": "/v1/speech/listen",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "robot_follow",
+    "description": "跟随目标人物\n机器人语义能力：调用方表达「跟随哪个目标」，robotd 负责目标跟踪、跟随控制、运动任务与安全停止。\n不是通用自然语言接口，不保证是无人看护安全的自主行驶。\n**目标绑定来源必须唯一**：给 `target_track_id` 就只跟这条 track；只给 `target` 时是语义描述，\n需要机器人自行确定目标，歧义时由调用方澄清而非机器人私自切换。\n目标丢失、观测过期、相机/链路故障时**停止并提交明确终态**，默认不自动旋转搜索。\n",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target_track_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "已存在的 track id；过期或不存在时返回 400/E_VALIDATION"
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "语义目标（如「人」）；仅在没有 target_track_id 时使用"
+        },
+        "max_speed_mps": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 0.4,
+          "default": 0.15,
+          "description": "跟随速度上限（米/秒）。上限是**安全边界**，实现不得自行放宽"
+        },
+        "stop_width_ratio": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 0.95,
+          "description": "停止时的目标框宽度占比。**这是几何代理量，不是米制距离**；\n单目框大小不能冒充可靠测距。\n"
+        },
+        "max_seconds": {
+          "type": "number",
+          "minimum": 5,
+          "maximum": 300,
+          "default": 120,
+          "description": "任务硬时限；到期停止并提交 cancelled/failed 终态"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": true,
+    "operation": {
+      "method": "POST",
+      "path": "/v1/robot/follow",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "robot_stop",
+    "description": "立即停止运动，幂等可抢占\n有序软件停止：无 task id、无需审批、幂等、可抢占普通运动任务。**不是硬件急停**，\n不保证断开驱动使能。响应只表示访问已受理，**不表示物理静止**（板侧应答 ≠ 物理静止证明）。\n是否连带取消语音/音频任务见 `x-cancels`。超时未收到板侧应答时返回 504/E_TIMEOUT，\n调用方不得据此认为机器人仍在运动。\n",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "POST",
+      "path": "/v1/robot/stop",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "task_list",
+    "description": "列出任务（可按状态过滤）\n只读快照；不按时间淘汰，反映内核任务表当前内容。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "GET",
+      "path": "/v1/tasks",
+      "pathParams": []
+    }
+  },
+  {
+    "name": "task_get",
+    "description": "查询任务状态",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "GET",
+      "path": "/v1/tasks/{task_id}",
+      "pathParams": [
+        "task_id"
+      ]
+    }
+  },
+  {
+    "name": "task_cancel",
+    "description": "取消指定任务",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "additionalProperties": false
+    },
+    "requiresApproval": false,
+    "operation": {
+      "method": "DELETE",
+      "path": "/v1/tasks/{task_id}",
+      "pathParams": [
+        "task_id"
+      ]
+    }
+  }
+]

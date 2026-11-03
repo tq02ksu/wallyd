@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robotd"
+version = "0.1.0"
+description = "Mac mini 移动机器人身体运行时（Python 实现，迁移期与 TS POC 并存）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+# 运行期依赖刻意为零：HTTP/WS 用标准库，配置校验用自带的 schema 子集。
+# 设备侧依赖（pyserial）作为可选 extra，不让仿真环境被迫安装。
+dependencies = []
+
+[project.optional-dependencies]
+serial = ["pyserial>=3.5"]
+dev = ["pytest>=8.0", "pyyaml>=6.0", "ruff>=0.14,<0.15"]
+
+[project.scripts]
+robotd = "robotd.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true

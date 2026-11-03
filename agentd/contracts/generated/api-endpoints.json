@@ -1,0 +1,226 @@
+{
+  "$comment": "由 contracts/tools/generate-agentd.mjs 生成；UI 与冒烟脚本共用，避免各写一份路由。",
+  "contract_version": "1.0.0",
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/healthz",
+      "operationId": "agentd_healthz",
+      "tags": [
+        "system"
+      ],
+      "summary": "存活探针",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/session",
+      "operationId": "agentd_session",
+      "tags": [
+        "system"
+      ],
+      "summary": "取本地会话凭证与 CSRF 令牌",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/state",
+      "operationId": "agentd_state",
+      "tags": [
+        "system"
+      ],
+      "summary": "总览聚合状态",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions",
+      "operationId": "agentd_list_sessions",
+      "tags": [
+        "sessions"
+      ],
+      "summary": "列出会话（游标分页）",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions",
+      "operationId": "agentd_create_session",
+      "tags": [
+        "sessions"
+      ],
+      "summary": "新建会话",
+      "websocket": false,
+      "mutating": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/{session_id}",
+      "operationId": "agentd_get_session",
+      "tags": [
+        "sessions"
+      ],
+      "summary": "会话详情与分页消息",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/run",
+      "operationId": "agentd_submit_run",
+      "tags": [
+        "runs"
+      ],
+      "summary": "提交一次请求（文本）",
+      "websocket": false,
+      "mutating": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/runs",
+      "operationId": "agentd_list_runs",
+      "tags": [
+        "runs"
+      ],
+      "summary": "列出任务",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/runs/{run_id}",
+      "operationId": "agentd_get_run",
+      "tags": [
+        "runs"
+      ],
+      "summary": "任务详情（步骤、工具调用、审批、证据）",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/runs/{run_id}/cancel",
+      "operationId": "agentd_cancel_run",
+      "tags": [
+        "runs"
+      ],
+      "summary": "取消任务（终止编排）",
+      "websocket": false,
+      "mutating": true
+    },
+    {
+      "method": "POST",
+      "path": "/api/stop",
+      "operationId": "agentd_stop",
+      "tags": [
+        "runs"
+      ],
+      "summary": "软件停止编排（不依赖模型与 Harness）",
+      "websocket": false,
+      "mutating": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/events",
+      "operationId": "agentd_list_events",
+      "tags": [
+        "events"
+      ],
+      "summary": "语义事件历史（游标分页、服务端过滤）",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/events/live",
+      "operationId": "agentd_events_live",
+      "tags": [
+        "events"
+      ],
+      "summary": "实时事件推送（WebSocket）",
+      "websocket": true,
+      "mutating": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/model-profiles",
+      "operationId": "agentd_list_model_profiles",
+      "tags": [
+        "models"
+      ],
+      "summary": "列出模型 profile（凭证只显示是否已设置）",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/model-profiles",
+      "operationId": "agentd_create_model_profile",
+      "tags": [
+        "models"
+      ],
+      "summary": "新建 profile（生成 revision 1，默认不激活）",
+      "websocket": false,
+      "mutating": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/model-profiles/{profile_id}",
+      "operationId": "agentd_get_model_profile",
+      "tags": [
+        "models"
+      ],
+      "summary": "读取 profile 与其 revision 历史",
+      "websocket": false,
+      "mutating": false
+    },
+    {
+      "method": "PUT",
+      "path": "/api/model-profiles/{profile_id}",
+      "operationId": "agentd_update_model_profile",
+      "tags": [
+        "models"
+      ],
+      "summary": "产生新 revision（不可变历史，乐观锁）",
+      "websocket": false,
+      "mutating": true
+    },
+    {
+      "method": "POST",
+      "path": "/api/model-profiles/{profile_id}/validate",
+      "operationId": "agentd_validate_model_profile",
+      "tags": [
+        "models"
+      ],
+      "summary": "分项兼容探测（不发送任何用户数据）",
+      "websocket": false,
+      "mutating": true
+    },
+    {
+      "method": "POST",
+      "path": "/api/model-profiles/{profile_id}/activate",
+      "operationId": "agentd_activate_model_profile",
+      "tags": [
+        "models"
+      ],
+      "summary": "激活一个已验证的 revision",
+      "websocket": false,
+      "mutating": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/approvals",
+      "operationId": "agentd_list_approvals",
+      "tags": [
+        "approvals"
+      ],
+      "summary": "审批观测（只读）",
+      "websocket": false,
+      "mutating": false
+    }
+  ]
+}

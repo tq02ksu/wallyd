@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>机器人 · agentd</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <span class="brand">机器人</span>
+      <span class="brand-sub">agentd</span>
+    </div>
+    <nav class="nav" aria-label="主导航">
+      <a href="#/overview" data-route="overview">总览</a>
+      <a href="#/runs" data-route="runs">任务</a>
+      <a href="#/events" data-route="events">事件</a>
+      <a href="#/settings" data-route="settings">设置</a>
+    </nav>
+    <div class="topbar-right">
+      <span class="conn" id="conn-status" role="status" aria-live="polite">
+        <span class="dot unknown"></span> 连接中
+      </span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div id="banner"></div>
+    <div id="main"></div>
+  </main>
+
+  <div id="stop-host"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

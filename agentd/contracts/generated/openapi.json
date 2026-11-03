@@ -1,0 +1,2528 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "wallyd agentd API",
+    "version": "1.0.0",
+    "description": "agentd（大脑与管家）的对外契约。**这份契约独立于 robotd 的契约**，依据 ADR-0007：\nagentd 与 robotd 只在公开接口相遇，agentd 的会话/任务/模型配置/审批审计/事件历史\n都由本文件定义，不复用 robotd 的 Task/State 形状。\n\n设计依据：`doc/spec/agentd-functional-design.md`（产品语义）\n与 `doc/spec/agentd-development-plan.md`（实施顺序）。\n\n## 三条硬约束\n\n1. **面板面不投影为模型工具**。本契约全部端点都是「给人看/给人配」的；\n   没有一条会进入 Harness 的 MCP 工具面。模型能看到的工具面只有 robotd 的公开能力\n   （见 `contracts/generated/mcp-tools.json`），经 agentd 的适配器转交审批。\n2. **正常界面没有批准写入口**。`GET /api/approvals` 只读；批准只能来自经过验证的\n   语音确认通道（内部端点，绑定 capability 与参数摘要），浏览器不能代批。\n   唯一的例外是显式测试模式（`--allow-manual-approve`），启动时会在 health 里标出。\n3. **停止不依赖 agentd 之外的任何东西**。`POST /api/stop` 只中断编排（不等模型、\n   不回头问 Harness）；真正的身体停止由浏览器可信客户端直达 robotd 的 `robot_stop`，\n   agentd 挂了也不影响。两者语义不同，文档里不得混用。\n\n## 契约演进\n\n`version` 随破坏性变更递增。响应形状一律走 `{ ok, ... }` 或 `{ ok:false, error }`；\n错误码稳定，调用方按 `code` 分支，不得解析 `message`。\n"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8791",
+      "description": "本机回环；端口以运行时配置为准（默认 8791）"
+    }
+  ],
+  "x-agentd-errors": {
+    "E_VALIDATION": "输入校验失败（400）",
+    "E_AUTH": "缺少或错误的本地会话凭证（401）",
+    "E_CSRF": "写入缺少或错误的 CSRF 令牌 / Origin 不被允许（403）",
+    "E_ORIGIN": "Origin/Host 不在允许列表（403）",
+    "E_NOT_FOUND": "路由或资源不存在（404）",
+    "E_BUSY": "已有活动任务（409）",
+    "E_CONFLICT": "revision / 幂等键冲突（409）",
+    "E_CURSOR_EXPIRED": "事件游标早于保留窗口（410）",
+    "E_UNAVAILABLE": "依赖未就绪（模型/Harness/robotd）（503）",
+    "E_STORE": "数据库不可写或磁盘满（503，副作用 fail-closed）",
+    "E_INTERNAL": "未分类内部故障（500）"
+  },
+  "x-agentd-config": {
+    "bind": "只允许回环（127.0.0.1 / ::1），配置层拒绝 0.0.0.0",
+    "cors": "不提供通配 CORS；UI 同源托管，跨源写入一律拒绝",
+    "csrf": "写操作需 X-Agentd-CSRF 头，值取自 GET /api/session 的 bootstrap"
+  },
+  "tags": [
+    {
+      "name": "system",
+      "description": "存活、总览状态与本地会话"
+    },
+    {
+      "name": "sessions",
+      "description": "对话会话与消息"
+    },
+    {
+      "name": "runs",
+      "description": "任务（run）提交、列表、详情与取消"
+    },
+    {
+      "name": "events",
+      "description": "语义事件历史查询与实时推送"
+    },
+    {
+      "name": "models",
+      "description": "高级模型 profile、验证、激活与回退"
+    },
+    {
+      "name": "approvals",
+      "description": "审批观测（只读）与内部审批通道"
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "agentd_healthz",
+        "tags": [
+          "system"
+        ],
+        "summary": "存活探针",
+        "description": "只表示 agentd 进程活着。**不表示机器人正常、模型可用或身体停稳**。",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Healthz"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session": {
+      "get": {
+        "operationId": "agentd_session",
+        "tags": [
+          "system"
+        ],
+        "summary": "取本地会话凭证与 CSRF 令牌",
+        "description": "UI 同源加载后调用一次，拿到写操作所需的 CSRF 令牌。令牌由服务端在启动时生成，\n只通过同源 GET 下发；跨源请求因 Origin 校验失败拿不到。\n",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalSession"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/state": {
+      "get": {
+        "operationId": "agentd_state",
+        "tags": [
+          "system"
+        ],
+        "summary": "总览聚合状态",
+        "description": "一次返回总览需要的全部东西：服务自身、活动任务、身体观测（带来源与新鲜度）、\n模型与语音状态、最近语义事件。**每个观测都带 `observed_at` 与 `freshness`**，\n客户端据此显示「状态已过期」而不是把旧数据当现状。\n",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/StoreUnavailable"
+          }
+        }
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "operationId": "agentd_list_sessions",
+        "tags": [
+          "sessions"
+        ],
+        "summary": "列出会话（游标分页）",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "agentd_create_session",
+        "tags": [
+          "sessions"
+        ],
+        "summary": "新建会话",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "maxLength": 120
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/api/sessions/{session_id}": {
+      "get": {
+        "operationId": "agentd_get_session",
+        "tags": [
+          "sessions"
+        ],
+        "summary": "会话详情与分页消息",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/run": {
+      "post": {
+        "operationId": "agentd_submit_run",
+        "tags": [
+          "runs"
+        ],
+        "summary": "提交一次请求（文本）",
+        "description": "幂等：同一 `idempotency_key` 重复提交只产生一个 run，返回同一个 `run_id`。\n活动 run 上限为 1；遇忙返回 409，**不排队后突然执行**。\n\n执行路径由 agentd 的 Input/Router 决定：命中确定性快速路由 → 直接走能力调用\n（仍经同一审批门）；否则交给 Harness 理解。响应里的 `route` 说明实际走了哪条。\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已受理",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/runs": {
+      "get": {
+        "operationId": "agentd_list_runs",
+        "tags": [
+          "runs"
+        ],
+        "summary": "列出任务",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "accepted",
+                "understanding",
+                "planning",
+                "waiting_input",
+                "waiting_confirmation",
+                "executing",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "interrupted",
+                "outcome_unknown"
+              ]
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}": {
+      "get": {
+        "operationId": "agentd_get_run",
+        "tags": [
+          "runs"
+        ],
+        "summary": "任务详情（步骤、工具调用、审批、证据）",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/cancel": {
+      "post": {
+        "operationId": "agentd_cancel_run",
+        "tags": [
+          "runs"
+        ],
+        "summary": "取消任务（终止编排）",
+        "description": "**这不是「停止机器人」。** 取消会中断 Harness、作废待审批与未消费授权、\n取消关联的 robotd 任务；若涉及运动，会请求一次 `robot_stop`。\n「已请求停止」与「已确认停稳」是两个状态，详情里分别给出。\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已受理取消",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/stop": {
+      "post": {
+        "operationId": "agentd_stop",
+        "tags": [
+          "runs"
+        ],
+        "summary": "软件停止编排（不依赖模型与 Harness）",
+        "description": "立即中断活动 run、作废待审批与未消费授权，并**直达 robotd 请求一次 stop**。\n不等 Harness、不等模型、不走审批。\n\n响应里的 `body_stop` 明确区分三种结局：\n`requested`（已发出，未确认）/ `confirmed`（robotd 回了 200 且 board_ack=true）/\n`unknown`（robotd 不可达或超时）。**`requested` 与 `unknown` 都不能显示为「已停稳」。**\n",
+        "responses": {
+          "200": {
+            "description": "已处理（结果见 body_stop.state）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "operationId": "agentd_list_events",
+        "tags": [
+          "events"
+        ],
+        "summary": "语义事件历史（游标分页、服务端过滤）",
+        "description": "默认返回人类可读的业务事件，**不含 token 片段、心跳、每帧位姿**。\n每条带确定性中文摘要（模板生成，不调用模型），所以模型离线也能读懂历史。\n",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "info",
+                "warning",
+                "error"
+              ]
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "agentd",
+                "robotd",
+                "harness",
+                "model",
+                "store",
+                "user"
+              ]
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "关键词，覆盖可读标题、摘要与错误码",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "游标早于保留窗口，必须从头加载",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/events/live": {
+      "get": {
+        "operationId": "agentd_events_live",
+        "tags": [
+          "events"
+        ],
+        "summary": "实时事件推送（WebSocket）",
+        "description": "GET 升级为 WebSocket。连接后先发 `hello`；客户端发 `hello`/`subscribe` 后服务端回\n`subscribed` 并带 `cursor`，随后推送 `event`。断线重连时带 `cursor` 与 `boot_id`：\n同一 boot 且游标仍在保留窗口内 → 补发缺失；否则回 `resync_required`，\n客户端必须重新 `GET /api/state` 与 `/api/events` 首页（**不悄悄跳过**）。\n",
+        "x-websocket": true,
+        "responses": {
+          "101": {
+            "description": "Switching Protocols"
+          }
+        }
+      }
+    },
+    "/api/model-profiles": {
+      "get": {
+        "operationId": "agentd_list_model_profiles",
+        "tags": [
+          "models"
+        ],
+        "summary": "列出模型 profile（凭证只显示是否已设置）",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfileList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "agentd_create_model_profile",
+        "tags": [
+          "models"
+        ],
+        "summary": "新建 profile（生成 revision 1，默认不激活）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelProfileDraft"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfile"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/api/model-profiles/{profile_id}": {
+      "get": {
+        "operationId": "agentd_get_model_profile",
+        "tags": [
+          "models"
+        ],
+        "summary": "读取 profile 与其 revision 历史",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProfileId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfileDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "agentd_update_model_profile",
+        "tags": [
+          "models"
+        ],
+        "summary": "产生新 revision（不可变历史，乐观锁）",
+        "description": "传入 `base_revision` 做 CAS：与当前最新 revision 不一致即 409，\n**不后写覆盖**。旧 revision 与其凭证引用保留，不被原地改写。\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProfileId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelProfileUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "新 revision 已生成",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfileDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/model-profiles/{profile_id}/validate": {
+      "post": {
+        "operationId": "agentd_validate_model_profile",
+        "tags": [
+          "models"
+        ],
+        "summary": "分项兼容探测（不发送任何用户数据）",
+        "description": "逐项检查：连接 / 认证 / 模型存在 / 流式 / 工具调用 / 取消 / Harness 接入。\n探测使用固定 fixture 输入，不含用户会话，不执行机器人动作。\n**HTTP 200 或模型列表成功不等于「可用于 Agent」**——只有全部必需项通过才会\n`verdict=compatible`，否则只能保存草稿，不能激活。\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProfileId"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "revision": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "探测完成（结论见 verdict）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/model-profiles/{profile_id}/activate": {
+      "post": {
+        "operationId": "agentd_activate_model_profile",
+        "tags": [
+          "models"
+        ],
+        "summary": "激活一个已验证的 revision",
+        "description": "只允许激活 `verdict=compatible` 且未失效的 revision。配置/凭证/适配器/Harness\n版本任一变化都会让旧验证失效，需重测。激活动作写激活事件；\n回退也是「激活一个旧 revision」，同样产生新事件，不改写历史。\n活动 run 不受影响：它固定在自己启动时的 revision 上。\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProfileId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "revision"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "revision": {
+                    "type": "integer"
+                  },
+                  "base_active_revision": {
+                    "type": "integer",
+                    "description": "乐观锁：与当前激活 revision 不一致即 409"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已激活",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfileDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/approvals": {
+      "get": {
+        "operationId": "agentd_list_approvals",
+        "tags": [
+          "approvals"
+        ],
+        "summary": "审批观测（只读）",
+        "description": "**正常界面没有批准写入口。** 本端点只返回审批请求、复述参数摘要、确认窗口与结论。\n浏览器不能在此批准；批准只来自经过验证的语音确认（内部通道）。\n",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "persisted",
+                "announced",
+                "waiting",
+                "approved",
+                "denied",
+                "expired",
+                "cancelled"
+              ]
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalList"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "不透明游标；来自上一页 next_cursor。稳定且不随时间漂移。"
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      },
+      "SessionId": {
+        "name": "session_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "RunId": {
+        "name": "run_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ProfileId": {
+        "name": "profile_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "输入不合法",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "资源不存在",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "状态冲突（遇忙、revision 不一致、幂等键冲突）",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "依赖未就绪",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "StoreUnavailable": {
+        "description": "数据库不可写（副作用已 fail-closed）",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "ok",
+          "error"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "稳定错误码，见 x-agentd-errors"
+              },
+              "message": {
+                "type": "string",
+                "description": "给人看的说明；调用方不得解析它做分支"
+              },
+              "details": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "hint": {
+                "type": "string",
+                "description": "可选的下一步建议（如「到设置 → 高级模型测试连接」）"
+              }
+            }
+          }
+        }
+      },
+      "Healthz": {
+        "type": "object",
+        "required": [
+          "ok",
+          "daemon",
+          "pid",
+          "boot_id",
+          "started_at",
+          "contract_version"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "daemon": {
+            "type": "string",
+            "enum": [
+              "agentd"
+            ]
+          },
+          "pid": {
+            "type": "integer"
+          },
+          "boot_id": {
+            "type": "string",
+            "description": "每次进程启动生成；WS 重连据此判断是否需要 resync"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "contract_version": {
+            "type": "string"
+          },
+          "store": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "writable": {
+                "type": "boolean"
+              },
+              "migrated_to": {
+                "type": "integer"
+              }
+            }
+          },
+          "test_mode": {
+            "type": "object",
+            "description": "显式测试模式的标志位；生产运行时两项都应为 false",
+            "properties": {
+              "allow_manual_approve": {
+                "type": "boolean"
+              },
+              "allow_auto_approve": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "LocalSession": {
+        "type": "object",
+        "required": [
+          "ok",
+          "boot_id",
+          "csrf"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "boot_id": {
+            "type": "string"
+          },
+          "csrf": {
+            "type": "string",
+            "description": "写操作需在 X-Agentd-CSRF 头回传"
+          },
+          "origin": {
+            "type": "string"
+          }
+        }
+      },
+      "Overview": {
+        "type": "object",
+        "required": [
+          "ok",
+          "generated_at",
+          "self",
+          "body",
+          "brain",
+          "active_run",
+          "recent_events",
+          "issues"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "self": {
+            "type": "object",
+            "properties": {
+              "boot_id": {
+                "type": "string"
+              },
+              "started_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "uptime_s": {
+                "type": "integer"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/Observation"
+          },
+          "brain": {
+            "type": "object",
+            "description": "agentd/Harness/模型的健康；与身体观测分开，服务 alive 不等于身体停稳",
+            "properties": {
+              "daemon": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "degraded",
+                  "error"
+                ]
+              },
+              "harness": {
+                "$ref": "#/components/schemas/HarnessStatus"
+              },
+              "model": {
+                "$ref": "#/components/schemas/ModelStatus"
+              },
+              "store": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "read_only",
+                  "error"
+                ]
+              }
+            }
+          },
+          "active_run": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RunSummary"
+              }
+            ],
+            "nullable": true
+          },
+          "recent_events": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "$ref": "#/components/schemas/EventView"
+            }
+          },
+          "issues": {
+            "type": "array",
+            "description": "按严重度排序，第一项是「最该先处理的一件事」",
+            "items": {
+              "$ref": "#/components/schemas/Issue"
+            }
+          }
+        }
+      },
+      "Observation": {
+        "type": "object",
+        "description": "身体观测。**不是第二份可写状态**：全部字段来自 robotd 的公开接口，只读。\n每种结局都必须可区分：未接入 / 无数据 / 过期 / 离线 / 正常。\n",
+        "required": [
+          "state",
+          "source",
+          "observed_at",
+          "freshness"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "stale",
+              "offline",
+              "not_connected",
+              "unknown"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "examples": [
+              "robotd"
+            ]
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "freshness": {
+            "type": "object",
+            "properties": {
+              "age_ms": {
+                "type": "integer",
+                "nullable": true
+              },
+              "threshold_ms": {
+                "type": "integer"
+              },
+              "expired": {
+                "type": "boolean"
+              }
+            }
+          },
+          "instance_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "robot": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "mode": {
+                "type": "string"
+              },
+              "devices": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "battery": {
+                "type": "object",
+                "nullable": true
+              },
+              "pose": {
+                "type": "object",
+                "nullable": true
+              },
+              "task_id": {
+                "type": "string",
+                "nullable": true
+              }
+            }
+          },
+          "note": {
+            "type": "string",
+            "description": "不可用时的原因（给人看的）"
+          }
+        }
+      },
+      "HarnessStatus": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "not_configured",
+              "ready",
+              "running",
+              "error",
+              "unavailable"
+            ]
+          },
+          "binary": {
+            "type": "string",
+            "nullable": true
+          },
+          "version": {
+            "type": "string",
+            "nullable": true
+          },
+          "approval_mode": {
+            "type": "string",
+            "enum": [
+              "voice",
+              "manual_test",
+              "auto_test"
+            ]
+          },
+          "codex_home": {
+            "type": "string",
+            "nullable": true,
+            "description": "Harness 专属会话历史目录（CODEX_HOME）。**必须如实上报**，让用户能自行确认\nagentd 没有在读写主机的 ~/.codex。为空表示未确定，不要用 ~/.codex 顶上。\n"
+          },
+          "last_error": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ModelStatus": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "not_configured",
+              "active",
+              "invalid",
+              "error"
+            ]
+          },
+          "active_profile_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "active_profile_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "active_revision": {
+            "type": "integer",
+            "nullable": true
+          },
+          "validated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      },
+      "Issue": {
+        "type": "object",
+        "required": [
+          "severity",
+          "title"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning",
+              "info"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "description": "可点击的去处，如 settings/models、run:<id>"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "title",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archived"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_run_id": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SessionPage": {
+        "type": "object",
+        "required": [
+          "ok",
+          "sessions",
+          "next_cursor"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SessionDetail": {
+        "type": "object",
+        "required": [
+          "ok",
+          "session",
+          "messages",
+          "next_cursor"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "required": [
+          "message_id",
+          "role",
+          "text",
+          "created_at"
+        ],
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "agent",
+              "system"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "streaming": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string",
+            "description": "text / asr / route"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RunRequest": {
+        "type": "object",
+        "required": [
+          "prompt"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "调用方生成；同一键重复提交只产生一个 run"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "text",
+              "asr"
+            ]
+          },
+          "asr_meta": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "utterance_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "seq": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "RunAccepted": {
+        "type": "object",
+        "required": [
+          "ok",
+          "run_id",
+          "status",
+          "route",
+          "created_at"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string",
+            "enum": [
+              "fast",
+              "harness",
+              "clarified"
+            ],
+            "description": "fast=确定性快速路由；harness=交给模型理解；clarified=需澄清"
+          },
+          "fast_rule": {
+            "type": "string",
+            "nullable": true,
+            "description": "命中的规则 ID@version，用于追溯"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "幂等键命中已有 run 时为 true"
+          },
+          "ambiguous": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`route=harness` 且原因是**多条快速规则同时命中**时，列出候选规则 ID@version。\n出现这个字段表示「没有执行任何动作」——歧义时按规格要求先问清楚，不按第一条命中执行。\n"
+          },
+          "clarify": {
+            "type": "object",
+            "nullable": true,
+            "description": "`route=clarified` 时的澄清内容。澄清同样是**未执行**状态。\n",
+            "properties": {
+              "question": {
+                "type": "string",
+                "description": "面向用户的一句话，说明为什么没执行、需要什么"
+              },
+              "missing": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "缺失项，如 `capability:robot.follow`、`precondition`"
+              }
+            }
+          }
+        }
+      },
+      "RunSummary": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "prompt",
+          "status",
+          "created_at",
+          "route"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "understanding",
+              "planning",
+              "waiting_input",
+              "waiting_confirmation",
+              "executing",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "interrupted",
+              "outcome_unknown"
+            ]
+          },
+          "route": {
+            "type": "string",
+            "enum": [
+              "fast",
+              "harness",
+              "clarified"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "text",
+              "asr"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "duration_ms": {
+            "type": "integer",
+            "nullable": true
+          },
+          "model_revision": {
+            "type": "integer",
+            "nullable": true
+          },
+          "fast_rule": {
+            "type": "string",
+            "nullable": true,
+            "description": "本次任务实际命中的快速规则 `ID@version`；未走快速路由时为 null。\n规格要求「任务事件记录实际命中的规则 ID/版本」——历史记录的是**当时**命中的那条，\n规则停用或回退不改写历史。\n"
+          },
+          "blocking_reason": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "RunDetail": {
+        "type": "object",
+        "required": [
+          "ok",
+          "run",
+          "steps",
+          "tool_calls",
+          "result"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunSummary"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunStep"
+            }
+          },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            }
+          },
+          "approvals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Approval"
+            }
+          },
+          "result": {
+            "$ref": "#/components/schemas/RunResult"
+          },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "harness_exit_code": {
+                "type": "integer",
+                "nullable": true
+              },
+              "error_code": {
+                "type": "string",
+                "nullable": true
+              },
+              "config_revision": {
+                "type": "integer",
+                "nullable": true
+              }
+            }
+          }
+        }
+      },
+      "RunStep": {
+        "type": "object",
+        "required": [
+          "step_id",
+          "index",
+          "title",
+          "state"
+        ],
+        "properties": {
+          "step_id": {
+            "type": "string"
+          },
+          "index": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "done",
+              "active",
+              "waiting",
+              "pending",
+              "failed",
+              "skipped"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "note": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ToolCall": {
+        "type": "object",
+        "required": [
+          "tool_call_id",
+          "capability",
+          "state"
+        ],
+        "properties": {
+          "tool_call_id": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string"
+          },
+          "args_summary": {
+            "type": "string",
+            "description": "规范化、脱敏后的参数摘要（用于复述与审计）"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "awaiting_approval",
+              "running",
+              "succeeded",
+              "failed",
+              "outcome_unknown",
+              "denied"
+            ]
+          },
+          "robot_task_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "requested_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "evidence": {
+            "type": "string",
+            "nullable": true,
+            "description": "结论依据；「模型说完成了」不构成证据"
+          }
+        }
+      },
+      "RunResult": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed",
+              "cancelled",
+              "interrupted",
+              "outcome_unknown",
+              "in_progress"
+            ],
+            "description": "`outcome_unknown` 只在「工具已发出、结果未确认」时出现。\n它与 `failed` 不同：不能当作未执行而重试。\n"
+          },
+          "completed_steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "incomplete_steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "robot_task_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RunPage": {
+        "type": "object",
+        "required": [
+          "ok",
+          "runs",
+          "next_cursor"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunSummary"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "StopResult": {
+        "type": "object",
+        "required": [
+          "ok",
+          "cancelled_run_id",
+          "body_stop",
+          "at"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "cancelled_run_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "cancelled_approvals": {
+            "type": "integer"
+          },
+          "revoked_authorizations": {
+            "type": "integer"
+          },
+          "body_stop": {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "requested",
+                  "confirmed",
+                  "unknown",
+                  "not_applicable"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "board_ack": {
+                "type": "boolean",
+                "nullable": true
+              }
+            }
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EventView": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "cursor",
+          "type",
+          "severity",
+          "occurred_at",
+          "title",
+          "summary"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "稳定事件类型，如 run.accepted"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "description": "确定性中文标题（模板生成，不调用模型）"
+          },
+          "summary": {
+            "type": "string",
+            "description": "确定性中文摘要（模板生成）；总是有值"
+          },
+          "impact": {
+            "type": "string",
+            "nullable": true,
+            "description": "影响什么"
+          },
+          "advice": {
+            "type": "string",
+            "nullable": true,
+            "description": "可以做什么"
+          },
+          "recovered": {
+            "type": "boolean",
+            "description": "这是否是一条「已恢复」事件"
+          },
+          "recovery_of": {
+            "type": "string",
+            "nullable": true
+          },
+          "run_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "session_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "approval_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "robot_task_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          },
+          "data": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true,
+            "description": "脱敏结构化证据，只在「展开详情」时取；键名由事件类型决定，值必须是可序列化的原始类型"
+          }
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "required": [
+          "ok",
+          "events",
+          "next_cursor"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventView"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true
+          },
+          "head_cursor": {
+            "type": "string",
+            "description": "当前最新游标；用于「有 N 条新事件」提示"
+          },
+          "gap": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "ModelProfileDraft": {
+        "type": "object",
+        "required": [
+          "name",
+          "provider",
+          "endpoint",
+          "model"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "openai_compatible"
+            ],
+            "description": "只列已实现的适配器"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "必须是 http(s) URL，不含内嵌凭证"
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "credential": {
+            "type": "string",
+            "description": "只写字段；服务端只存引用，永不回显"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "minimal",
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "max_output_tokens": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "request_timeout_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 600000
+          },
+          "budget_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "nullable": true
+          },
+          "data_boundary": {
+            "type": "string",
+            "enum": [
+              "local_only"
+            ],
+            "description": "首版只允许 local_only；云端需先单独记录数据边界决策"
+          }
+        }
+      },
+      "ModelProfileUpdate": {
+        "type": "object",
+        "required": [
+          "base_revision"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "base_revision": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "credential": {
+            "type": "string"
+          },
+          "clear_credential": {
+            "type": "boolean"
+          },
+          "reasoning_effort": {
+            "type": "string"
+          },
+          "max_output_tokens": {
+            "type": "integer"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "request_timeout_ms": {
+            "type": "integer"
+          },
+          "budget_tokens": {
+            "type": "integer",
+            "nullable": true
+          },
+          "data_boundary": {
+            "type": "string"
+          }
+        }
+      },
+      "ModelProfile": {
+        "type": "object",
+        "required": [
+          "profile_id",
+          "name",
+          "latest_revision",
+          "active"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "latest_revision": {
+            "type": "integer"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "active_revision": {
+            "type": "integer",
+            "nullable": true
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ModelProfileList": {
+        "type": "object",
+        "required": [
+          "ok",
+          "profiles",
+          "active_profile_id"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelProfile"
+            }
+          },
+          "active_profile_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "external_model_open": {
+            "type": "boolean",
+            "description": "首版恒为 false：外部模型未开放"
+          }
+        }
+      },
+      "ModelProfileDetail": {
+        "type": "object",
+        "required": [
+          "ok",
+          "profile",
+          "revisions"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/ModelProfile"
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelRevision"
+            }
+          }
+        }
+      },
+      "ModelRevision": {
+        "type": "object",
+        "required": [
+          "revision",
+          "provider",
+          "endpoint",
+          "model",
+          "created_at"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "credential_set": {
+            "type": "boolean",
+            "description": "只报「已设置/未设置」，绝不返回值本身"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "nullable": true
+          },
+          "max_output_tokens": {
+            "type": "integer",
+            "nullable": true
+          },
+          "temperature": {
+            "type": "number",
+            "nullable": true
+          },
+          "request_timeout_ms": {
+            "type": "integer",
+            "nullable": true
+          },
+          "budget_tokens": {
+            "type": "integer",
+            "nullable": true
+          },
+          "data_boundary": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/ValidationSummary"
+          }
+        }
+      },
+      "ValidationSummary": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "compatible",
+              "incompatible",
+              "not_run",
+              "stale"
+            ]
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "adapter_version": {
+            "type": "string"
+          },
+          "harness_version": {
+            "type": "string"
+          },
+          "config_fingerprint": {
+            "type": "string",
+            "description": "任一项变化即让验证变 stale"
+          }
+        }
+      },
+      "ValidationReport": {
+        "type": "object",
+        "required": [
+          "ok",
+          "verdict",
+          "checks",
+          "checked_at"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "compatible",
+              "incompatible"
+            ]
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "config_fingerprint": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "label",
+                "state"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "enum": [
+                    "connect",
+                    "auth",
+                    "model_exists",
+                    "streaming",
+                    "tool_call",
+                    "cancel",
+                    "harness_bridge"
+                  ]
+                },
+                "label": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "pass",
+                    "fail",
+                    "skip",
+                    "warn"
+                  ]
+                },
+                "detail": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "duration_ms": {
+                  "type": "integer"
+                },
+                "required": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "note": {
+            "type": "string",
+            "description": "结论解释；HTTP 200 不等于可用，这里会写明"
+          }
+        }
+      },
+      "Approval": {
+        "type": "object",
+        "required": [
+          "approval_id",
+          "capability",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "approval_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "tool_call_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "capability": {
+            "type": "string"
+          },
+          "args_summary": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "persisted",
+              "announced",
+              "waiting",
+              "approved",
+              "denied",
+              "expired",
+              "cancelled"
+            ]
+          },
+          "prompt_text": {
+            "type": "string",
+            "description": "系统播报的复述文本，与语音确认窗口绑定"
+          },
+          "window_opens_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "window_closes_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "decided_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "decided_by": {
+            "type": "string",
+            "enum": [
+              "voice",
+              "timeout",
+              "cancel",
+              "manual_test",
+              "system"
+            ],
+            "nullable": true
+          },
+          "authorization": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "scope": {
+                "type": "string"
+              },
+              "expires_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "consumed": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "ApprovalList": {
+        "type": "object",
+        "required": [
+          "ok",
+          "approvals",
+          "manual_approve_enabled"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "approvals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Approval"
+            }
+          },
+          "manual_approve_enabled": {
+            "type": "boolean",
+            "description": "true 表示当前是显式测试模式；生产运行必须是 false"
+          }
+        }
+      }
+    }
+  }
+}

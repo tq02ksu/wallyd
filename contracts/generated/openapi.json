@@ -1,0 +1,1616 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "wallyd robotd API",
+    "version": "1.0.0",
+    "description": "robotd 的对外契约。HTTP 用于控制与查询，`GET /v1/events` 升级为 WebSocket 后用于事件订阅。\n标记为 `debug` 的端点只在 robotd 以 `--debug` 启动时开放，不进 MCP 工具面。\n"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8787",
+      "description": "本机回环；端口以运行时配置为准"
+    }
+  ],
+  "x-robotd-errors": {
+    "E_VALIDATION": "输入校验失败（400）",
+    "E_BUSY": "已有排他任务在跑（409）",
+    "E_NO_TASK": "任务不存在（404）",
+    "E_NOT_FOUND": "路由不存在（404）",
+    "E_APPROVAL": "缺少审批（403）",
+    "E_DEBUG_OFF": "调试旁路未开启（403）",
+    "E_UNAVAILABLE": "能力未配置或未就绪（503）",
+    "E_STATE": "当前状态不允许该操作（409）",
+    "E_TIMEOUT": "板侧/模型/桥超时（504）",
+    "E_LINK": "板侧链路不可用（503）",
+    "E_BOARD": "板侧拒绝（5xx，保留板侧码见 details.board_code）",
+    "E_HW": "可观测硬件故障（500，只能由硬件信号产生）",
+    "E_MODEL_DOWN": "modeld 不可用（503）",
+    "E_MODEL_TIMEOUT": "模型推理超时（504）",
+    "E_AUDIO": "音频桥不可用（503）",
+    "E_CAM": "相机采集失败（503）",
+    "E_INTERNAL": "未分类内部故障（500）"
+  },
+  "tags": [
+    {
+      "name": "robot",
+      "description": "机器人状态与控制"
+    },
+    {
+      "name": "speech",
+      "description": "语音输入与输出"
+    },
+    {
+      "name": "tasks",
+      "description": "任务查询与取消"
+    },
+    {
+      "name": "events",
+      "description": "WebSocket 事件订阅"
+    },
+    {
+      "name": "debug",
+      "description": "调试/维护旁路，需 --debug，不进 Agent 工具面"
+    }
+  ],
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "operationId": "robot_health",
+        "tags": [
+          "robot"
+        ],
+        "summary": "服务存活与版本信息",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/robot/state": {
+      "get": {
+        "operationId": "robot_state",
+        "tags": [
+          "robot"
+        ],
+        "summary": "机器人整体状态快照",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RobotState"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/robot/odometry/calibration": {
+      "get": {
+        "operationId": "robot_calibration_get",
+        "tags": [
+          "robot"
+        ],
+        "summary": "读取当前标定参数（steps_per_m / wheelbase_mm）与生效层",
+        "description": "标定值归属与下发见 ADR-0002：`steps_per_m` / `wheelbase_mm` 由 robotd 掌握并下发给板侧，\n改参数**不需要重刷固件**。返回 `source` 表示当前值来自默认、板侧回读还是 host 覆盖。\n",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Calibration"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "robot_calibration_set",
+        "x-requires-approval": true,
+        "tags": [
+          "robot"
+        ],
+        "summary": "设置标定参数并下发到板侧（无需重刷固件）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CalibrationUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Calibration"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数越界或板侧拒绝",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/robot/speak": {
+      "post": {
+        "operationId": "robot_speak",
+        "x-requires-approval": true,
+        "tags": [
+          "robot"
+        ],
+        "summary": "请求机器人播报",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpeakRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已受理",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAccepted"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "已有任务在跑",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/state": {
+      "get": {
+        "operationId": "audio_state",
+        "tags": [
+          "audio"
+        ],
+        "summary": "音频现状（常听开关 / 识别状态 / 本底门限 / 最近一句），识别结果经 /v1/events 事件流实时推送",
+        "responses": {
+          "200": {
+            "description": "音频现状快照",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioState"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "音频桥不可用（未配置或已退出）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/mute": {
+      "post": {
+        "operationId": "audio_mute",
+        "tags": [
+          "audio"
+        ],
+        "summary": "暂停常听（不产生 utterance、不跑 ASR）",
+        "responses": {
+          "200": {
+            "description": "已切换",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioState"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "音频桥不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/unmute": {
+      "post": {
+        "operationId": "audio_unmute",
+        "tags": [
+          "audio"
+        ],
+        "summary": "恢复常听",
+        "responses": {
+          "200": {
+            "description": "已切换",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioState"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "音频桥不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/speech/listen": {
+      "post": {
+        "operationId": "speech_listen",
+        "tags": [
+          "speech"
+        ],
+        "summary": "开始流式听音（默认说完自动收尾），识别结果经 /v1/events 推送",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已受理",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAccepted"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "已有任务在跑",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/robot/follow": {
+      "post": {
+        "operationId": "robot_follow",
+        "x-requires-approval": true,
+        "tags": [
+          "robot"
+        ],
+        "summary": "跟随目标人物",
+        "description": "机器人语义能力：调用方表达「跟随哪个目标」，robotd 负责目标跟踪、跟随控制、运动任务与安全停止。\n不是通用自然语言接口，不保证是无人看护安全的自主行驶。\n**目标绑定来源必须唯一**：给 `target_track_id` 就只跟这条 track；只给 `target` 时是语义描述，\n需要机器人自行确定目标，歧义时由调用方澄清而非机器人私自切换。\n目标丢失、观测过期、相机/链路故障时**停止并提交明确终态**，默认不自动旋转搜索。\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FollowRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已受理",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "目标不可确定或参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "已有排他任务在跑",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "跟踪能力未就绪（相机不可用 / 检测后端未启用）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/robot/stop": {
+      "post": {
+        "operationId": "robot_stop",
+        "tags": [
+          "robot"
+        ],
+        "summary": "立即停止运动，幂等可抢占",
+        "description": "有序软件停止：无 task id、无需审批、幂等、可抢占普通运动任务。**不是硬件急停**，\n不保证断开驱动使能。响应只表示访问已受理，**不表示物理静止**（板侧应答 ≠ 物理静止证明）。\n是否连带取消语音/音频任务见 `x-cancels`。超时未收到板侧应答时返回 504/E_TIMEOUT，\n调用方不得据此认为机器人仍在运动。\n",
+        "x-cancels": [
+          "motion",
+          "speech"
+        ],
+        "responses": {
+          "200": {
+            "description": "已受理停止",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "stopped",
+                    "at"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "stopped": {
+                      "type": "boolean",
+                      "description": "本进程侧是否已发出停止（不代表板侧已处理，更不代表物理静止）"
+                    },
+                    "at": {
+                      "type": "integer",
+                      "description": "受理时间，Unix epoch 毫秒"
+                    },
+                    "board_ack": {
+                      "type": "boolean",
+                      "nullable": true,
+                      "description": "是否收到板侧 stop 应答；未收到为 false（此时应报 504，不返回 200）"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "板侧未在时限内应答（不表示未执行）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks": {
+      "get": {
+        "operationId": "task_list",
+        "tags": [
+          "tasks"
+        ],
+        "summary": "列出任务（可按状态过滤）",
+        "description": "只读快照；不按时间淘汰，反映内核任务表当前内容。",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "accepted",
+                "running",
+                "completed",
+                "failed",
+                "cancelled"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "tasks"
+                  ],
+                  "properties": {
+                    "tasks": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Task"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tasks/{task_id}": {
+      "get": {
+        "operationId": "task_get",
+        "tags": [
+          "tasks"
+        ],
+        "summary": "查询任务状态",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Task"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "无此任务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "task_cancel",
+        "tags": [
+          "tasks"
+        ],
+        "summary": "取消指定任务",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Task"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "无此任务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "events_subscribe",
+        "tags": [
+          "events"
+        ],
+        "summary": "WebSocket 事件订阅端点",
+        "description": "普通 GET 升级为 WebSocket。消息全部是 UTF-8 JSON 文本帧，形状见\n`#/components/schemas/WsServerMessage` 与 `#/components/schemas/WsClientMessage`。\n\n服务端连接后**先发** `hello`（含每次进程启动生成的 `instance_id`），客户端发 `subscribe`\n后服务端回 `subscription.accepted`，随后发 `state.snapshot`（含 `event_seq` 游标），\n再按序发 `seq > event_seq` 的匹配事件。服务端在捕获快照游标的那一刻开始缓冲，\n因此快照与增量之间不存在竞态。\n\n`resume_from_seq` 仅在 `instance_id` 相同且保留日志仍覆盖该游标时有效；否则服务端发\n`resync_required`，客户端必须重拉 `/v1/robot/state`。补发是有限日志上的尽力而为，\n不是持久事件存储。经过滤的订阅看不到某些全局 `seq` **不代表丢包**。\n",
+        "x-websocket": true,
+        "parameters": [
+          {
+            "name": "types",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "逗号分隔的初始订阅类型，例如 `task.*,speech.*`"
+          },
+          {
+            "name": "resume_from_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "instance_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "与 `resume_from_seq` 配套；不一致时服务端忽略补发并发 `resync_required`"
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols"
+          }
+        }
+      }
+    },
+    "/v1/debug/serial": {
+      "post": {
+        "operationId": "debug_serial",
+        "tags": [
+          "debug"
+        ],
+        "summary": "直发板侧 op（接线核对、钉电平、脉冲、ENA）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "op"
+                ],
+                "properties": {
+                  "op": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "object"
+                  },
+                  "timeout": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "403": {
+            "description": "调试旁路未开启"
+          }
+        }
+      }
+    },
+    "/v1/debug/state": {
+      "get": {
+        "operationId": "debug_state",
+        "tags": [
+          "debug"
+        ],
+        "summary": "debug 界面读取运行时原始状态",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "403": {
+            "description": "调试旁路未开启"
+          }
+        }
+      }
+    },
+    "/v1/debug/events": {
+      "get": {
+        "operationId": "debug_events",
+        "tags": [
+          "debug"
+        ],
+        "summary": "debug 界面读取最近事件（保留窗口内）",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "403": {
+            "description": "调试旁路未开启"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "required": [
+          "ok",
+          "service",
+          "version",
+          "instance_id"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "service": {
+            "type": "string",
+            "enum": [
+              "robotd"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "description": "服务实现版本（robotd 契约主版本）"
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "本次进程启动实例标识；重启后必变，用于识别事件序号断代"
+          },
+          "protocol": {
+            "type": "integer",
+            "description": "板侧线协议版本（当前 2）"
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "sim",
+              "serial"
+            ]
+          },
+          "esp32": {
+            "type": "string",
+            "description": "板侧可观测性，取值同 DeviceStatus"
+          },
+          "mode": {
+            "type": "string",
+            "description": "与 RobotState.mode 同一推导函数"
+          },
+          "pid": {
+            "type": "integer"
+          }
+        }
+      },
+      "RobotState": {
+        "type": "object",
+        "description": "机器人整体状态的**单次一致性视图**。调用方不得拆成多个查询再拼接。\n本节所有字段只有 robotd 一个权威快照；写入由事件归并路径完成，传输 handler 只读。\n",
+        "required": [
+          "robot_id",
+          "version",
+          "mode",
+          "pose",
+          "odometry",
+          "devices",
+          "battery",
+          "task_id",
+          "ts",
+          "event_seq"
+        ],
+        "properties": {
+          "robot_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "description": "状态 schema 版本（当前 1）"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/RobotMode"
+          },
+          "pose": {
+            "$ref": "#/components/schemas/Pose"
+          },
+          "odometry": {
+            "$ref": "#/components/schemas/Odometry"
+          },
+          "devices": {
+            "$ref": "#/components/schemas/Devices"
+          },
+          "battery": {
+            "$ref": "#/components/schemas/Battery"
+          },
+          "task_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "当前独占运动任务 id；无活动任务为 null"
+          },
+          "firmware": {
+            "type": "string",
+            "nullable": true,
+            "description": "最近握手得到的固件标识；未知为 null"
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "sim",
+              "serial"
+            ]
+          },
+          "ts": {
+            "type": "integer",
+            "description": "快照生成时间，Unix epoch 毫秒"
+          },
+          "event_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "**快照游标**：生成该快照时已提交的全局事件序号。WS 订阅以此为边界，\n只接收 `seq > event_seq` 的增量。与快照在同一事件归并序列中读取，不单独产生。\n"
+          }
+        }
+      },
+      "RobotMode": {
+        "type": "string",
+        "description": "由 robotd 根据设备链路状态与任务状态**统一推导**（单一 derive_mode）：\n链路不可用 → degraded；存在排他运动任务 → moving；否则 idle。\n调用方不得自行合成该字段。\n",
+        "enum": [
+          "idle",
+          "moving",
+          "degraded"
+        ]
+      },
+      "Pose": {
+        "type": "object",
+        "description": "robotd 里程积分估计。坐标系固定为右手机器人系：x 向前、y 向左、theta 逆时针为正。\n单位为米与弧度（不是度）。**板侧复位使来源失效时必须把 valid 置 false**，\n在重新回零/标定前位姿不可当作事实使用。\n",
+        "required": [
+          "x",
+          "y",
+          "theta",
+          "valid"
+        ],
+        "properties": {
+          "x": {
+            "type": "number",
+            "description": "米"
+          },
+          "y": {
+            "type": "number",
+            "description": "米"
+          },
+          "theta": {
+            "type": "number",
+            "description": "弧度；范围不做折叠，调用方自行归一化"
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "false = 位姿来源已失效（板复位 / 标定变更 / 未回零）"
+          }
+        }
+      },
+      "Devices": {
+        "type": "object",
+        "description": "robotd 对设备可观测性的归一化状态。**未探测时必须是 `unknown`**，\n不得把未知改报成 `absent` 或 `ready`。\n",
+        "required": [
+          "esp32",
+          "camera"
+        ],
+        "properties": {
+          "esp32": {
+            "$ref": "#/components/schemas/DeviceStatus"
+          },
+          "camera": {
+            "$ref": "#/components/schemas/DeviceStatus"
+          },
+          "audio": {
+            "$ref": "#/components/schemas/DeviceStatus"
+          },
+          "pump": {
+            "type": "string",
+            "enum": [
+              "on",
+              "off",
+              "unknown"
+            ],
+            "description": "水泵执行器状态；未接线时保持 unknown，不臆造 off"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeviceStatus": {
+        "type": "string",
+        "description": "`unknown` 未探测；`starting` 正在握手；`ready` 可用；`absent` 确认不存在；\n`error` 探测到但不可用；`lost` 曾就绪后失联。\n",
+        "enum": [
+          "unknown",
+          "starting",
+          "ready",
+          "absent",
+          "error",
+          "lost"
+        ]
+      },
+      "Battery": {
+        "type": "object",
+        "description": "未接 BMS 时必须 `source: unimplemented` 且测量值为 null，**不得估算或伪造**。\n",
+        "required": [
+          "source",
+          "voltage",
+          "percent"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "bms",
+              "unimplemented"
+            ]
+          },
+          "voltage": {
+            "type": "number",
+            "nullable": true,
+            "description": "伏特；无权威源时为 null"
+          },
+          "percent": {
+            "type": "number",
+            "nullable": true,
+            "description": "0–100；无权威源时为 null"
+          }
+        }
+      },
+      "Odometry": {
+        "type": "object",
+        "description": "里程与丢步观测（归属见 ADR-0002：板侧如实上报「应发/实走」，robotd 做判断）。\n`*_commanded` 是固件发出的脉冲数（应发），`*_actual_encoder` 是编码器测得的脉数（实走）。\n**应发步数不是实际位移证明**；两者差异即开环步进的丢步量。\n未装编码器时 `*_actual_encoder` 与 `slip_ratio` 必须为 null，不得用应发值顶替。\n",
+        "required": [
+          "source",
+          "left_commanded",
+          "right_commanded"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "open_loop",
+              "encoder"
+            ]
+          },
+          "left_commanded": {
+            "type": "integer",
+            "description": "左轮累计应发脉冲数（固件计数）"
+          },
+          "right_commanded": {
+            "type": "integer",
+            "description": "右轮累计应发脉冲数（固件计数）"
+          },
+          "left_actual_encoder": {
+            "type": "integer",
+            "nullable": true,
+            "description": "左轮累计编码器计数（未装编码器时为 null）"
+          },
+          "right_actual_encoder": {
+            "type": "integer",
+            "nullable": true,
+            "description": "右轮累计编码器计数（未装编码器时为 null）"
+          },
+          "slip_ratio": {
+            "type": "number",
+            "nullable": true,
+            "description": "丢步比 = |应发 − 实走| / 应发；由 robotd 计算，超阈值触发告警/重走"
+          },
+          "ts": {
+            "type": "integer",
+            "description": "Unix epoch 毫秒"
+          }
+        }
+      },
+      "Calibration": {
+        "type": "object",
+        "required": [
+          "steps_per_m",
+          "wheelbase_mm",
+          "source",
+          "ts"
+        ],
+        "description": "标定值权威在 robotd（ADR-0002）。`source` 表示当前生效值来自哪一层：\n`default` 固件默认、`board` 板侧持久化回读、`host` 本次运行 host 覆盖。\n`persisted` 表示板侧是否已写盘；写盘失败不改运行时值，必须如实报 false。\n",
+        "properties": {
+          "steps_per_m": {
+            "type": "number",
+            "description": "每米脉冲数（轮径 × 细分推导），决定「走 1 米」发多少脉冲"
+          },
+          "wheelbase_mm": {
+            "type": "number",
+            "description": "轮距（毫米），差速转向解算用；**不是米**"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "default",
+              "board",
+              "host"
+            ]
+          },
+          "persisted": {
+            "type": "boolean",
+            "description": "板侧是否已持久化（掉电保留）；仅本次运行有效时为 false"
+          },
+          "applied_at": {
+            "type": "integer",
+            "nullable": true,
+            "description": "最近一次成功下发的 Unix epoch 毫秒；从未下发为 null"
+          },
+          "ts": {
+            "type": "integer"
+          }
+        }
+      },
+      "CalibrationUpdate": {
+        "type": "object",
+        "properties": {
+          "steps_per_m": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "wheelbase_mm": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "persist": {
+            "type": "boolean",
+            "default": false,
+            "description": "是否要求板侧持久化（掉电保留）；默认仅本次运行有效"
+          }
+        }
+      },
+      "SpeakRequest": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "voice": {
+            "type": "string"
+          },
+          "rate": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 1
+          },
+          "interruptible": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "ListenRequest": {
+        "type": "object",
+        "properties": {
+          "max_seconds": {
+            "type": "number",
+            "minimum": 5,
+            "maximum": 1800,
+            "default": 300
+          },
+          "locale": {
+            "type": "string",
+            "default": "zh_CN"
+          },
+          "auto_endpoint": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "FollowRequest": {
+        "type": "object",
+        "description": "目标绑定来源二选一，至少给一个：\n- `target_track_id`：跟某条已存在的 track（唯一、无歧义，优先使用）；\n- `target`：语义描述，需要 robotd 自行确定目标；歧义时应失败并让调用方澄清，\n  **不得私自切换成画面内另一个人**。\n两个都给时以 `target_track_id` 为准。\n",
+        "properties": {
+          "target_track_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "已存在的 track id；过期或不存在时返回 400/E_VALIDATION"
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40,
+            "description": "语义目标（如「人」）；仅在没有 target_track_id 时使用"
+          },
+          "max_speed_mps": {
+            "type": "number",
+            "minimum": 0.05,
+            "maximum": 0.4,
+            "default": 0.15,
+            "description": "跟随速度上限（米/秒）。上限是**安全边界**，实现不得自行放宽"
+          },
+          "stop_width_ratio": {
+            "type": "number",
+            "minimum": 0.05,
+            "maximum": 0.95,
+            "description": "停止时的目标框宽度占比。**这是几何代理量，不是米制距离**；\n单目框大小不能冒充可靠测距。\n"
+          },
+          "max_seconds": {
+            "type": "number",
+            "minimum": 5,
+            "maximum": 300,
+            "default": 120,
+            "description": "任务硬时限；到期停止并提交 cancelled/failed 终态"
+          }
+        }
+      },
+      "TaskAccepted": {
+        "type": "object",
+        "description": "受理响应。**accepted 不代表已经开始运动**；进度与终态通过任务查询与事件流获取。\n",
+        "required": [
+          "task_id",
+          "status"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted"
+            ]
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "降级/限制说明；不影响受理语义，但调用方应读"
+          }
+        }
+      },
+      "Task": {
+        "type": "object",
+        "description": "任务生命周期：`accepted → running → completed | failed | cancelled`。\n终态不可再转移；任务仅在当前进程生命周期内可查询（不持久化）。\n",
+        "required": [
+          "task_id",
+          "capability",
+          "state",
+          "progress",
+          "started_at",
+          "cancelable"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string",
+            "description": "触发该任务的能力名（与 operationId 对应）"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TaskState"
+          },
+          "progress": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "0–1；未知进度时保持 0，不得编造"
+          },
+          "started_at": {
+            "type": "integer",
+            "description": "Unix epoch 毫秒"
+          },
+          "finished_at": {
+            "type": "integer",
+            "nullable": true,
+            "description": "终态时间，Unix epoch 毫秒；未结束为 null"
+          },
+          "cancelable": {
+            "type": "boolean"
+          },
+          "exclusivity": {
+            "type": "string",
+            "enum": [
+              "motion",
+              "soft"
+            ],
+            "description": "`motion` 为独占运动任务（同一时刻仅一个）；`soft` 为语音等非运动任务，\n按类别去重但可与运动任务并存。\n"
+          },
+          "error": {
+            "description": "稳定错误码；未失败的任务该字段为 null（见 TaskError）。",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TaskError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "TaskState": {
+        "type": "string",
+        "enum": [
+          "accepted",
+          "running",
+          "completed",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "TaskError": {
+        "type": "object",
+        "description": "稳定错误码，调用方按码分支，**不得解析 message 猜原因**。\n",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "见 `x-robotd-errors`"
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "ok",
+          "error"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "$ref": "#/components/schemas/TaskError"
+          }
+        }
+      },
+      "AudioState": {
+        "type": "object",
+        "description": "常听（always_on）音频现状。识别结果本身走事件流（`speech.*`），本快照只给状态。\n未接麦克风 / 未授权 / 桥退出时必须显式体现，不得伪装成「在听但没说话」。\n",
+        "required": [
+          "mode",
+          "muted",
+          "speaking",
+          "bridge"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "always_on"
+            ],
+            "description": "当前实现只有常听一种模式"
+          },
+          "muted": {
+            "type": "boolean",
+            "description": "true = 常听已暂停（不产生 utterance、不跑 ASR）"
+          },
+          "speaking": {
+            "type": "boolean",
+            "description": "当前是否有语音活动"
+          },
+          "bridge": {
+            "$ref": "#/components/schemas/DeviceStatus"
+          },
+          "calibrated": {
+            "type": "boolean",
+            "description": "本底噪声是否已校准"
+          },
+          "partial": {
+            "type": "string",
+            "nullable": true,
+            "description": "当前未定稿的识别文本；无则 null"
+          },
+          "last_final": {
+            "type": "string",
+            "nullable": true,
+            "description": "最近一句定稿文本；无则 null"
+          },
+          "ambient_db": {
+            "type": "number",
+            "nullable": true,
+            "description": "本底噪声（dBFS）；未测量为 null，**不填估算值**"
+          },
+          "speech_db": {
+            "type": "number",
+            "nullable": true
+          },
+          "silence_db": {
+            "type": "number",
+            "nullable": true
+          },
+          "mic_format": {
+            "type": "string",
+            "description": "采集格式描述（如 `48000/1ch/float32`）；未知为空串"
+          },
+          "ts": {
+            "type": "integer"
+          }
+        }
+      },
+      "WsServerMessage": {
+        "description": "服务端 → 客户端（UTF-8 JSON 文本帧），按 `type` 区分",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WsHello"
+          },
+          {
+            "$ref": "#/components/schemas/WsSubscriptionAccepted"
+          },
+          {
+            "$ref": "#/components/schemas/WsStateSnapshot"
+          },
+          {
+            "$ref": "#/components/schemas/WsEvent"
+          },
+          {
+            "$ref": "#/components/schemas/WsResyncRequired"
+          },
+          {
+            "$ref": "#/components/schemas/WsPong"
+          }
+        ]
+      },
+      "WsHello": {
+        "type": "object",
+        "required": [
+          "type",
+          "version",
+          "server",
+          "instance_id",
+          "last_seq",
+          "supported_event_types"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "hello"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "server": {
+            "type": "string",
+            "enum": [
+              "robotd"
+            ]
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "每次进程启动生成；用于识别 seq 断代"
+          },
+          "last_seq": {
+            "type": "integer",
+            "description": "当前最新全局事件序号"
+          },
+          "supported_event_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "支持订阅的事件类型（精确名或 `prefix.*`）"
+          },
+          "replay_window": {
+            "type": "integer",
+            "description": "保留日志条数上限；`resume_from_seq` 早于该窗口即触发 resync"
+          }
+        }
+      },
+      "WsSubscriptionAccepted": {
+        "type": "object",
+        "required": [
+          "type",
+          "subscription_id",
+          "event_types"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "subscription.accepted"
+            ]
+          },
+          "subscription_id": {
+            "type": "string"
+          },
+          "event_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "resume_from_seq": {
+            "type": "integer",
+            "nullable": true
+          }
+        }
+      },
+      "WsStateSnapshot": {
+        "type": "object",
+        "description": "初始快照控制帧。`event_seq` 与 `state.event_seq` 必须一致，作为后续增量的起点。\n",
+        "required": [
+          "type",
+          "version",
+          "event_seq",
+          "state"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "state.snapshot"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "event_seq": {
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RobotState"
+          }
+        }
+      },
+      "WsEvent": {
+        "type": "object",
+        "description": "事件封套。`seq` 在本实例运行期内严格递增；重启后可重新开始，靠 `instance_id` 识别。\n`timestamp` 为 UTC ISO 8601 毫秒精度。\n**内部字段（单调时钟、模型自检中间文本）不得出现在 payload 中。**\n",
+        "required": [
+          "version",
+          "type",
+          "event_id",
+          "seq",
+          "timestamp",
+          "payload"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "type": {
+            "type": "string",
+            "description": "事件名，必须是 `WsHello.supported_event_types` 可匹配的名字"
+          },
+          "event_id": {
+            "type": "string",
+            "description": "跨实例唯一，形如 `evt_<instance_id>_<seq>`"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "WsResyncRequired": {
+        "type": "object",
+        "description": "补发不可用（游标早于保留窗口 / instance_id 不一致 / 游标非法）。\n客户端必须重拉 `/v1/robot/state` 重建基线，**不得用部分事件自行修补状态**。\n",
+        "required": [
+          "type",
+          "reason"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "resync_required"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "instance_changed",
+              "cursor_expired",
+              "invalid_cursor"
+            ]
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "last_seq": {
+            "type": "integer"
+          },
+          "event_seq": {
+            "type": "integer",
+            "description": "附带的最新快照游标，便于客户端立即重建"
+          }
+        }
+      },
+      "WsPong": {
+        "type": "object",
+        "required": [
+          "type",
+          "seq"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "pong"
+            ]
+          },
+          "seq": {
+            "type": "integer"
+          }
+        }
+      },
+      "WsClientMessage": {
+        "description": "客户端 → 服务端",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "event_types"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "subscribe"
+                ]
+              },
+              "event_types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "精确事件名或 `prefix.*`；空数组合法（表示暂不订阅，仅取快照）"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "resume_from_seq": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "unsubscribe"
+                ]
+              },
+              "event_types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "省略 = 取消全部订阅"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ping"
+                ]
+              },
+              "nonce": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

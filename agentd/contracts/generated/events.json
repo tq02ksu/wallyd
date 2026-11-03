@@ -1,0 +1,773 @@
+{
+  "version": 1,
+  "source": "agentd/contracts/events.json",
+  "envelope": {
+    "required": [
+      "event_id",
+      "cursor",
+      "type",
+      "version",
+      "severity",
+      "occurred_at",
+      "received_at",
+      "source"
+    ],
+    "forbidden_payload_keys": [
+      "reasoning",
+      "chain_of_thought",
+      "private_thoughts",
+      "credential",
+      "api_key",
+      "authorization",
+      "token",
+      "raw_prompt",
+      "raw_transcript"
+    ],
+    "forbidden_payload_keys_reason": "模型私有思维链与任何凭证都不得进入事件库：事件库会被导出、被历史页面展示、被审计阅读。"
+  },
+  "retention": {
+    "semantic_events_days": 90,
+    "audit_days": 365,
+    "note": "语义事件与审计分开配置。清理必须给出时间范围与保留边界，不能让用户误以为历史无限完整。"
+  },
+  "severity_labels": {
+    "info": "正常",
+    "warning": "需要注意",
+    "error": "故障"
+  },
+  "registered_types": [
+    "approval.resolved",
+    "approval.unavailable",
+    "approval.waiting",
+    "daemon.recovered",
+    "daemon.started",
+    "dependency.recovered",
+    "dependency.unavailable",
+    "model.activated",
+    "model.activation_failed",
+    "model.validated",
+    "model.validation_failed",
+    "observation.gap",
+    "route.clarify",
+    "route.matched",
+    "run.accepted",
+    "run.cancelled",
+    "run.duplicate",
+    "run.finished",
+    "run.step_changed",
+    "run.waiting_confirmation",
+    "run.waiting_input",
+    "safety.stop_requested",
+    "speech.audio_recovered",
+    "speech.audio_unavailable",
+    "speech.no_speech",
+    "speech.speak_cancelled",
+    "speech.spoken",
+    "speech.utterance_heard",
+    "store.recovered",
+    "store.unwritable",
+    "tool.failed",
+    "tool.outcome_unknown",
+    "tool.requested",
+    "tool.succeeded"
+  ],
+  "categories": [
+    "approval",
+    "daemon",
+    "dependency",
+    "model",
+    "observation",
+    "route",
+    "run",
+    "safety",
+    "speech",
+    "store",
+    "tool"
+  ],
+  "templates": [
+    {
+      "type": "daemon.started",
+      "category": "daemon",
+      "severity": "info",
+      "title": "agentd 已启动",
+      "summary": "进程 {pid} 启动，契约版本 {contract_version}。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "pid",
+        "contract_version",
+        "recovered_runs"
+      ],
+      "required_fields": [
+        "pid",
+        "contract_version",
+        "recovered_runs"
+      ]
+    },
+    {
+      "type": "daemon.recovered",
+      "category": "daemon",
+      "severity": "warning",
+      "title": "上次退出时有未完成的任务",
+      "summary": "{interrupted_runs} 个任务被标记为中断；旧审批已作废，不会自动恢复执行。",
+      "impact": null,
+      "advice": "需要继续的话，请新建任务并重新确认。",
+      "is_recovery": false,
+      "payload_fields": [
+        "interrupted_runs",
+        "cancelled_approvals"
+      ],
+      "required_fields": [
+        "interrupted_runs",
+        "cancelled_approvals"
+      ]
+    },
+    {
+      "type": "store.unwritable",
+      "category": "store",
+      "severity": "error",
+      "title": "历史库不可写",
+      "summary": "无法写入 {path}：{reason}。新的需要审批的动作已被拒绝。",
+      "impact": "任务与审批无法记录，因此不允许开始会产生后果的动作。",
+      "advice": "检查磁盘空间与目录权限。停止机器人不受影响，仍可直达使用。",
+      "is_recovery": false,
+      "payload_fields": [
+        "path",
+        "reason"
+      ],
+      "required_fields": [
+        "path",
+        "reason"
+      ]
+    },
+    {
+      "type": "store.recovered",
+      "category": "store",
+      "severity": "info",
+      "title": "历史库已恢复可写",
+      "summary": "写入恢复正常；此前的降级已结束。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": true,
+      "payload_fields": [
+        "path"
+      ],
+      "required_fields": [
+        "path"
+      ]
+    },
+    {
+      "type": "dependency.unavailable",
+      "category": "dependency",
+      "severity": "warning",
+      "title": "{dependency} 暂不可用",
+      "summary": "{reason}",
+      "impact": "{impact}",
+      "advice": "{advice}",
+      "is_recovery": false,
+      "payload_fields": [
+        "dependency",
+        "reason",
+        "impact",
+        "advice"
+      ],
+      "required_fields": [
+        "dependency",
+        "reason"
+      ]
+    },
+    {
+      "type": "dependency.recovered",
+      "category": "dependency",
+      "severity": "info",
+      "title": "{dependency} 已恢复",
+      "summary": "{detail}",
+      "impact": null,
+      "advice": null,
+      "is_recovery": true,
+      "payload_fields": [
+        "dependency",
+        "detail",
+        "gap_from"
+      ],
+      "required_fields": [
+        "dependency",
+        "detail"
+      ]
+    },
+    {
+      "type": "observation.gap",
+      "category": "observation",
+      "severity": "warning",
+      "title": "有一段时间的身体状态没有记录",
+      "summary": "{from} 到 {to} 期间与 {dependency} 的连接中断，这段历史不完整。",
+      "impact": "我们既不补齐也不编造这段时间发生了什么。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "dependency",
+        "from",
+        "to",
+        "reason"
+      ],
+      "required_fields": [
+        "dependency",
+        "from",
+        "to",
+        "reason"
+      ]
+    },
+    {
+      "type": "run.accepted",
+      "category": "run",
+      "severity": "info",
+      "title": "收到请求",
+      "summary": "「{prompt}」已受理，执行方式：{route_label}。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "prompt",
+        "route",
+        "source",
+        "fast_rule"
+      ],
+      "required_fields": [
+        "prompt",
+        "route",
+        "source"
+      ]
+    },
+    {
+      "type": "run.duplicate",
+      "category": "run",
+      "severity": "info",
+      "title": "重复的请求已忽略",
+      "summary": "同一请求已存在（{idempotency_key}），未重复执行。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "idempotency_key"
+      ],
+      "required_fields": [
+        "idempotency_key"
+      ]
+    },
+    {
+      "type": "run.waiting_input",
+      "category": "run",
+      "severity": "warning",
+      "title": "需要你补充信息",
+      "summary": "{question}",
+      "impact": null,
+      "advice": "补充后我会继续，不会先猜着执行。",
+      "is_recovery": false,
+      "payload_fields": [
+        "question"
+      ],
+      "required_fields": [
+        "question"
+      ]
+    },
+    {
+      "type": "run.step_changed",
+      "category": "run",
+      "severity": "info",
+      "title": "进行到：{step_title}",
+      "summary": "{step_title}（{state_label}）",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "step_id",
+        "step_title",
+        "state"
+      ],
+      "required_fields": [
+        "step_id",
+        "step_title",
+        "state"
+      ]
+    },
+    {
+      "type": "run.waiting_confirmation",
+      "category": "run",
+      "severity": "warning",
+      "title": "等待你确认「{action_label}」",
+      "summary": "已识别目标，机器人正在等待你明确确认。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "approval_id",
+        "action_label"
+      ],
+      "required_fields": [
+        "approval_id",
+        "action_label"
+      ]
+    },
+    {
+      "type": "run.finished",
+      "category": "run",
+      "severity": "info",
+      "title": "任务{outcome_label}",
+      "summary": "{detail}",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "outcome",
+        "detail",
+        "duration_ms"
+      ],
+      "required_fields": [
+        "outcome",
+        "detail"
+      ]
+    },
+    {
+      "type": "tool.requested",
+      "category": "tool",
+      "severity": "info",
+      "title": "请求执行：{action_label}",
+      "summary": "参数：{args_summary}",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "tool_call_id",
+        "capability",
+        "action_label",
+        "args_summary",
+        "requires_approval"
+      ],
+      "required_fields": [
+        "tool_call_id",
+        "capability",
+        "action_label",
+        "args_summary",
+        "requires_approval"
+      ]
+    },
+    {
+      "type": "tool.succeeded",
+      "category": "tool",
+      "severity": "info",
+      "title": "已执行：{action_label}",
+      "summary": "{detail}",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "tool_call_id",
+        "capability",
+        "action_label",
+        "robot_task_id",
+        "detail"
+      ],
+      "required_fields": [
+        "tool_call_id",
+        "capability",
+        "action_label"
+      ]
+    },
+    {
+      "type": "tool.failed",
+      "category": "tool",
+      "severity": "error",
+      "title": "执行失败：{action_label}",
+      "summary": "{detail}",
+      "impact": null,
+      "advice": "{advice}",
+      "is_recovery": false,
+      "payload_fields": [
+        "tool_call_id",
+        "capability",
+        "action_label",
+        "code",
+        "detail",
+        "advice"
+      ],
+      "required_fields": [
+        "tool_call_id",
+        "capability",
+        "action_label",
+        "detail"
+      ]
+    },
+    {
+      "type": "tool.outcome_unknown",
+      "category": "tool",
+      "severity": "error",
+      "title": "执行结果待确认：{action_label}",
+      "summary": "请求已发出，但没有收到确认结果（{reason}）。",
+      "impact": "不能当作「没有执行」。涉及运动时请确认机器人实际状态。",
+      "advice": "系统会先查询实际状态再决定，不会自动重新发送这个动作。",
+      "is_recovery": false,
+      "payload_fields": [
+        "tool_call_id",
+        "capability",
+        "action_label",
+        "robot_task_id",
+        "reason"
+      ],
+      "required_fields": [
+        "tool_call_id",
+        "capability",
+        "action_label",
+        "reason"
+      ]
+    },
+    {
+      "type": "approval.waiting",
+      "category": "approval",
+      "severity": "warning",
+      "title": "等待语音确认",
+      "summary": "需要确认：{action_label}。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "approval_id",
+        "action_label",
+        "args_summary",
+        "window_closes_at"
+      ],
+      "required_fields": [
+        "approval_id",
+        "action_label",
+        "args_summary"
+      ]
+    },
+    {
+      "type": "approval.resolved",
+      "category": "approval",
+      "severity": "info",
+      "title": "确认{decision_label}",
+      "summary": "{action_label}：{decision_label}（{decided_by}）。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "approval_id",
+        "action_label",
+        "status",
+        "decided_by"
+      ],
+      "required_fields": [
+        "approval_id",
+        "action_label",
+        "status",
+        "decided_by"
+      ]
+    },
+    {
+      "type": "approval.unavailable",
+      "category": "approval",
+      "severity": "error",
+      "title": "无法进行语音确认",
+      "summary": "{reason}。为了安全，需要确认的动作不会执行。",
+      "impact": null,
+      "advice": "检查语音输入是否可用；复杂任务仍可查看，但需要确认的动作会保持不可用。",
+      "is_recovery": false,
+      "payload_fields": [
+        "approval_id",
+        "reason",
+        "kind"
+      ],
+      "required_fields": [
+        "approval_id",
+        "reason",
+        "kind"
+      ]
+    },
+    {
+      "type": "safety.stop_requested",
+      "category": "safety",
+      "severity": "warning",
+      "title": "已请求停止机器人",
+      "summary": "停止请求已发出（{detail}）。",
+      "impact": "「已请求」不等于「已停稳」。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "state",
+        "detail",
+        "run_id"
+      ],
+      "required_fields": [
+        "state",
+        "detail"
+      ]
+    },
+    {
+      "type": "run.cancelled",
+      "category": "run",
+      "severity": "warning",
+      "title": "任务已取消",
+      "summary": "{reason}",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "reason",
+        "cancelled_approvals",
+        "body_stop"
+      ],
+      "required_fields": [
+        "reason"
+      ]
+    },
+    {
+      "type": "model.validation_failed",
+      "category": "model",
+      "severity": "warning",
+      "title": "高级模型未通过验证",
+      "summary": "{reason}",
+      "impact": null,
+      "advice": "在「高级模型」设置中重新测试连接。",
+      "is_recovery": false,
+      "payload_fields": [
+        "profile_id",
+        "revision",
+        "reason",
+        "failed_checks"
+      ],
+      "required_fields": [
+        "profile_id",
+        "revision",
+        "reason"
+      ]
+    },
+    {
+      "type": "model.validated",
+      "category": "model",
+      "severity": "info",
+      "title": "高级模型验证通过",
+      "summary": "{profile_name} v{revision} 通过全部必需检查（{duration_ms} ms）。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "profile_id",
+        "profile_name",
+        "revision",
+        "duration_ms"
+      ],
+      "required_fields": [
+        "profile_id",
+        "profile_name",
+        "revision"
+      ]
+    },
+    {
+      "type": "model.activated",
+      "category": "model",
+      "severity": "info",
+      "title": "高级模型已切换",
+      "summary": "默认配置改为 {profile_name} v{revision}；下一个任务生效。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "profile_id",
+        "profile_name",
+        "revision",
+        "previous_revision"
+      ],
+      "required_fields": [
+        "profile_id",
+        "profile_name",
+        "revision"
+      ]
+    },
+    {
+      "type": "model.activation_failed",
+      "category": "model",
+      "severity": "error",
+      "title": "切换高级模型失败",
+      "summary": "{reason}；仍在使用原配置。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "profile_id",
+        "revision",
+        "reason"
+      ],
+      "required_fields": [
+        "profile_id",
+        "revision",
+        "reason"
+      ]
+    },
+    {
+      "type": "route.matched",
+      "category": "route",
+      "severity": "info",
+      "title": "快速执行：{rule_title}",
+      "summary": "命中确定性规则 {rule_id} v{rule_version}，未调用高级模型。",
+      "impact": null,
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "rule_id",
+        "rule_version",
+        "rule_title",
+        "capability"
+      ],
+      "required_fields": [
+        "rule_id",
+        "rule_version",
+        "rule_title",
+        "capability"
+      ]
+    },
+    {
+      "type": "route.clarify",
+      "category": "route",
+      "severity": "warning",
+      "title": "没听明白要做什么",
+      "summary": "{reason}",
+      "impact": null,
+      "advice": "{advice}",
+      "is_recovery": false,
+      "payload_fields": [
+        "reason",
+        "advice"
+      ],
+      "required_fields": [
+        "reason"
+      ]
+    },
+    {
+      "type": "speech.utterance_heard",
+      "category": "speech",
+      "severity": "info",
+      "title": "听到一句话",
+      "summary": "用户说：「{excerpt}」（时长 {duration_ms} 毫秒）。",
+      "impact": "这是识别结果，不是确认过的意图；是否行动由路由决定。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "utterance_id",
+        "excerpt",
+        "chars",
+        "duration_ms",
+        "stop_reason",
+        "route_hint"
+      ],
+      "required_fields": [
+        "utterance_id",
+        "excerpt",
+        "chars"
+      ]
+    },
+    {
+      "type": "speech.no_speech",
+      "category": "speech",
+      "severity": "info",
+      "title": "这一轮没有听到说话",
+      "summary": "听音 {duration_ms} 毫秒，没有识别到有效语音（{stop_reason}）。",
+      "impact": "空结果如实记录，不当成「用户没吭声」以外的任何结论。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "utterance_id",
+        "stop_reason",
+        "duration_ms"
+      ],
+      "required_fields": [
+        "utterance_id",
+        "stop_reason"
+      ]
+    },
+    {
+      "type": "speech.audio_unavailable",
+      "category": "speech",
+      "severity": "error",
+      "title": "语音不可用",
+      "summary": "语音链路故障：{detail}",
+      "impact": "此时不能听音也不能播报；不把故障伪装成「在听但没说话」。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "detail",
+        "bridge"
+      ],
+      "required_fields": [
+        "detail"
+      ]
+    },
+    {
+      "type": "speech.audio_recovered",
+      "category": "speech",
+      "severity": "info",
+      "title": "语音已恢复",
+      "summary": "语音链路恢复可用（桥状态 {bridge}）。",
+      "impact": "恢复前的空档不会补记，历史照实留白。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "bridge"
+      ],
+      "required_fields": [
+        "bridge"
+      ]
+    },
+    {
+      "type": "speech.spoken",
+      "category": "speech",
+      "severity": "info",
+      "title": "已播报",
+      "summary": "播报了 {chunks} 句（实际播出 {played} 句）。",
+      "impact": "播完不等于用户听见或听懂了。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "response_id",
+        "chunks",
+        "played",
+        "excerpt"
+      ],
+      "required_fields": [
+        "response_id",
+        "chunks",
+        "played"
+      ]
+    },
+    {
+      "type": "speech.speak_cancelled",
+      "category": "speech",
+      "severity": "warning",
+      "title": "播报被打断",
+      "summary": "播报中断（{reason}），已播出 {played} 句。",
+      "impact": "用户可能只听到了一部分内容。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "response_id",
+        "reason",
+        "played"
+      ],
+      "required_fields": [
+        "response_id",
+        "reason",
+        "played"
+      ]
+    }
+  ],
+  "reserved_unimplemented": [
+    {
+      "type": "schedule.*",
+      "note": "持久日程与提醒（A21）；未实现前不注册、不展示"
+    },
+    {
+      "type": "memory.*",
+      "note": "经确认的长期记忆（A22）"
+    }
+  ]
+}

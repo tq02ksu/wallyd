@@ -1,0 +1,35 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.22"
+      - name: Install Node dependencies
+        run: |
+          npm ci
+          npm ci --prefix agentd
+      - name: Install Python dependencies
+        working-directory: robotd
+        run: uv sync --locked --extra dev --python 3.11
+      - name: Run gates
+        run: bash scripts/ci/run-gates.sh
+
