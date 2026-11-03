@@ -6,15 +6,12 @@ cd "$ROOT"
 
 required_files=(
   AGENTS.md
-  WORKFLOW.md
+  docs/project/architecture.md
+  docs/project/hardware-baseline.md
+  docs/project/robot-api.md
+  docs/project/device-protocol.md
   docs/architecture.md
-  docs/ai-coding-loop.md
-  docs/hardware-baseline.md
-  docs/robot-api.md
-  docs/device-protocol.md
-  docs/engineering-decisions.md
-  doc/architecture.md
-  doc/communication-protocol.md
+  docs/communication-protocol.md
   contracts/openapi.yaml
   agentd/contracts/openapi.yaml
   robotd/pyproject.toml
@@ -34,4 +31,3 @@ if git grep -n -E 'github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]+|BEGIN (RSA |OPENSSH
 fi
 
 printf 'Baseline validation passed\n'
-

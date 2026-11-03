@@ -1,7 +1,7 @@
 /**
  * SQLite 持久存储：agentd 的真相源（身体状态仍以 robotd 为准，这里只存只读观测）。
  *
- * 设计依据：doc/spec/agentd-functional-design.md §6.1–6.3、开发计划 A05。
+ * 设计依据：docs/spec/agentd-functional-design.md §6.1–6.3、开发计划 A05。
  *
  * ## 三条纪律
  *

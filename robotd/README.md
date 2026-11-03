@@ -12,7 +12,7 @@ Mac mini 移动机器人的**身体运行时**。本目录是 [ADR-0009](../doc/
 ## 装与跑
 
 ```bash
-cd projects/robot/robotd
+cd <wallyd-root>/robotd
 
 # 开发环境（先安装 uv；无需任何硬件）
 # 使用本目录 .venv，严格按已提交的 uv.lock 安装依赖

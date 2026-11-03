@@ -20,7 +20,7 @@ HTTP=${2:-8787}
 BOT=${BOT:-/Users/tq02ksu/workspace/bot}
 MODEL=${MINICPM_MODEL:-$BOT/models/MiniCPM-V-4.6-4bit}
 MODEL_PORT=${POC_MODEL_PORT:-8080}
-cd "$(dirname "$0")/.." || exit 1          # 项目根：projects/robot/
+cd "$(dirname "$0")/.." || exit 1          # 项目根：<wallyd-root>/
 
 ROBOTD_PY=robotd/.venv/bin/python
 [ -x "$ROBOTD_PY" ] || { echo "找不到 $ROBOTD_PY；先在 robotd/ 建 venv" >&2; exit 1; }

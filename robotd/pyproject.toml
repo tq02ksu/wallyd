@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Mac mini 移动机器人身体运行时（Python 实现，迁移期与 TS POC 并存）"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { text = "Apache-2.0" }
 # 运行期依赖刻意为零：HTTP/WS 用标准库，配置校验用自带的 schema 子集。
 # 设备侧依赖（pyserial）作为可选 extra，不让仿真环境被迫安装。
 dependencies = []

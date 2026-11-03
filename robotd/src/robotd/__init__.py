@@ -1,6 +1,6 @@
 """robotd —— 机器人身体运行时（Python 实现）。
 
-迁移期约定（见 doc/spec/robotd-development-plan.md 与 ADR-0009）：
+迁移期约定（见 docs/spec/robotd-development-plan.md 与 ADR-0009）：
 
 - 本包与旧的 TypeScript POC（``src/``）**并存**，两者可分别测试；
   但**同一个串口只能有一个实际持有者**，不得同时连真机。

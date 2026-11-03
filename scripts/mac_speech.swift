@@ -8,13 +8,13 @@
 // **不做多 provider / 回退**——SFSpeechRecognizer / whisper.cpp / Kokoro 都不接。
 //
 // 用法：
-//   swift projects/robot/scripts/mac_speech.swift list
-//   swift projects/robot/scripts/mac_speech.swift transcribe --record 5 --locale zh_CN
-//   swift projects/robot/scripts/mac_speech.swift transcribe --file /tmp/a.caf
-//   swift projects/robot/scripts/mac_speech.swift stream [--locale zh_CN] [--max-seconds 300]
+//   swift <wallyd-root>/scripts/mac_speech.swift list
+//   swift <wallyd-root>/scripts/mac_speech.swift transcribe --record 5 --locale zh_CN
+//   swift <wallyd-root>/scripts/mac_speech.swift transcribe --file /tmp/a.caf
+//   swift <wallyd-root>/scripts/mac_speech.swift stream [--locale zh_CN] [--max-seconds 300]
 //        [--auto-endpoint] [--endpoint-silence-ms 700] [--min-speech-ms 300] [--sensitivity low|medium|high]
-//   swift projects/robot/scripts/mac_speech.swift speak --text "你好" [--voice <identifier>] [--rate 0.5]
-//   swift projects/robot/scripts/mac_speech.swift request-permission      # 触发麦克风授权
+//   swift <wallyd-root>/scripts/mac_speech.swift speak --text "你好" [--voice <identifier>] [--rate 0.5]
+//   swift <wallyd-root>/scripts/mac_speech.swift request-permission      # 触发麦克风授权
 //
 // 退出码：0 成功；2 无设备/无能力；3 参数错；4 没权限；5 录制或转写失败；6 超时
 //

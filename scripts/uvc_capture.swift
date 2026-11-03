@@ -5,8 +5,8 @@
 //   诊断一律走 stderr，不污染 stdout（RobotD 只解析 stdout）。
 //
 // 用法：
-//   swift projects/robot/scripts/uvc_capture.swift list
-//   swift projects/robot/scripts/uvc_capture.swift capture --out /tmp/a.jpg --width 1280 --height 720
+//   swift <wallyd-root>/scripts/uvc_capture.swift list
+//   swift <wallyd-root>/scripts/uvc_capture.swift capture --out /tmp/a.jpg --width 1280 --height 720
 //
 // 参数：
 //   --out      输出文件（默认 /tmp/uvc_capture.jpg）

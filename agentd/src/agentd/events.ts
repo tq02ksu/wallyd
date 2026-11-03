@@ -1,7 +1,7 @@
 /**
  * 语义事件：登记、模板渲染、写入、查询。
  *
- * 设计依据：`doc/spec/agentd-functional-design.md` §5.4、§6.2，开发计划 A07。
+ * 设计依据：`docs/spec/agentd-functional-design.md` §5.4、§6.2，开发计划 A07。
  *
  * ## 为什么要有「模板」
  *

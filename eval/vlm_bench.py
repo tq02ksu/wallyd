@@ -22,7 +22,7 @@ MAXTOK = int(os.environ.get("BENCH_MAX_TOKENS", "32"))
 REPS = int(os.environ.get("BENCH_REPS", "2"))
 
 # 坑：macOS 的**系统代理**会让 urllib 把 127.0.0.1 的请求也发给代理（返回 502 Bad Gateway），
-# 而 curl 只认环境变量、不受影响 —— 所以这里显式禁用代理（同一现象见 doc/poc-design.md 的"两个必须写进实现的坑"）。
+# 而 curl 只认环境变量、不受影响 —— 所以这里显式禁用代理（同一现象见 docs/poc-design.md 的"两个必须写进实现的坑"）。
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 

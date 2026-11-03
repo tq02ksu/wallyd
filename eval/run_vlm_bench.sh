@@ -14,7 +14,7 @@
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=$(cd "$HERE/.." && pwd)                       # 项目根：projects/robot/
+ROOT=$(cd "$HERE/.." && pwd)                       # 项目根：<wallyd-root>/
 BOT=${BOT:-/Users/tq02ksu/workspace/bot}           # MLX 环境与权重（见 model-selection）
 MODEL=${MINICPM_MODEL:-$BOT/models/MiniCPM-V-4.6-4bit}
 HOST=${MINICPM_HOST:-127.0.0.1}

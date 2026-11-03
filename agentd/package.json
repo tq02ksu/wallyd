@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Mac mini 移动机器人的大脑与日常界面（TypeScript，运行期零外部依赖）",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=22.5.0"
   },

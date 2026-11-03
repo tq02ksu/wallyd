@@ -16,7 +16,7 @@
 安全默认：DRIVE_MOTORS = False —— 只点灯 + 走状态机，不动电机。
 确认电机悬空/安全后再改 True，恢复 bitstream 真实脉冲（逻辑沿用 v1）。
 
-接线（2026-10-05 定案，见 projects/robot/doc/electrical-architecture.md §5.2）：
+接线（2026-10-05 定案，见 docs/electrical-architecture.md §5.2）：
   底盘左驱 PUL/DIR/ENA = 9/10/11 ｜ 底盘右驱 = 12/13/14
   `DRIVERS_PRESENT = ("L", "R")`：2026-10-09 起左右两驱都在管（右驱接上前是 ("L",)）。
   ⚠ **不在这个元组里的驱动器，固件从不配置它的 ENA 引脚**——引脚留高阻=悬空=使能，
@@ -67,7 +67,7 @@ TICK_MS = 20
 PROGRESS_EVERY_MS = 200
 
 # ---- 引脚（v1 原样）----
-# 2026-10-05 新引脚定案（每台驱动器 3 脚，位置连＋序号连；见 projects/robot/doc/electrical-architecture.md §5.2）：
+# 2026-10-05 新引脚定案（每台驱动器 3 脚，位置连＋序号连；见 docs/electrical-architecture.md §5.2）：
 #   底盘左驱 PUL/DIR/ENA = 9/10/11 ｜ 底盘右驱 = 12/13/14 ｜ 步进3 = 4/5/6 ｜ 步进4 = 15/16/17
 # 物理状态（2026-10-09）：左右两驱都已接上。
 PIN_L = (9, 10, 11)      # PUL, DIR, ENA
@@ -98,7 +98,7 @@ ENAGED_MAX_MS = 30000     # **使能上限**：idle 状态下，使能持续超�
 
 if DRIVE_MOTORS:
     # 脉冲用软件方波：POC 台面速度（≤2kHz）足够，且语义透明、不依赖 bitstream 的 4 元组写法。
-    # 量产/多轴同时动再换 RMT/MCPWM（见 projects/robot/doc/electrical-architecture.md §5.4）。
+    # 量产/多轴同时动再换 RMT/MCPWM（见 docs/electrical-architecture.md §5.4）。
     pin_step_l = Pin(PIN_L[0], Pin.IN)      # 空闲 = 高阻（悬空）= 可靠的"关"
     pin_dir_l = Pin(PIN_L[1], Pin.IN)
     if "R" in DRIVERS_PRESENT:

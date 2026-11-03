@@ -15,7 +15,7 @@ Mac mini 移动机器人的**大脑与日常界面**：会话与任务编排、�
 ## 装与跑
 
 ```bash
-cd projects/robot/agentd
+cd <wallyd-root>/agentd
 npm install          # 唯一依赖：@openai/codex-sdk（含平台原生二进制，约 360 MB）
 npm start -- --robotd http://127.0.0.1:8787 --port 8791
 # 或从仓库根：npm run agentd

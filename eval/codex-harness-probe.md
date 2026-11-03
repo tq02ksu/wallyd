@@ -74,7 +74,7 @@ SDK 的审批回调只能作为其中一层。
 手段：`CODEX_HOME` 指向 `work/codex-probe/codex-home`，且启动子进程时显式传 `env`
 （SDK 一旦收到 `env` 就不继承 `process.env`）。
 
-复现：`cd projects/robot/agentd && npm run test:codex`
+复现：`cd <wallyd-root>/agentd && npm run test:codex`
 
 实测结果：
 

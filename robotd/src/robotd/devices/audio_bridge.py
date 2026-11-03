@@ -114,7 +114,7 @@ class AudioBridge:
             return
         if not self.app_path.exists():
             raise AudioBridgeUnavailable(
-                f"未找到语音桥 {self.app_path}（先按 doc/voice-architecture.md 构建 AudioBridge.app）"
+                f"未找到语音桥 {self.app_path}（先按 docs/voice-architecture.md 构建 AudioBridge.app）"
             )
         # 清残留
         self._close_pipes()

@@ -12,7 +12,7 @@ generated: { by: codex/deepseek-v4-pro, at: 2026-10-06T08:50:00+08:00 }
 # 视觉评测脚本 — 使用说明
 
 > 结果本身见 [[vision-latency|视觉延迟实测（2026-10-06）]]。这里只讲怎么复现。
-> 命令都在**项目根目录**（`projects/robot/`）执行；只需要 `swiftc` 与 `/usr/bin/python3`。
+> 命令都在**项目根目录**（`<wallyd-root>/`）执行；只需要 `swiftc` 与 `/usr/bin/python3`。
 
 ## 0. 测试数据（公开，不入库）
 

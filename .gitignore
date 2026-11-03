@@ -8,7 +8,6 @@ logs/
 
 # Agent/runtime state
 .ai-memory/
-.symphony/
 .codex/
 node_modules/
 /work/

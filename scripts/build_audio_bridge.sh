@@ -5,7 +5,7 @@
 #   sh scripts/build_audio_bridge.sh            # 输出到 work/bin/AudioBridge.app
 #   OUT=/somewhere/AudioBridge.app sh scripts/build_audio_bridge.sh
 #
-# 为什么要打成 .app 并用 open 启动：见 doc/decisions/0011-audio-bridge-app-bundle-tcc.md
+# 为什么要打成 .app 并用 open 启动：见 docs/decisions/0011-audio-bridge-app-bundle-tcc.md
 # 签名：优先用稳定自签身份（重编译不掉 TCC 授权）；没证书时回退 adhoc（每次要重新授权）。
 set -eu
 

@@ -56,8 +56,8 @@ ESP32 做实时运动控制」业务分层。
 | `uvc_capture.swift` | 电脑 | **相机原生桥**（UVC 抓帧）。三个模式：`list`（列设备 / 格式 / 授权状态）、`capture`（抓一帧）、`request-permission`（触发授权弹窗）。stdout **恰好一行 JSON**（`{"ok":true,"data":{...}}`，契约见 [[communication-protocol]] §4），诊断一律走 stderr。robotd 的 `camera.capture` 能力就是 spawn 它，帧落 `work/poc/frames/` |
 
 ```bash
-swift projects/robot/scripts/uvc_capture.swift list
-swift projects/robot/scripts/uvc_capture.swift capture --out /tmp/a.jpg --width 1280 --height 720
+swift <wallyd-root>/scripts/uvc_capture.swift list
+swift <wallyd-root>/scripts/uvc_capture.swift capture --out /tmp/a.jpg --width 1280 --height 720
 ```
 
 > **摄像头授权是头号坑**：未授权时 AVFoundation **不报错、只是永远不出帧**（`session.isRunning`
@@ -77,7 +77,7 @@ swift projects/robot/scripts/uvc_capture.swift capture --out /tmp/a.jpg --width 
 python -m pip install pyserial
 
 # 2. 直接运行
-cd /Users/tq02ksu/workspace/tq02ksu/persona/projects/robot/scripts
+cd /Users/tq02ksu/workspace/tq02ksu/persona/scripts
 python robot_cli.py "status"
 ```
 

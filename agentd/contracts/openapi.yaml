@@ -7,8 +7,8 @@ info:
     agentd 与 robotd 只在公开接口相遇，agentd 的会话/任务/模型配置/审批审计/事件历史
     都由本文件定义，不复用 robotd 的 Task/State 形状。
 
-    设计依据：`doc/spec/agentd-functional-design.md`（产品语义）
-    与 `doc/spec/agentd-development-plan.md`（实施顺序）。
+    设计依据：`docs/spec/agentd-functional-design.md`（产品语义）
+    与 `docs/spec/agentd-development-plan.md`（实施顺序）。
 
     ## 三条硬约束
 

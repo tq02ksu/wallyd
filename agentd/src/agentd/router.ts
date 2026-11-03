@@ -4,7 +4,7 @@
  * ## 为什么需要它
  *
  * 在此之前 `service.ts` 把 `route: 'harness'` 写死，所有请求都标成「交给模型」，
- * 于是快速路由等于不存在：说「停」也要先过一遍模型。规格（`doc/spec/agentd-functional-design.md`
+ * 于是快速路由等于不存在：说「停」也要先过一遍模型。规格（`docs/spec/agentd-functional-design.md`
  * §3.1）要求的是**确定性优先**：
  *
  * - 「停止」走受保护的优先路径，不等模型；

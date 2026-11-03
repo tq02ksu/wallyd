@@ -12,7 +12,7 @@
  *
  * ## 用法
  *
- *   cd projects/robot/agentd
+ *   cd <wallyd-root>/agentd
  *   node --experimental-strip-types tests/integration/codex-probe.mjs
  *
  * 需要 `CODEX_API_KEY` 或 `OPENAI_API_KEY` 才会尝试真实 turn；

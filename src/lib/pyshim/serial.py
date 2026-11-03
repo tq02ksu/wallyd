@@ -1,6 +1,6 @@
 """pyserial minimal shim (stdlib termios only).
 
-Local machine has no pyserial, but projects/robot/scripts/*.py all `import serial`.
+Local machine has no pyserial, but <wallyd-root>/scripts/*.py all `import serial`.
 Put this directory on PYTHONPATH and those scripts run unchanged, no network needed.
 
 Covers: Serial(port, baudrate, timeout) / read / write / reset_input_buffer /

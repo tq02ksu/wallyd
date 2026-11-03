@@ -288,6 +288,6 @@
   "notes": [
     "为什么单独一份 JSON 而不是塞进 OpenAPI：OpenAPI 3.0 的 oneOf + discriminator 无法表达『type 取值决定 payload 形状』这一组 20+ 变体，塞进去会让 schema 比散文更难读。独立登记表仍可被 generate.mjs 校验与生成。",
     "登记表与 openapi.yaml 的 components.schemas 共用 envelope：WsEvent。两份文件的 version 必须一致。",
-    "新增事件时必须同时改本文件与 doc/spec/robotd-interface-contract.md §6.2 的类别表。"
+    "新增事件时必须同时改本文件与 docs/spec/robotd-interface-contract.md §6.2 的类别表。"
   ]
 }

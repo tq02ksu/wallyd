@@ -152,7 +152,7 @@ tar xzf go.tar.gz -C work/poc/brain/bin     # 自带 go 放 bin/go，不碰系�
 ## 9. 复现
 
 ```bash
-cd projects/robot
+cd <wallyd-root>
 sh work/poc/brain/00_start_brain.sh --bg          # mlx_lm :18082，已关思考
 sh work/poc/brain/03_start_moonbridge.sh          # moon-bridge :18081
 
@@ -176,5 +176,5 @@ cd "$CODEX_HOME/ws" && codex exec --skip-git-repo-check "读取 note.txt 并告�
 
 ## 相关
 
-- 选型：`doc/model-selection.md` §5
+- 选型：`docs/model-selection.md` §5
 - 方案审查过程（临时产物）：`work/poc/brain/review-notes.md`

@@ -4,7 +4,7 @@
 // 测不到端点。这里用 AVSpeechSynthesizer.write 拿到 PCM，自己拼上前后静音，落成 16kHz 单声道 CAF。
 //
 // 用法：
-//   swift projects/robot/scripts/speech_fixture.swift --text "你好，我是移动机器人" \
+//   swift <wallyd-root>/scripts/speech_fixture.swift --text "你好，我是移动机器人" \
 //     --out work/eval/speech/zh_test.caf [--lead-ms 400] [--tail-ms 1200] [--voice <identifier>] [--rate 0.5]
 import Foundation
 import AVFAudio

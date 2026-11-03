@@ -9,11 +9,11 @@ sources: []
 generated: { by: codex/deepseek-v4-pro, at: 2026-10-06T08:50:00+08:00 }
 relations:
   - predicate: part-of
-    target: /projects/robot/README.md
+    target: /README.md
   - predicate: depends-on
-    target: /projects/robot/doc/architecture.md
+    target: /docs/architecture.md
   - predicate: depends-on
-    target: /projects/robot/doc/risk-assessment.md
+    target: /docs/risk-assessment.md
 ---
 
 # 视觉延迟实测 — VLM 与系统检测器（2026-10-06）
