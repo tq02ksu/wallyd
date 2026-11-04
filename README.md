@@ -62,7 +62,9 @@ Run `bash scripts/ci/run-gates.sh` (or `npm run gates`) for the complete
 offline gate. CI runs the same checks in parallel `static-checks`, `robotd`,
 `agentd`, and `integration` lanes, then reports a single `quality` status. The
 integration lane starts `robotd --sim` on port 8799 and exercises the agentd
-client against it; no hardware is touched.
+client against it; no hardware is touched. The static lane also runs
+`scripts/ci/ci-config.test.mjs`, which regression-tests the source lint gate and
+asserts the workflow keeps every lane wired to the required `quality` status.
 
 ## Current architecture
 

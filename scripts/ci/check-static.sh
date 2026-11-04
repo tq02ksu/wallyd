@@ -11,5 +11,8 @@ bash scripts/ci/validate-baseline.sh
 printf '[static] source syntax (Node, shell, JSON, YAML)\n'
 npm run lint --silent
 
+printf '[static] CI configuration regression tests\n'
+node scripts/ci/ci-config.test.mjs
+
 printf '[static] generated contracts match sources\n'
 npm run contract:check
