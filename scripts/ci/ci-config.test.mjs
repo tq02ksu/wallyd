@@ -2,13 +2,16 @@
 /**
  * Regression tests for the CI configuration itself.
  *
- * Two things had no test coverage:
+ * Three things had no test coverage:
  *   1. `lint-sources.mjs` — the syntax gate could silently stop rejecting bad
  *      sources (or start rejecting good ones) and CI would stay green.
  *   2. `.github/workflows/quality.yml` — branch protection depends on a single
  *      aggregate `quality` job. If a lane is dropped, or the aggregate stops
  *      depending on every lane, the required check can pass while a whole test
  *      suite never ran.
+ *   3. The `scripts/ci/check-*.sh` lane scripts — a lane that loses
+ *      `set -euo pipefail` can run a failing suite and still exit 0, and a
+ *      gutted script can report success without running anything.
  *
  * The linter is exercised in-process through its exported pure functions, so
  * this file has no child-process or network dependency.
@@ -182,13 +185,13 @@ for (const script of referencedScripts) {
 const staticScript = readFileSync(path.join(root, 'scripts', 'ci', 'check-static.sh'), 'utf8');
 check('the static lane runs these tests', /node scripts\/ci\/ci-config\.test\.mjs/.test(staticScript));
 
-// `src/` and `eval/` hold Python entry points outside the robotd package. The
+// `src/`, `eval/`, and `firmware/` hold Python outside the robotd package. The
 // static lane only parses them, so the robotd lane has to lint them or they
 // lose static analysis entirely.
 const robotdScript = readFileSync(path.join(root, 'scripts', 'ci', 'check-robotd.sh'), 'utf8');
 check(
   'the robotd lane lints Python outside the package',
-  /ruff check[^\n]*\.\.\/src[^\n]*\.\.\/eval/.test(robotdScript),
+  /ruff check[^\n]*\.\.\/src[^\n]*\.\.\/eval[^\n]*\.\.\/firmware/.test(robotdScript),
   robotdScript,
 );
 
@@ -200,6 +203,33 @@ for (const lane of lanes) {
   check(`CI runs ${script}`, referencedScripts.has(script), [...referencedScripts].join(', '));
   check(`run-gates.sh runs ${script}`, gatesScript.includes(`bash ${script}`));
 }
+
+// The workflow decides *which* lane scripts run; the scripts decide *what*
+// runs. A lane script that drops `set -euo pipefail` runs its failing suite and
+// still exits 0 on the trailing `printf`, and a gutted script reports success
+// without running anything. Both are silent greens the workflow tests cannot
+// see, so pin strict mode and the command each lane exists to run.
+const laneCommands = {
+  static: [
+    'scripts/ci/validate-baseline.sh',
+    'npm run lint',
+    'scripts/ci/ci-config.test.mjs',
+    'npm run contract:check',
+  ],
+  robotd: ['ruff format', 'ruff check', 'python -m pytest'],
+  agentd: ['npm --prefix agentd test'],
+  integration: ['--sim', '/v1/health', 'npm --prefix agentd run test:live'],
+};
+const strictMode = /^set -euo pipefail$/m;
+for (const [lane, commands] of Object.entries(laneCommands)) {
+  const script = readFileSync(path.join(root, 'scripts', 'ci', `check-${lane}.sh`), 'utf8');
+  check(`the ${lane} lane fails fast`, strictMode.test(script), script.slice(0, 200));
+  for (const command of commands) {
+    check(`the ${lane} lane runs "${command}"`, script.includes(command), script);
+  }
+}
+check('run-gates.sh fails fast', strictMode.test(gatesScript), gatesScript.slice(0, 200));
+check('run-gates.sh checks diff hygiene', /git diff --check/.test(gatesScript), gatesScript);
 
 console.log(failed === 0 ? '\nCI configuration tests passed' : `\n${failed} CI configuration test(s) failed`);
 process.exit(failed === 0 ? 0 : 1);

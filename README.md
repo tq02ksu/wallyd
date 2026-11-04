@@ -65,7 +65,9 @@ client against it; no hardware is touched. The static lane runs `npm run lint`
 (tracked Node, shell, Python, JSON, and YAML syntax) and
 `scripts/ci/ci-config.test.mjs`, which regression-tests the source lint gate and
 asserts the workflow keeps every lane wired to the required `quality` status and
-that `run-gates.sh` invokes the same lane scripts as CI.
+that `run-gates.sh` invokes the same lane scripts as CI. It also pins each lane
+script to `set -euo pipefail` and its core command, so a lane cannot lose strict
+mode or be gutted into a silent pass.
 
 ## Current architecture
 
