@@ -146,6 +146,22 @@ for (const [jobId, job] of Object.entries(jobs)) {
   }
 }
 check('no job or step masks failures', masked.length === 0, masked.join(', '));
+// A lane that is conditionally skipped still reports `success` to its
+// dependents, and the aggregate `quality` job only fails on a lane result that
+// is not success. So an `if:` that quietly disables a lane keeps the required
+// check green while nothing ran. Only the aggregate job may be conditional
+// (`always()`), which is what makes it report on a failed lane at all.
+const conditional = [];
+for (const lane of lanes) {
+  if (jobs[lane]?.if !== undefined) conditional.push(`${lane} job`);
+  for (const [index, step] of (jobs[lane]?.steps ?? []).entries()) {
+    if (step?.if !== undefined) conditional.push(`${lane} step ${index + 1}`);
+  }
+}
+for (const [index, step] of (jobs.quality?.steps ?? []).entries()) {
+  if (step?.if !== undefined) conditional.push(`quality step ${index + 1}`);
+}
+check('no lane job or step is conditionally skipped', conditional.length === 0, conditional.join(', '));
 for (const lane of lanes) {
   check(`has a "${lane}" lane`, Boolean(jobs[lane]), Object.keys(jobs).join(', '));
 }
@@ -205,6 +221,17 @@ check(
   JSON.stringify(workflow?.permissions ?? {}) === JSON.stringify({ contents: 'read' }),
   JSON.stringify(workflow?.permissions ?? null),
 );
+// Job-level `permissions:` replaces the workflow-level value instead of merging
+// with it, so a lane can regain write access while the workflow stays
+// read-only. Any job that declares permissions must keep the same shape.
+const widenedPermissions = [];
+for (const [jobId, job] of Object.entries(jobs)) {
+  if (job?.permissions === undefined) continue;
+  if (JSON.stringify(job.permissions) !== JSON.stringify({ contents: 'read' })) {
+    widenedPermissions.push(`${jobId}: ${JSON.stringify(job.permissions)}`);
+  }
+}
+check('no job widens workflow permissions', widenedPermissions.length === 0, widenedPermissions.join(', '));
 for (const jobId of [...lanes, 'quality']) {
   const timeout = jobs[jobId]?.['timeout-minutes'];
   check(`"${jobId}" job declares a timeout`, Number.isInteger(timeout) && timeout > 0, String(timeout));
@@ -253,6 +280,16 @@ check(
   'the robotd lane lints Python outside the package',
   /ruff check[^\n]*\.\.\/src[^\n]*\.\.\/eval[^\n]*\.\.\/firmware/.test(robotdScript),
   robotdScript,
+);
+
+// The integration lane backgrounds `robotd --sim`, so a failure is usually
+// visible only in that process's log: `test:live` reports what the client saw.
+// Without the trap dumping the log, a red integration lane in CI is opaque.
+const integrationScript = readFileSync(path.join(root, 'scripts', 'ci', 'check-integration.sh'), 'utf8');
+check(
+  'the integration lane dumps the robotd log on failure',
+  /cleanup\(\)[\s\S]*status=\$\?[\s\S]*cat "\$LOG_FILE"/.test(integrationScript),
+  integrationScript,
 );
 
 // README promises that local `npm run gates` matches CI. Both entry points must

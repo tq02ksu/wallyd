@@ -17,9 +17,17 @@ PYTHONPATH=robotd/src robotd/.venv/bin/python -m robotd --sim --http "$PORT" ser
 robotd_pid=$!
 
 cleanup() {
+  status=$?
   if kill -0 "$robotd_pid" 2>/dev/null; then
     kill "$robotd_pid" 2>/dev/null || true
     wait "$robotd_pid" 2>/dev/null || true
+  fi
+  # A failing lane is easiest to diagnose from the server side of the same run:
+  # `test:live` only reports what the client saw. Every failure path exits
+  # non-zero, so one place can dump the log without repeating it per branch.
+  if [[ "$status" -ne 0 && -s "$LOG_FILE" ]]; then
+    printf 'robotd sim log (%s):\n' "$LOG_FILE" >&2
+    cat "$LOG_FILE" >&2
   fi
 }
 trap cleanup EXIT
@@ -32,15 +40,13 @@ for _ in $(seq 1 150); do
     break
   fi
   if ! kill -0 "$robotd_pid" 2>/dev/null; then
-    printf 'robotd sim exited during startup; log follows:\n' >&2
-    cat "$LOG_FILE" >&2
+    printf 'robotd sim exited during startup\n' >&2
     exit 1
   fi
   sleep 0.2
 done
 if [[ "$ready" -ne 1 ]]; then
-  printf 'robotd sim did not become ready; log follows:\n' >&2
-  cat "$LOG_FILE" >&2
+  printf 'robotd sim did not become ready\n' >&2
   exit 1
 fi
 
