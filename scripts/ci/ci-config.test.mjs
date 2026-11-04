@@ -116,6 +116,24 @@ const jobs = workflow?.jobs ?? {};
 const lanes = ['static', 'robotd', 'agentd', 'integration'];
 
 check('the workflow passes its own shape check', checkWorkflowShape('quality.yml', workflow).length === 0, checkWorkflowShape('quality.yml', workflow).join('; '));
+// A workflow with no usable trigger never runs, and a required check that never
+// runs sits at "expected" forever. Pin the events and the stale-run behaviour
+// the repository relies on.
+const triggers = workflow?.on ?? {};
+check('runs on pull requests', triggers.pull_request !== undefined, JSON.stringify(triggers));
+check('runs on pushes to main', Array.isArray(triggers.push?.branches) && triggers.push.branches.includes('main'), JSON.stringify(triggers.push));
+check('can be dispatched manually', triggers.workflow_dispatch !== undefined, JSON.stringify(triggers));
+check('supersedes stale runs', workflow?.concurrency?.['cancel-in-progress'] === true, JSON.stringify(workflow?.concurrency));
+// `continue-on-error` turns a broken lane green, which is exactly the failure
+// the aggregate `quality` job exists to prevent.
+const masked = [];
+for (const [jobId, job] of Object.entries(jobs)) {
+  if (job?.['continue-on-error']) masked.push(`${jobId} job`);
+  for (const [index, step] of (job?.steps ?? []).entries()) {
+    if (step?.['continue-on-error']) masked.push(`${jobId} step ${index + 1}`);
+  }
+}
+check('no job or step masks failures', masked.length === 0, masked.join(', '));
 for (const lane of lanes) {
   check(`has a "${lane}" lane`, Boolean(jobs[lane]), Object.keys(jobs).join(', '));
 }
@@ -126,6 +144,27 @@ check(
   JSON.stringify([...(jobs.quality?.needs ?? [])].sort()) === JSON.stringify([...lanes].sort()),
   JSON.stringify(jobs.quality?.needs ?? []),
 );
+// A workflow defaults to broad token permissions and to GitHub's 6h job
+// timeout. Both are silent failure modes: an over-privileged token can write
+// to the repo, and a hung test lane burns runner minutes until the default
+// cutoff. Keep the workflow read-only and every job bounded.
+check(
+  'workflow permissions are read-only',
+  JSON.stringify(workflow?.permissions ?? {}) === JSON.stringify({ contents: 'read' }),
+  JSON.stringify(workflow?.permissions ?? null),
+);
+for (const jobId of [...lanes, 'quality']) {
+  const timeout = jobs[jobId]?.['timeout-minutes'];
+  check(`"${jobId}" job declares a timeout`, Number.isInteger(timeout) && timeout > 0, String(timeout));
+}
+for (const lane of lanes) {
+  const commands = (jobs[lane]?.steps ?? []).map((step) => String(step.run ?? '')).join('\n');
+  check(
+    `"${lane}" lane runs its own gate script`,
+    commands.includes(`scripts/ci/check-${lane}.sh`),
+    commands,
+  );
+}
 
 const referencedScripts = new Set();
 for (const job of Object.values(jobs)) {
@@ -142,6 +181,16 @@ for (const script of referencedScripts) {
 
 const staticScript = readFileSync(path.join(root, 'scripts', 'ci', 'check-static.sh'), 'utf8');
 check('the static lane runs these tests', /node scripts\/ci\/ci-config\.test\.mjs/.test(staticScript));
+
+// `src/` and `eval/` hold Python entry points outside the robotd package. The
+// static lane only parses them, so the robotd lane has to lint them or they
+// lose static analysis entirely.
+const robotdScript = readFileSync(path.join(root, 'scripts', 'ci', 'check-robotd.sh'), 'utf8');
+check(
+  'the robotd lane lints Python outside the package',
+  /ruff check[^\n]*\.\.\/src[^\n]*\.\.\/eval/.test(robotdScript),
+  robotdScript,
+);
 
 // README promises that local `npm run gates` matches CI. Both entry points must
 // call the same lane scripts, otherwise one side can silently drop a check.
