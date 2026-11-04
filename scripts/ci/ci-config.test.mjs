@@ -126,6 +126,14 @@ const triggers = workflow?.on ?? {};
 check('runs on pull requests', triggers.pull_request !== undefined, JSON.stringify(triggers));
 check('runs on pushes to main', Array.isArray(triggers.push?.branches) && triggers.push.branches.includes('main'), JSON.stringify(triggers.push));
 check('can be dispatched manually', triggers.workflow_dispatch !== undefined, JSON.stringify(triggers));
+// `pull_request_target` runs with a write token and repository secrets while
+// checking out untrusted fork code. This workflow only needs to read the
+// checkout, so the safe `pull_request` trigger is the only one allowed here.
+check(
+  'does not run on pull_request_target',
+  triggers.pull_request_target === undefined,
+  JSON.stringify(triggers),
+);
 check('supersedes stale runs', workflow?.concurrency?.['cancel-in-progress'] === true, JSON.stringify(workflow?.concurrency));
 // `continue-on-error` turns a broken lane green, which is exactly the failure
 // the aggregate `quality` job exists to prevent.
@@ -141,6 +149,14 @@ for (const lane of lanes) {
   check(`has a "${lane}" lane`, Boolean(jobs[lane]), Object.keys(jobs).join(', '));
 }
 check('has the aggregate "quality" job', Boolean(jobs.quality), Object.keys(jobs).join(', '));
+// Branch protection targets the check's *display name*, not the job id. If the
+// `name:` were dropped or renamed, the required check would sit at "expected"
+// while every lane passed, so pin the name the repository documents.
+check(
+  'the required check is named "quality"',
+  jobs.quality?.name === 'quality',
+  String(jobs.quality?.name),
+);
 check('quality runs unconditionally', jobs.quality?.if === 'always()', String(jobs.quality?.if));
 check(
   'quality depends on every lane',
@@ -160,6 +176,17 @@ for (const jobId of [...lanes, 'quality']) {
   const timeout = jobs[jobId]?.['timeout-minutes'];
   check(`"${jobId}" job declares a timeout`, Number.isInteger(timeout) && timeout > 0, String(timeout));
 }
+// A reusable action pinned to a branch (`@main`) can change under us between
+// runs; CI must only consume reviewed, tagged refs.
+const branchPinned = [];
+for (const [jobId, job] of Object.entries(jobs)) {
+  for (const step of job?.steps ?? []) {
+    if (typeof step.uses === 'string' && /@(?:main|master|HEAD)$/i.test(step.uses)) {
+      branchPinned.push(`${jobId}: ${step.uses}`);
+    }
+  }
+}
+check('actions are pinned to a tag, not a branch', branchPinned.length === 0, branchPinned.join(', '));
 for (const lane of lanes) {
   const commands = (jobs[lane]?.steps ?? []).map((step) => String(step.run ?? '')).join('\n');
   check(
