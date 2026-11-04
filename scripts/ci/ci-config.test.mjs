@@ -137,5 +137,14 @@ for (const script of referencedScripts) {
 const staticScript = readFileSync(path.join(root, 'scripts', 'ci', 'check-static.sh'), 'utf8');
 check('the static lane runs these tests', /node scripts\/ci\/ci-config\.test\.mjs/.test(staticScript));
 
+// README promises that local `npm run gates` matches CI. Both entry points must
+// call the same lane scripts, otherwise one side can silently drop a check.
+const gatesScript = readFileSync(path.join(root, 'scripts', 'ci', 'run-gates.sh'), 'utf8');
+for (const lane of lanes) {
+  const script = `scripts/ci/check-${lane}.sh`;
+  check(`CI runs ${script}`, referencedScripts.has(script), [...referencedScripts].join(', '));
+  check(`run-gates.sh runs ${script}`, gatesScript.includes(`bash ${script}`));
+}
+
 console.log(failed === 0 ? '\nCI configuration tests passed' : `\n${failed} CI configuration test(s) failed`);
 process.exit(failed === 0 ? 0 : 1);

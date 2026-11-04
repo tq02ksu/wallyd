@@ -64,7 +64,8 @@ offline gate. CI runs the same checks in parallel `static-checks`, `robotd`,
 integration lane starts `robotd --sim` on port 8799 and exercises the agentd
 client against it; no hardware is touched. The static lane also runs
 `scripts/ci/ci-config.test.mjs`, which regression-tests the source lint gate and
-asserts the workflow keeps every lane wired to the required `quality` status.
+asserts the workflow keeps every lane wired to the required `quality` status and
+that `run-gates.sh` invokes the same lane scripts as CI.
 
 ## Current architecture
 
