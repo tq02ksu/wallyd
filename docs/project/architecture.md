@@ -43,9 +43,30 @@ user / development client
 
 ## Current implementation state
 
-The repository now contains both the Python `robotd` foundation and the
-TypeScript `agentd` persistence/orchestration foundation from the reference
-project. Transport, serial adaptation, managed Harness lifecycle, voice approval,
-navigation, SLAM, and real-hardware validation remain staged work. The source
-and tests are the authority for current capability; design documents do not
-upgrade planned features into implemented ones.
+This section is the repository-level status statement. Per-capability detail
+lives in `robotd/src/robotd/capabilities.py` and in the test suites.
+
+Implemented today:
+
+- `robotd`: configuration and startup validation, the event-merging kernel,
+  single-authority state, task table with exclusivity, the capability registry
+  and approval gate, lifecycle/shutdown, loopback-only HTTP/WS transport with
+  event cursors and resync, and speech listen/speak through the resident audio
+  bridge (speech availability depends on that bridge, not on process startup).
+- `agentd`: contract and event allow-list, SQLite persistence, task lifecycle
+  and idempotency, event cursors plus WS push, model configuration with
+  revisions, write-only credentials and verification, body observation with
+  degradation, stop bypass, and the read-only daily UI (A03–A09, A15–A18).
+
+Staged work, reported as `E_UNAVAILABLE` instead of pretended success:
+
+- `robotd`: board-side serial adaptation and calibration, control isolation
+  (ADR-0010 is still proposed), perception/follow (R15–R17), and real-hardware
+  timing validation.
+- `agentd`: managed Harness lifecycle (A10) and voice approval / one-time
+  authorization (A13). A11/A12/A14 therefore stop at the orchestration skeleton
+  plus stop bypass.
+
+Source, tests, and the capability registry are the authority for current
+capability; design documents do not upgrade planned features into implemented
+ones.

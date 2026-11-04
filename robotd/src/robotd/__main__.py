@@ -26,8 +26,8 @@ log = logging.getLogger("robotd.main")
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="robotd",
-        description="Mac mini 移动机器人身体运行时（Python，迁移期与 TS POC 并存）",
-        epilog=("同一串口只能有一个实际持有者：本进程与旧 TS robotd 不得同时连接真机。"),
+        description="Mac mini 移动机器人身体运行时（Python）",
+        epilog=("同一串口只能有一个实际持有者：不得同时运行两个 robotd 实例连接真机。"),
     )
     p.add_argument("--version", action="version", version=f"robotd {__version__}")
     p.add_argument("--sim", action="store_true", help="仿真模式（无硬件）")

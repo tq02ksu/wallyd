@@ -21,7 +21,7 @@ Termination Reason: Namespace TCC, Code 0
 Responsible Process: OpenCode [1062]
 ```
 
-推论与决策见 [ADR-0011](../decisions/0011-audio-bridge-app-bundle-tcc.md)。
+推论与决策见 [ADR-0011](../docs/decisions/0011-audio-bridge-app-bundle-tcc.md)。
 
 ### 1.1 adhoc 签名 → 重新编译即失去授权
 

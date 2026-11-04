@@ -43,8 +43,8 @@ agentd 是机器人的“大脑与管家”：接收请求、理解意图、组�
 | 界面 | 返回现有 `panel.html`，主要是硬件与能力调试 | 独立日常界面；原调试面板保留维护入口 |
 
 证据（现状入口；此表描述的是**当时 POC 的现状**，POC 已于 2026-10-23 整体删除）：
-[agentd/src/cli.ts](../../agentd/src/cli.ts)、[agentd/ui/index.html](../../agentd/ui/index.html)、
-[agentd/src/service.ts](../../agentd/src/service.ts)。POC 的 `exit_code=0` 不等于物理任务成功；
+[agentd/src/agentd/cli.ts](../../agentd/src/agentd/cli.ts)、[agentd/ui/index.html](../../agentd/ui/index.html)、
+[agentd/src/agentd/service.ts](../../agentd/src/agentd/service.ts)。POC 的 `exit_code=0` 不等于物理任务成功；
 仅结束 Agent Loop 不能证明 robotd 的任务已经完成。
 
 ### 1.2 本期范围

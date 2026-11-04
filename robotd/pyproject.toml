@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robotd"
 version = "0.1.0"
-description = "Mac mini 移动机器人身体运行时（Python 实现，迁移期与 TS POC 并存）"
+description = "Mac mini 移动机器人身体运行时（Python 实现）"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

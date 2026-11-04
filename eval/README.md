@@ -60,7 +60,7 @@ OpenAI 兼容请求并计时；③ 关掉自己起的服务。
 | 现象 | 原因 | 处置 |
 | --- | --- | --- |
 | VLM 请求返回 **502 Bad Gateway**，服务日志里却什么都没有 | 本机开着系统 HTTP 代理时，Python `urllib` 会把 `127.0.0.1` 也发给代理（`curl` 只看环境变量，反而正常） | `vlm_bench.py` 已显式 `ProxyHandler({})`；自己写客户端时照做 |
-| 启动就报 `No Metal device available` | 在受限沙箱里跑 MLX | 沙箱外运行（同 [[../doc/spec/camera-detection]] §3 的权限类问题） |
+| 启动就报 `No Metal device available` | 在受限沙箱里跑 MLX | 沙箱外运行（同 [camera-detection](../docs/spec/camera-detection.md) §3 的权限类问题） |
 
 ## 4. 脚本清单
 

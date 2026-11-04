@@ -3,7 +3,7 @@
 The current design target is the USB CDC JSON-Lines protocol documented in
 [communication-protocol.md](../communication-protocol.md), with the
 MicroPython implementation in
-[firmware/robot_server_v2.py](../firmware/robot_server_v2.py).
+[firmware/robot_server_v2.py](../../firmware/robot_server_v2.py).
 
 Key protocol properties:
 
