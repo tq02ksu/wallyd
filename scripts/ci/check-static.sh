@@ -8,7 +8,7 @@ cd "$ROOT"
 printf '[static] required files and secret scan\n'
 bash scripts/ci/validate-baseline.sh
 
-printf '[static] source syntax (Node, shell, JSON, YAML)\n'
+printf '[static] source syntax (Node, shell, Python, JSON, YAML)\n'
 npm run lint --silent
 
 printf '[static] CI configuration regression tests\n'

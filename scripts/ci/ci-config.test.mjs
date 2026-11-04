@@ -65,15 +65,17 @@ console.log('— lint-sources');
 const clean = lintFixture({
   'ok.js': 'export const answer = 42;\n',
   'ok.sh': '#!/usr/bin/env bash\nset -euo pipefail\necho ok\n',
+  'ok.py': 'print("ok")\n',
   'ok.json': '{"ok":true}\n',
   'ok.yaml': 'name: ok\n',
   'README.md': 'not a source file\n',
   '.github/workflows/ok.yml': goodWorkflow,
 });
-check('classifies Node/shell/JSON/YAML and ignores the rest', JSON.stringify(clean.counts) === JSON.stringify({ node: 1, shell: 1, json: 1, yaml: 2 }), JSON.stringify(clean.counts));
+check('classifies Node/shell/Python/JSON/YAML and ignores the rest', JSON.stringify(clean.counts) === JSON.stringify({ node: 1, shell: 1, python: 1, json: 1, yaml: 2 }), JSON.stringify(clean.counts));
 check('accepts valid sources', clean.failures.length === 0, clean.failures.join('\n'));
 check('routes .js through node --check', clean.calls.includes('node ok.js'), clean.calls.join(', '));
 check('routes .sh through bash -n', clean.calls.includes('bash ok.sh'), clean.calls.join(', '));
+check('routes .py through the Python parser', clean.calls.includes('python3 ok.py'), clean.calls.join(', '));
 check('returns null for files with no syntax check', classifySource('README.md') === null);
 
 const brokenJs = lintFixture({ 'bad.js': 'const = ;\n' }, { 'bad.js': 'SyntaxError: Unexpected token' });
@@ -82,6 +84,10 @@ check('names the broken JavaScript file', /bad\.js/.test(brokenJs.failures.join(
 
 const brokenShell = lintFixture({ 'bad.sh': 'if then\n' }, { 'bad.sh': 'bash: syntax error' });
 check('rejects a shell syntax error', brokenShell.failures.length === 1, JSON.stringify(brokenShell.failures));
+
+const brokenPython = lintFixture({ 'bad.py': 'def broken(:\n' }, { 'bad.py': 'SyntaxError: invalid syntax' });
+check('rejects a Python syntax error', brokenPython.failures.length === 1, JSON.stringify(brokenPython.failures));
+check('names the broken Python file', /bad\.py/.test(brokenPython.failures.join('\n')), brokenPython.failures.join('\n'));
 
 const brokenJson = lintFixture({ 'bad.json': '{"unterminated":\n' });
 check('rejects malformed JSON', brokenJson.failures.length === 1, JSON.stringify(brokenJson.failures));

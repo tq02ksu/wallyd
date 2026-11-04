@@ -4,12 +4,13 @@
  *
  * The TypeScript lane runs `tsc`, Python runs ruff, and generated contracts are
  * covered by `contract:check`. Everything else (Node scripts, shell scripts,
- * JSON fixtures, YAML contracts and workflows) had no gate at all, so a typo in
- * a maintenance script or a malformed workflow could land on main unnoticed.
+ * Python outside robotd, JSON fixtures, YAML contracts and workflows) had no
+ * gate at all, so a typo in a maintenance script or a malformed workflow could
+ * land on main unnoticed.
  *
  * This script is dependency-light on purpose: it only needs the repository's
- * existing `yaml` dependency and the Node/Bash binaries already required by the
- * project.
+ * existing `yaml` dependency plus the Node, Bash, and Python binaries already
+ * available on CI runners and project machines.
  *
  * The checking logic is exported so `ci-config.test.mjs` can exercise it
  * without spawning child processes; the CLI entry point only adds the file
@@ -24,11 +25,15 @@ import YAML from 'yaml';
 const nodeExtensions = new Set(['.js', '.cjs', '.mjs']);
 const yamlExtensions = new Set(['.yml', '.yaml']);
 
+// `ast.parse` checks syntax without writing `__pycache__` into the worktree.
+const pythonSyntaxCheck = 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())';
+
 /** Map a tracked path to the syntax check it needs, or null when it has none. */
 export function classifySource(rel) {
   const extension = path.extname(rel).toLowerCase();
   if (nodeExtensions.has(extension)) return 'node';
   if (extension === '.sh') return 'shell';
+  if (extension === '.py') return 'python';
   if (extension === '.json') return 'json';
   if (yamlExtensions.has(extension)) return 'yaml';
   return null;
@@ -71,7 +76,7 @@ export function checkWorkflowShape(rel, document) {
  * @returns {{counts: Record<string, number>, failures: string[]}}
  */
 export function lintSources({ root, files, run, readFile = readFileSync }) {
-  const counts = { node: 0, shell: 0, json: 0, yaml: 0 };
+  const counts = { node: 0, shell: 0, python: 0, json: 0, yaml: 0 };
   const failures = [];
 
   for (const rel of files) {
@@ -84,6 +89,8 @@ export function lintSources({ root, files, run, readFile = readFileSync }) {
       error = run(process.execPath, ['--check', rel]);
     } else if (kind === 'shell') {
       error = run('bash', ['-n', rel]);
+    } else if (kind === 'python') {
+      error = run('python3', ['-c', pythonSyntaxCheck, rel]);
     } else if (kind === 'json') {
       try {
         JSON.parse(readFile(path.join(root, rel), 'utf8'));
@@ -138,7 +145,7 @@ function main() {
   }
 
   console.log(
-    `Source lint passed: ${counts.node} Node, ${counts.shell} shell, ${counts.json} JSON, ${counts.yaml} YAML`,
+    `Source lint passed: ${counts.node} Node, ${counts.shell} shell, ${counts.python} Python, ${counts.json} JSON, ${counts.yaml} YAML`,
   );
 }
 
