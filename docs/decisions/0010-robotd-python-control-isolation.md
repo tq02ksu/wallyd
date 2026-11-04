@@ -22,7 +22,7 @@ relations:
 
 # ADR-0010 robotd Python 控制隔离与串口所有权（候选，待确认）
 
-> **状态说明**：本条是[开发计划](robotd-development-plan.md) R02 的产出，**proposed**。
+> **状态说明**：本条是[开发计划](../spec/robotd-development-plan.md) R02 的产出，**proposed**。
 > 计划要求「提交一条新 ADR 供确认」——确认之前，Python 代码里**不得**按任何一条候选落实现，
 > 也不得把「线程能跑就行」当成结论。现有 `robotd/` 骨架只用 `threading.RLock` 保证
 > 「同一时刻只有一个状态写入者」这条不变量，**没有**声称任何时序保证。

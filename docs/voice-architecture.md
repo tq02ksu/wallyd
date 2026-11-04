@@ -241,7 +241,8 @@ speech.tts_started / speech.tts_chunk / speech.tts_finished 事件
 
 契约仍是 Capability / State / Task / Event 四类（[[communication-protocol]] §6），只**新增语音事件族**。
 
-**现有信封（已落地，取自 `src/transport/http-server.ts`）**——本方案**沿用**它，不另造：
+**现有信封（已落地；当前实现见 `robotd/src/robotd/core/types.py`，最初取自已删除的 TS POC
+`src/transport/http-server.ts`）**——本方案**沿用**它，不另造：
 
 ```jsonc
 { "version": 1,

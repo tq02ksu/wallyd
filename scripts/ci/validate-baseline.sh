@@ -30,4 +30,6 @@ if git grep -n -E 'github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]+|BEGIN (RSA |OPENSSH
   exit 1
 fi
 
+node scripts/ci/check-doc-links.mjs
+
 printf 'Baseline validation passed\n'

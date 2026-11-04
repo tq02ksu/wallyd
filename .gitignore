@@ -9,7 +9,7 @@ logs/
 # Agent/runtime state
 .ai-memory/
 .codex/
-node_modules/
+node_modules
 /work/
 /robotd/work/
 /robotd/.venv/

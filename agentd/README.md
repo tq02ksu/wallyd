@@ -2,7 +2,7 @@
 
 Mac mini 移动机器人的**大脑与日常界面**：会话与任务编排、事件时间线、模型配置、身体观测、停止旁路。
 
-边界依据 [ADR-0007](../doc/decisions/0007-agentd-robotd-boundary.md)：agentd 与 robotd **只通过公开 HTTP/WS 接口交互**，
+边界依据 [ADR-0007](../docs/decisions/0007-agentd-robotd-boundary.md)：agentd 与 robotd **只通过公开 HTTP/WS 接口交互**，
 不 import 对方源码、不共享内存、不读对方内部结构。
 
 > **当前进度**：M1（契约与持久化内核）+ M2（观测与编排骨架）完成。
@@ -10,7 +10,7 @@ Mac mini 移动机器人的**大脑与日常界面**：会话与任务编排、�
 > 模型配置的 revision / 只写凭证 / 验证门槛、身体观测与故障降级、停止旁路、日常界面。
 > **未实现**：A10 受管 Harness（app-server 生命周期）、A13 语音审批与一次性授权。
 > 因此 A11/A12/A14 只到「编排骨架 + 停止旁路」，**尚不具备完整安全动作闭环**。
-> 逐项状态见 [开发计划](../doc/spec/agentd-development-plan.md)。
+> 逐项状态见 [开发计划](../docs/spec/agentd-development-plan.md)。
 
 ## 装与跑
 

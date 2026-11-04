@@ -51,6 +51,7 @@ Use Node.js 22.18+ (or 24.11+), Python 3.11+, and uv:
 
 ```bash
 npm ci
+npm run docs:check
 npm run contract:check
 (cd robotd && uv sync --locked --extra dev --python 3.11)
 npm run test:robotd
@@ -66,4 +67,4 @@ Run `bash scripts/ci/run-gates.sh` for the complete offline gate.
 - [Robot API](docs/project/robot-api.md)
 - [Device protocol](docs/project/device-protocol.md)
 - [Robot decision log](docs/decisions/README.md)
-- [Detailed inherited robot design](docs/index.md)
+- [Full documentation index](docs/index.md)

@@ -22,7 +22,8 @@ relations:
 # Mac mini 移动机器人 — 架构设计（C4）
 
 > **2026-10-21 选型更新**：[ADR-0009](decisions/0009-robotd-python-runtime.md) 已接受：
-> **新架构 robotd 改用 Python**，面向感知、定位与 SLAM/导航扩展；现有 TS POC 尚未迁移。
+> **新架构 robotd 改用 Python**，面向感知、定位与 SLAM/导航扩展。旧 TS POC 已于
+> 2026-10-23 整体删除，Python `robotd` 是当前唯一实现。
 > 本文其余 Node/TS 容器图、代码示例及 `worker_threads` 方案保留为迁移前设计，
 > 不作为新架构的实现选型；Python 控制隔离机制另行设计，既有时序与安全要求不变。
 > `modeld` 仍是独立的慢模型进程，主要服务 `robotd`；`agentd` 可独立配置可选的更高级模型。

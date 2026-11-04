@@ -1,13 +1,16 @@
 # robotd（Python）
 
-Mac mini 移动机器人的**身体运行时**。本目录是 [ADR-0009](../doc/decisions/0009-robotd-python-runtime.md)
-确定的 Python 新实现；迁移期与旧的 TypeScript POC（[`../src/`](../src/)）并存。
+Mac mini 移动机器人的**身体运行时**。本目录是 [ADR-0009](../docs/decisions/0009-robotd-python-runtime.md)
+确定的 Python 实现；旧的 TypeScript POC 已于 2026-10-23 整体删除，仓库根 `src/` 现在只剩
+`modeld.py`、串口桥与板侧调试工具。
 
-> **当前进度：M0 完成 + M1 工程骨架。**
-> 已实现：配置与启动校验、事件归并内核、权威状态、任务表与互斥、能力注册表、生命周期与信号关闭。
-> **未实现**：HTTP/WS 传输（R09/R10）、板侧适配与真机串口（R07/R11）、控制隔离（R02）、
-> 感知与跟随（R15–R17）、语音（R14）。
-> 逐项状态见 [开发计划 §3](../doc/spec/robotd-development-plan.md) 与能力表（`robotd.capabilities`）。
+> **当前进度：本地 HTTP/WS、事件游标与语音链路已实现；板侧串口与感知未实现。**
+> 已实现：配置与启动校验、事件归并内核、权威状态、任务表与互斥、能力注册表、生命周期与信号关闭、
+> HTTP/WS 传输、语音听/说（依赖常驻音频桥）。
+> **未实现**：板侧适配与真机串口（R07/R11）、标定读取与下发、控制隔离（R02，ADR-0010 仍为 proposed）、
+> 感知与跟随（R15–R17）。
+> 逐项状态以 `robotd.capabilities` 注册表与 [开发计划 §3](../docs/spec/robotd-development-plan.md) 为准；
+> 仿真可跑不等于真机验证。
 
 ## 装与跑
 
@@ -33,10 +36,11 @@ uv run --locked --extra dev ruff format src tests
 依赖变更后运行 `uv lock` 并提交 `pyproject.toml` 与 `uv.lock`；`.venv` 与工具缓存不提交。
 Persona 工程中的 `robot-ci` 工作流对相关 push / PR 与手动触发运行：
 Ruff 格式检查、Python 3.11 / 3.14 单元及契约测试、Node 22 契约生成物一致性检查。
-这些是 Python 骨架的无硬件门禁，不代表旧 TS POC、HTTP/WS 或真机时序已验收。
+这些是无硬件门禁，不能替代真机时序与硬件验收。
 
 `serve` 会真的 bind 回环端口并验证生命周期（收到 SIGINT/SIGTERM 时先走停止路径再退出）。
-**传输层尚未接入**，所以 `serve` 现在只证明「能监听、能有序关闭」，不提供可用接口。
+它同时注册 `contracts/openapi.yaml` 定义的公开 HTTP/WS 面；板侧串口未接入时，依赖板侧的
+能力返回 `503 / E_UNAVAILABLE` 并带原因，仿真结果不等于真机验证。
 
 ## 配置优先级
 
@@ -51,10 +55,10 @@ Ruff 格式检查、Python 3.11 / 3.14 单元及契约测试、Node 22 契约生
 | modeld | `http://127.0.0.1:8790` | `ROBOTD_MODELD` |
 | 运行产物目录 | `<项目根>/work` | `ROBOTD_WORK_DIR` |
 
-## 与旧 TS 实现的关系（硬性）
+## 与旧 TS 实现的关系（历史）
 
-- **同一个串口只能有一个实际持有者。** 本包与 `npm run robotd` 不得同时连真机。
-  迁移完成前，真机一律走旧 TS 实现。
+- 旧的 TypeScript POC 已于 2026-10-23 整体删除，本包是 robotd 的唯一实现。
+- **同一个串口只能有一个实际持有者。** 不得同时运行两个 robotd 实例连接真机。
 - 对外契约只有一份：[`contracts/openapi.yaml`](../contracts/openapi.yaml)（+ [`contracts/events.json`](../contracts/events.json)）。
   改契约 → `npm run contract:generate` → `npm run contract:check` 必须通过。
 - `tests/contract/` 读 `contracts/generated/*.json` 断言「Python 实现 == 契约」，
@@ -83,14 +87,23 @@ robotd/
     app.py          # 装配、生命周期、依赖注入、信号关闭
     config.py       # 配置与启动校验（回环强制）
     capabilities.py # 能力注册表 + 审批门 + 未声明字段拒绝
+    api/
+      http.py       # 公开 HTTP 路由（contracts/openapi.yaml 投影）
+      ws.py         # WebSocket 握手与帧
+      events.py     # 事件订阅、游标补发与 resync
     core/
       errors.py     # 稳定错误码与 HTTP 映射（不把内部故障伪装成 400）
       types.py      # 公开 DTO / 内部记录 / payload 脱敏
       state.py      # 权威状态 + derive_mode 唯一推导
       kernel.py     # 事件归并、序号、保留日志、订阅、任务表
+      audio_runtime.py # 语音任务与音频桥事件
+    devices/
+      audio_bridge.py  # 常驻音频桥适配（ADR-0011）
+      sim.py           # 仿真板
   tests/
     unit/           # 配置、状态、内核、生命周期
     contract/       # Python 实现 ↔ 契约 一致性
+    integration/    # 真监听回环端口的 HTTP/WS 测试
 ```
 
 ## 待决策
@@ -101,4 +114,4 @@ robotd/
 - 停止端到端 ≤50ms、看门狗 ≤500ms 等目标**未在此实现中验证**；
 - 不要基于「Python 线程 == Node worker」的假设写控制路径。
 
-隔离方案见 [ADR-0010](../doc/decisions/0010-robotd-python-control-isolation.md)（proposed，待确认）。
+隔离方案见 [ADR-0010](../docs/decisions/0010-robotd-python-control-isolation.md)（proposed，待确认）。
