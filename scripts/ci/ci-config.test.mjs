@@ -22,6 +22,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { checkWorkflowShape, classifySource, lintSources } from './lint-sources.mjs';
+import { LANES, verifyLaneResults } from './verify-lanes.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..');
@@ -163,6 +164,38 @@ check(
   JSON.stringify([...(jobs.quality?.needs ?? [])].sort()) === JSON.stringify([...lanes].sort()),
   JSON.stringify(jobs.quality?.needs ?? []),
 );
+// The aggregate job is the only place a failing lane becomes a failing
+// required check. If its step stops evaluating the results (or loses the
+// checkout that provides the script), branch protection goes green anyway.
+const qualityCommands = (jobs.quality?.steps ?? []).map((step) => String(step.run ?? '')).join('\n');
+check(
+  'quality evaluates the lane results with the tested script',
+  qualityCommands.includes('node scripts/ci/verify-lanes.mjs'),
+  qualityCommands,
+);
+check(
+  'quality checks out the repository for that script',
+  (jobs.quality?.steps ?? []).some((step) => step.uses === 'actions/checkout@v4'),
+  JSON.stringify(jobs.quality?.steps ?? []),
+);
+
+const allGreen = Object.fromEntries(LANES.map((lane) => [lane, 'success']));
+check('lane results: all success passes', verifyLaneResults(allGreen).length === 0, JSON.stringify(verifyLaneResults(allGreen)));
+for (const lane of LANES) {
+  const problems = verifyLaneResults({ ...allGreen, [lane]: 'failure' });
+  check(`lane results: a failed "${lane}" lane fails`, problems.length === 1 && problems[0].startsWith(`${lane}:`), JSON.stringify(problems));
+}
+check(
+  'lane results: cancelled and skipped lanes fail',
+  verifyLaneResults({ ...allGreen, robotd: 'cancelled' }).length === 1 &&
+    verifyLaneResults({ ...allGreen, agentd: 'skipped' }).length === 1,
+  JSON.stringify(verifyLaneResults({ ...allGreen, robotd: 'cancelled' })),
+);
+check(
+  'lane results: a missing result fails',
+  verifyLaneResults({ static: 'success' }).length === LANES.length - 1,
+  JSON.stringify(verifyLaneResults({ static: 'success' })),
+);
 // A workflow defaults to broad token permissions and to GitHub's 6h job
 // timeout. Both are silent failure modes: an over-privileged token can write
 // to the repo, and a hung test lane burns runner minutes until the default
@@ -257,6 +290,22 @@ for (const [lane, commands] of Object.entries(laneCommands)) {
 }
 check('run-gates.sh fails fast', strictMode.test(gatesScript), gatesScript.slice(0, 200));
 check('run-gates.sh checks diff hygiene', /git diff --check/.test(gatesScript), gatesScript);
+
+// README documents `npm run lint` and `npm run gates`, and the static lane
+// calls `npm run lint` by name. Renaming a script in package.json would break
+// the documented workflow, so pin the two entry points to the scripts they
+// must run.
+const rootPackage = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+check(
+  'package.json exposes "lint" running the source lint gate',
+  rootPackage.scripts?.lint === 'node scripts/ci/lint-sources.mjs',
+  String(rootPackage.scripts?.lint),
+);
+check(
+  'package.json exposes "gates" running run-gates.sh',
+  rootPackage.scripts?.gates === 'bash scripts/ci/run-gates.sh',
+  String(rootPackage.scripts?.gates),
+);
 
 console.log(failed === 0 ? '\nCI configuration tests passed' : `\n${failed} CI configuration test(s) failed`);
 process.exit(failed === 0 ? 0 : 1);

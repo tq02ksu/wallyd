@@ -107,15 +107,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - name: Verify all quality jobs passed
         env:
           STATIC: ${{ needs.static.result }}
           ROBOTD: ${{ needs.robotd.result }}
           AGENTD: ${{ needs.agentd.result }}
           INTEGRATION: ${{ needs.integration.result }}
-        run: |
-          set -euo pipefail
-          for result in "static=$STATIC" "robotd=$ROBOTD" "agentd=$AGENTD" "integration=$INTEGRATION"; do
-            printf '%s\n' "$result"
-            test "${result#*=}" = "success"
-          done
+        run: node scripts/ci/verify-lanes.mjs
