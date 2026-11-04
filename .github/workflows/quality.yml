@@ -10,26 +10,112 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  quality:
+  static:
+    name: static-checks
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            agentd/package-lock.json
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Run static checks
+        run: bash scripts/ci/check-static.sh
+
+  robotd:
+    name: robotd
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.22"
-      - name: Install Node dependencies
-        run: |
-          npm ci
-          npm ci --prefix agentd
+          enable-cache: true
+          cache-dependency-glob: "robotd/uv.lock"
       - name: Install Python dependencies
         working-directory: robotd
         run: uv sync --locked --extra dev --python 3.11
-      - name: Run gates
-        run: bash scripts/ci/run-gates.sh
+      - name: Run robotd checks
+        run: bash scripts/ci/check-robotd.sh
 
+  agentd:
+    name: agentd
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            agentd/package-lock.json
+      - name: Install Node dependencies
+        run: npm ci --prefix agentd
+      - name: Run agentd checks
+        run: bash scripts/ci/check-agentd.sh
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            agentd/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.22"
+          enable-cache: true
+          cache-dependency-glob: "robotd/uv.lock"
+      - name: Install Python dependencies
+        working-directory: robotd
+        run: uv sync --locked --extra dev --python 3.11
+      - name: Install agentd dependencies
+        run: npm ci --prefix agentd
+      - name: Run simulation integration
+        run: bash scripts/ci/check-integration.sh
+
+  # Single required check for branch protection. It only passes when every
+  # quality lane passes, and it still reports when an upstream lane fails.
+  quality:
+    name: quality
+    if: always()
+    needs:
+      - static
+      - robotd
+      - agentd
+      - integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify all quality jobs passed
+        env:
+          STATIC: ${{ needs.static.result }}
+          ROBOTD: ${{ needs.robotd.result }}
+          AGENTD: ${{ needs.agentd.result }}
+          INTEGRATION: ${{ needs.integration.result }}
+        run: |
+          set -euo pipefail
+          for result in "static=$STATIC" "robotd=$ROBOTD" "agentd=$AGENTD" "integration=$INTEGRATION"; do
+            printf '%s\n' "$result"
+            test "${result#*=}" = "success"
+          done

@@ -51,13 +51,18 @@ Use Node.js 22.18+ (or 24.11+), Python 3.11+, and uv:
 
 ```bash
 npm ci
+npm run lint
 npm run contract:check
 (cd robotd && uv sync --locked --extra dev --python 3.11)
 npm run test:robotd
 (cd agentd && npm ci && npm test)
 ```
 
-Run `bash scripts/ci/run-gates.sh` for the complete offline gate.
+Run `bash scripts/ci/run-gates.sh` (or `npm run gates`) for the complete
+offline gate. CI runs the same checks in parallel `static-checks`, `robotd`,
+`agentd`, and `integration` lanes, then reports a single `quality` status. The
+integration lane starts `robotd --sim` on port 8799 and exercises the agentd
+client against it; no hardware is touched.
 
 ## Current architecture
 

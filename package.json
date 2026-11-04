@@ -10,6 +10,8 @@
     "contract:agentd": "node contracts/tools/generate-agentd.mjs",
     "contract:all": "npm run contract:generate && npm run contract:agentd",
     "contract:check": "node contracts/tools/check.mjs",
+    "lint": "node scripts/ci/lint-sources.mjs",
+    "gates": "bash scripts/ci/run-gates.sh",
     "robotd": "PYTHONPATH=robotd/src robotd/.venv/bin/python -m robotd --port /dev/cu.usbserial-A5069RR4 --http 8787 serve",
     "robotd:sim": "PYTHONPATH=robotd/src robotd/.venv/bin/python -m robotd --sim --http 8787 serve",
     "agentd": "npm --prefix agentd run -s start -- --robotd http://127.0.0.1:8787 --port 8791",
