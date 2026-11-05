@@ -12,9 +12,14 @@ set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-$HERE/work/bin/AudioBridge.app}
 SRC=$HERE/scripts/mac_speech.swift
+PIPELINE=$HERE/scripts/mac_speech_pipeline.swift
 
 if [ ! -f "$SRC" ]; then
     echo "找不到源码 $SRC" >&2
+    exit 2
+fi
+if [ ! -f "$PIPELINE" ]; then
+    echo "找不到语音管道源码 $PIPELINE" >&2
     exit 2
 fi
 
@@ -22,8 +27,13 @@ mkdir -p "$(dirname "$OUT")"
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS"
 
-echo "==> 编译 $SRC"
-swiftc -O -o "$OUT/Contents/MacOS/AudioBridge" "$SRC"
+echo "==> 编译 $SRC + $PIPELINE"
+# Swift 只允许一个文件承载顶层代码。把管道声明拼到 main.swift 尾部，保证：
+#   ① 仍然是同一个可执行文件；② serve 模式只走 mac_speech_pipeline.swift 的两条管道。
+TMP_BUILD=$(mktemp -d)
+trap 'rm -rf "$TMP_BUILD"' EXIT
+cat "$SRC" "$PIPELINE" > "$TMP_BUILD/main.swift"
+swiftc -O -D VOICE_PIPELINE -o "$OUT/Contents/MacOS/AudioBridge" "$TMP_BUILD/main.swift"
 
 echo "==> 写 Info.plist"
 cat > "$OUT/Contents/Info.plist" <<'PLIST'
