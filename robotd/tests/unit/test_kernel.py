@@ -91,15 +91,21 @@ def test_event_object_keeps_mono_ns_but_public_view_drops_it():
 
 
 # ---------------------------------------------------------------- 订阅与竞态
-def test_subscription_gets_snapshot_and_no_cursor_gap():
-    """核心断言：值回放 seq>cursor。用 seq==cursor 的事件边界防差一。"""
+def test_subscribe_does_not_replay_events_emitted_before_registration():
+    """验收：订阅前 emit 3 条 → 订阅 → ``push`` 收到 0 条。
+
+    订阅的语义是「注册之后才推送」。历史补发由 ``resume()`` 负责，
+    ``Handle`` 里不再有恒空的 ``backlog`` 或无人读取的 ``cursor``。
+    """
     k = make_kernel()
     for i in range(3):
         k.emit("device.changed", device="pump", state=f"s{i}")
     got: list = []
     handle = k.subscribe(["device.*"], got.append)
-    assert handle.snapshot["event_seq"] == 3
-    assert handle.backlog == []
+    assert handle.snapshot["event_seq"] == k.last_seq == 3
+    assert got == []
+    assert not hasattr(handle, "backlog")
+    assert not hasattr(handle, "cursor")
     for i in range(2):
         k.emit("device.changed", device="pump", state=f"late{i}")
     handle.close()

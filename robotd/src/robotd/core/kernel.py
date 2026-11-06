@@ -4,8 +4,9 @@
 
 1. 串口行、子进程事件、定时器 tick、HTTP 请求 → 先转成内部事件 → 进入 ``emit()`` 一个入口；
 2. 派生状态由 ``_reduce()`` 在锁内改写；外部只能读 ``snapshot()``；
-3. 对外只暴露「快照 + 增量」：``snapshot()`` 与 ``subscribe()`` 在**同一把锁**内取游标，
-   所以订阅不存在竞态（旧实现 `v1Replay` 在 `accepted` 之后才读日志，期间新事件已推走）。
+3. 对外只暴露「快照 + 增量」：``snapshot()`` 与订阅注册在**同一把锁**内完成，
+   所以快照与实时推送之间不存在竞态（旧实现 `v1Replay` 在 `accepted` 之后才读日志，
+   期间新事件已推走）。订阅**不补发**注册之前的事件；补发是 ``resume()`` 的职责。
 
 为什么用 ``threading.RLock`` 而不是 asyncio：Python 控制隔离机制**尚未定案**（R02）。
 本内核只保证「同一时刻只有一个写入者」这条不变量，不声称任何时序保证；
@@ -348,19 +349,21 @@ class EventKernel:
     def subscribe(self, filters: Iterable[str], push: Callable[[Event], None]) -> "Handle":
         """注册订阅者。
 
-        返回 ``Handle``，其 ``initial_snapshot()`` 与订阅注册在**同一把锁**内完成：
-        先取快照与游标，再回放 ``seq > 游标`` 的日志，之后的新事件直接 ``push``。
-        因此不存在「快照与订阅之间的竞态」。
+        只推送**注册之后** ``emit()`` 的事件。返回的 ``Handle.snapshot`` 与订阅注册
+        在**同一把锁**内完成：快照的 ``event_seq`` 就是注册时刻的 ``last_seq``，
+        其后的新事件按 ``seq`` 递增交给 ``push``。因此不存在「快照与订阅之间的竞态」。
+
+        注册之前已经在日志里的事件**不会**回放。需要补发的调用方必须先自行取游标，
+        再用 ``resume()`` 判定窗口——游标过期、实例变更、游标非法都由它给出明确结论，
+        本方法不重复实现第二份补发语义。
         """
         with self._lock:
             sub = Subscription(filters=set(filters), push=push)
             sub_id = self._next_sub_id
             self._next_sub_id += 1
-            cursor = self._seq
             snapshot = self.snapshot()
-            backlog = [ev for ev in self._log if ev.seq > cursor and sub.accepts(ev.type)]
             self._subs[sub_id] = sub
-            return Handle(self, sub_id, sub, snapshot, backlog, self.instance_id, cursor)
+            return Handle(self, sub_id, sub, snapshot, self.instance_id)
 
     def unsubscribe(self, sub_id: int) -> None:
         with self._lock:
@@ -402,15 +405,17 @@ class EventKernel:
 
 @dataclass
 class Handle:
-    """订阅句柄。``close()`` 幂等。"""
+    """订阅句柄。``close()`` 幂等。
+
+    ``snapshot`` 是注册时刻的一致性快照；之后只会通过 ``push`` 收到新事件，
+    句柄本身不携带补发用的 backlog 或游标（补发走 ``resume()``）。
+    """
 
     kernel: EventKernel
     sub_id: int
     sub: Subscription
     snapshot: dict[str, Any]
-    backlog: list[Event]
     instance_id: str
-    cursor: int
     _closed: bool = False
 
     def close(self) -> None:
