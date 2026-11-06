@@ -78,11 +78,32 @@ def test_mcp_tool_face_matches_contract_tools(tools):
     """MCP 工具面由契约投影，不由内部能力表决定。"""
     registry = Registry()
     public_names = {cap.public_name for cap in registry.all() if cap.public_name}
-    assert public_names - {"events_subscribe"} == {tool["name"] for tool in tools}
+    # 系统路径（robot_announce）也在能力表里，但显式排除出 Agent 工具面。
+    assert public_names - {"events_subscribe", "robot_announce"} == {tool["name"] for tool in tools}
     # debug 与 websocket 必须被排除
     names = {t["name"] for t in tools}
     assert "debug_serial" not in names
     assert "events_subscribe" not in names
+    assert "robot_announce" not in names
+    assert len(tools) == 14, f"MCP 工具面必须保持 14 项，实际 {len(tools)}"
+
+
+def test_robot_announce_is_contract_declared_system_path(spec, tools):
+    """审批复述必须有一条契约可见、免审批、且不在 Agent 工具面的路径。"""
+    operation = spec["paths"]["/v1/robot/announce"]["post"]
+    assert operation["operationId"] == "robot_announce"
+    assert operation.get("x-requires-approval") is not True
+    assert operation.get("x-mcp-exclude") is True
+    assert "robot_announce" not in {t["name"] for t in tools}
+
+    speak = next(t for t in tools if t["name"] == "robot_speak")
+    assert speak["requiresApproval"] is True
+    assert "text" in speak["inputSchema"]["properties"]
+
+    announce_body = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    schema = spec["components"]["schemas"][announce_body.rsplit("/", 1)[-1]]
+    assert "text" not in schema["properties"], "系统播报不得接受任意自由文本"
+    assert schema.get("additionalProperties") is False
 
 
 def test_no_hardware_primitives_in_public_tools(tools):

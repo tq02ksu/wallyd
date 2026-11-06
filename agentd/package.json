@@ -16,7 +16,7 @@
     "start:manual": "node --experimental-strip-types src/agentd/cli.ts --allow-manual-approve",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run test:unit && npm run test:contract",
-    "test:unit": "node --experimental-strip-types tests/unit/store.mjs && node --experimental-strip-types tests/unit/runs.mjs && node --experimental-strip-types tests/unit/http.mjs && node --experimental-strip-types tests/unit/router.test.ts",
+    "test:unit": "node --experimental-strip-types tests/unit/store.mjs && node --experimental-strip-types tests/unit/runs.mjs && node --experimental-strip-types tests/unit/announcer.mjs && node --experimental-strip-types tests/unit/http.mjs && node --experimental-strip-types tests/unit/router.test.ts",
     "test:contract": "node --experimental-strip-types tests/contract/events.mjs",
     "test:live": "node --experimental-strip-types tests/integration/client.mjs",
     "test:codex": "node --experimental-strip-types tests/integration/codex-probe.mjs",

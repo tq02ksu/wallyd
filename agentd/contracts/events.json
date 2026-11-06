@@ -282,6 +282,11 @@
         "action_label": {
           "type": "string",
           "required": true
+        },
+        "window_opened_at": {
+          "type": "string",
+          "required": true,
+          "description": "确认窗口开启时刻（播报完成之后）。早于此刻的 utterance 不能用来确认这次动作。"
         }
       }
     },
@@ -445,6 +450,10 @@
           "required": true
         },
         "args_summary": {
+          "type": "string",
+          "required": true
+        },
+        "window_opened_at": {
           "type": "string",
           "required": true
         },
@@ -841,7 +850,8 @@
             "interrupted",
             "bridge_exit",
             "muted",
-            "requested"
+            "requested",
+            "stop"
           ]
         },
         "played": {

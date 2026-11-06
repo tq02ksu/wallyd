@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 from xml.sax.saxutils import escape as _xml_escape  # noqa: F401 - 保留给将来的 HTML 错误页
 
 from ..app import App
+from ..core.announce import APPROVAL_REPEAT, render_announcement
 from ..core.errors import ErrorCode, RobotdError, wrap_unexpected
 from ..core.types import Exclusivity, TaskError, TaskState
 from . import events as events_api
@@ -264,6 +266,79 @@ def _h_speak(ctx: RouteContext) -> dict[str, Any]:
     return _call_capability(ctx.app, "robot.speak", run)
 
 
+_APPROVAL_ID = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def _h_announce(ctx: RouteContext) -> dict[str, Any]:
+    """``robot_announce``：审批复述的系统播报路径，**不走审批门**。
+
+    与 ``robot_speak`` 的边界是契约级的：这里没有 ``text`` 参数，只有结构化的审批字段，
+    正文由 robotd 用固定模板渲染。播报完成以 ``speech.tts_finished``（带 approval_id）为准；
+    失败会发 ``speech.announce_failed``，不能静默。
+    """
+    body = ctx.body
+    _reject_unknown(body, {"approval_id", "kind", "action_label", "args_summary"})
+    approval_id = _require_str(body, "approval_id", max_len=64)
+    if not _APPROVAL_ID.match(approval_id):
+        raise RobotdError(ErrorCode.VALIDATION, "approval_id 含非法字符")
+    kind = _require_str(body, "kind", max_len=40)
+    if kind != APPROVAL_REPEAT:
+        raise RobotdError(ErrorCode.VALIDATION, f"不支持的播报类型 kind={kind!r}")
+    action_label = _require_str(body, "action_label", max_len=80)
+    args_summary = _require_str(body, "args_summary", max_len=200)
+    try:
+        text = render_announcement(kind=kind, action_label=action_label, args_summary=args_summary)
+    except ValueError as exc:
+        raise RobotdError(ErrorCode.VALIDATION, str(exc)) from exc
+
+    def run(_cap: Any) -> dict[str, Any]:
+        runtime = ctx.app.audio
+        # new_task 的 BUSY 直接向上抛（同类播报已在跑），不伪装成桥故障
+        task = ctx.app.kernel.new_task("robot.announce", Exclusivity.SOFT)
+        resp = None
+        try:
+            ctx.app.kernel.mark_running(task.task_id)
+            resp = runtime.new_response(task_id=task.task_id, approval_id=approval_id, kind=kind)
+            runtime.speak(resp, text=text, interruptible=True)
+        except Exception as exc:  # noqa: BLE001
+            if resp is not None:
+                # 受理后发送失败：清掉运行时引用，避免 audio.state 永远显示 speaking
+                runtime.clear_response(resp)
+            ctx.app.kernel.finish(
+                task.task_id,
+                TaskState.FAILED,
+                error=TaskError("E_UNAVAILABLE", str(exc)),
+                reason="audio_unavailable",
+            )
+            # 失败也必须可观测：agentd 不能因为「请求发出去了」就以为问过用户
+            try:
+                ctx.app.kernel.emit(
+                    "speech.announce_failed",
+                    {
+                        "approval_id": approval_id,
+                        "kind": kind,
+                        "task_id": task.task_id,
+                        "reason": str(exc),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("发送 speech.announce_failed 失败", exc_info=True)
+            raise RobotdError(
+                ErrorCode.UNAVAILABLE,
+                f"无法进行系统播报：{exc}",
+                {"capability": "robot.announce", "approval_id": approval_id},
+            ) from exc
+        return {
+            "task_id": task.task_id,
+            "status": "accepted",
+            "approval_id": approval_id,
+            "kind": kind,
+            "text": text,
+        }
+
+    return _call_capability(ctx.app, "robot.announce", run)
+
+
 def _h_follow(ctx: RouteContext) -> dict[str, Any]:
     body = ctx.body
     _reject_unknown(body, {"target", "target_track_id", "max_distance_m", "note"})
@@ -415,6 +490,12 @@ def build_routes(*, debug: bool) -> list[Route]:
             _h_speak,
             operation_id="robot_speak",
             requires_approval=True,
+        ),
+        Route(
+            "POST",
+            "/v1/robot/announce",
+            _h_announce,
+            operation_id="robot_announce",
         ),
         Route("POST", "/v1/speech/listen", _h_listen, operation_id="speech_listen"),
         Route("GET", "/v1/audio/state", _h_audio_state, operation_id="audio_state"),

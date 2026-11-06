@@ -115,7 +115,7 @@ def test_unimplemented_capabilities_report_unavailable():
 
 
 def test_every_public_operation_has_a_capability_entry():
-    """契约里的 13 个 HTTP operationId + WS 的 events_subscribe 都必须能在能力表里找到。
+    """契约里的 14 个 HTTP operationId + WS 的 events_subscribe 都必须能在能力表里找到。
 
     缺条目会退化成 404（「好像没这个功能」），而目标行为是 503 + 明确原因。
     `events_subscribe` 不进 MCP 工具面（`x-websocket`），但仍是一项公开操作。
@@ -128,6 +128,7 @@ def test_every_public_operation_has_a_capability_entry():
         "robot_calibration_get",
         "robot_calibration_set",
         "robot_speak",
+        "robot_announce",
         "speech_listen",
         "audio_state",
         "audio_mute",

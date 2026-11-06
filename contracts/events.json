@@ -217,7 +217,9 @@
         "response_id": {"type": "string", "required": true},
         "task_id": {"type": "string", "required": false},
         "voice": {"type": "string", "required": false},
-        "chunks": {"type": "integer", "required": false}
+        "chunks": {"type": "integer", "required": false},
+        "approval_id": {"type": "string", "required": false},
+        "kind": {"type": "string", "required": false}
       }
     },
     {
@@ -241,8 +243,11 @@
       "category": "speech",
       "payload": {
         "response_id": {"type": "string", "required": true},
+        "task_id": {"type": "string", "required": false},
         "chunks": {"type": "integer", "required": false},
-        "played": {"type": "integer", "required": false}
+        "played": {"type": "integer", "required": false},
+        "approval_id": {"type": "string", "required": false},
+        "kind": {"type": "string", "required": false}
       }
     },
     {
@@ -250,8 +255,21 @@
       "category": "speech",
       "payload": {
         "response_id": {"type": "string", "required": true},
+        "task_id": {"type": "string", "required": false},
         "reason": {"type": "string", "required": true},
-        "played": {"type": "integer", "required": false}
+        "played": {"type": "integer", "required": false},
+        "approval_id": {"type": "string", "required": false},
+        "kind": {"type": "string", "required": false}
+      }
+    },
+    {
+      "type": "speech.announce_failed",
+      "category": "speech",
+      "payload": {
+        "approval_id": {"type": "string", "required": true},
+        "kind": {"type": "string", "required": true},
+        "task_id": {"type": "string", "required": true},
+        "reason": {"type": "string", "required": true}
       }
     }
   ],

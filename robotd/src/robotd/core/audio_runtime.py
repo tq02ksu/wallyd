@@ -51,10 +51,16 @@ class Utterance:
 
 @dataclass
 class Response:
-    """一轮播报。``chunks`` 是分句数，用于 ``tts_finished.played`` 统计。"""
+    """一轮播报。``chunks`` 是分句数，用于 ``tts_finished.played`` 统计。
+
+    ``approval_id`` / ``kind`` 只有系统审批播报才有：它们让 agentd 能在事件流里
+    认出「这一轮是哪个审批的复述」，而不是靠本地猜。
+    """
 
     response_id: str
     task_id: str | None
+    approval_id: str | None = None
+    kind: str | None = None
     chunks: int = 0
     played: int = 0
     started_chunks: set[int] = field(default_factory=set)
@@ -205,12 +211,23 @@ class AudioRuntime:
             self.on_utterance_done(utt, "cancelled", reason)
 
     # ------------------------------------------------------------ 播报
-    def new_response(self, *, task_id: str | None) -> Response:
+    def new_response(
+        self,
+        *,
+        task_id: str | None,
+        approval_id: str | None = None,
+        kind: str | None = None,
+    ) -> Response:
         bridge = self.bridge
         if bridge is None or not bridge.ready():
             raise RuntimeError(f"语音桥不可用（{self.bridge_status.value}）：{self._last_error()}")
         with self._lock:
-            resp = Response(response_id=f"tts-{uuid.uuid4().hex[:8]}", task_id=task_id)
+            resp = Response(
+                response_id=f"tts-{uuid.uuid4().hex[:8]}",
+                task_id=task_id,
+                approval_id=approval_id,
+                kind=kind,
+            )
             self.response = resp
         return resp
 
@@ -239,6 +256,33 @@ class AudioRuntime:
         bridge = self.bridge
         if bridge is not None and bridge.ready():
             bridge.send({"cmd": "stop_speak", "reason": reason}, best_effort=True)
+
+    def abort_response(self, reason: str = "stop") -> None:
+        """**本地立即中止**当前播报，并发出 ``speech.tts_cancelled``。
+
+        与 ``cancel_speaking`` 的区别：那个只是通知桥，等桥回报 ``tts_cancelled``；
+        本方法用于 ``robot_stop`` 这种安全旁路——用户说「停」要立刻停，不能等桥回应，
+        更不能因为桥不可用就静默成功。桥稍后回报的 ``tts_cancelled`` 会因
+        ``self.response`` 已清空而被忽略，不会重复发终态事件。
+        """
+        with self._lock:
+            resp = self.response
+            self.response = None
+        self.cancel_speaking(reason)
+        if resp is None:
+            return
+        self._emit(
+            "speech.tts_cancelled",
+            self._response_payload(resp, reason=reason, played=resp.played),
+        )
+        if self.on_response_done is not None:
+            self.on_response_done(resp, "cancelled")
+
+    def clear_response(self, resp: Response) -> None:
+        """只清理运行时引用，不发终态事件（调用方自己负责失败事件）。"""
+        with self._lock:
+            if self.response is resp:
+                self.response = None
 
     # ------------------------------------------------------------ 桥事件翻译
     def handle_bridge_event(self, ev: dict[str, Any]) -> None:
@@ -366,12 +410,7 @@ class AudioRuntime:
         resp.chunks = int(ev.get("chunks") or 0)
         self._emit(
             "speech.tts_started",
-            {
-                "response_id": resp.response_id,
-                "task_id": resp.task_id,
-                "voice": str(ev.get("voice") or ""),
-                "chunks": resp.chunks,
-            },
+            self._response_payload(resp, voice=str(ev.get("voice") or ""), chunks=resp.chunks),
         )
 
     def _tts_chunk(self, ev: dict[str, Any], *, started: bool) -> None:
@@ -400,20 +439,12 @@ class AudioRuntime:
         if cancelled:
             self._emit(
                 "speech.tts_cancelled",
-                {
-                    "response_id": resp.response_id,
-                    "reason": str(ev.get("reason") or "interrupted"),
-                    "played": played,
-                },
+                self._response_payload(resp, reason=str(ev.get("reason") or "interrupted"), played=played),
             )
         else:
             self._emit(
                 "speech.tts_finished",
-                {
-                    "response_id": resp.response_id,
-                    "chunks": chunks,
-                    "played": played,
-                },
+                self._response_payload(resp, chunks=chunks, played=played),
             )
         if self.on_response_done is not None:
             self.on_response_done(resp, "cancelled" if cancelled else "completed")
@@ -439,15 +470,27 @@ class AudioRuntime:
         if resp is not None:
             self._emit(
                 "speech.tts_cancelled",
-                {
-                    "response_id": resp.response_id,
-                    "reason": "bridge_exit",
-                    "played": resp.played,
-                },
+                self._response_payload(resp, reason="bridge_exit", played=resp.played),
             )
             if self.on_response_done is not None:
                 self.on_response_done(resp, "failed")
         self.emit_state()
+
+    @staticmethod
+    def _response_payload(resp: Response, **extra: Any) -> dict[str, Any]:
+        """播报事件的公共字段：``response_id`` + 可选关联键。
+
+        ``task_id`` / ``approval_id`` / ``kind`` 只在有值时出现：用 null 表示
+        「不适用」会让下游多一种要处理的形状。
+        """
+        payload: dict[str, Any] = {"response_id": resp.response_id, **extra}
+        if resp.task_id:
+            payload["task_id"] = resp.task_id
+        if resp.approval_id:
+            payload["approval_id"] = resp.approval_id
+        if resp.kind:
+            payload["kind"] = resp.kind
+        return payload
 
     def _last_error(self) -> str:
         bridge = self.bridge

@@ -40,6 +40,19 @@ export interface SpeechRouterHooks {
     stop_reason?: string;
     route_hint?: string;
   }) => void;
+  /**
+   * 系统播报（审批复述）的真实终态。
+   *
+   * `ok:false` 包括被 stop 打断、桥退出、播报失败——调用方**不得**据此开启确认窗口。
+   */
+  onAnnouncementFinished?: (input: {
+    approval_id: string;
+    kind?: string;
+    ok: boolean;
+    reason?: string;
+    response_id?: string;
+    task_id?: string;
+  }) => void;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -92,6 +105,15 @@ export class RobotdEventBridge {
           excerpt: this.speakText.get(String(p.response_id ?? '')),
         });
         this.speakText.delete(String(p.response_id ?? ''));
+        if (typeof p.approval_id === 'string' && p.approval_id) {
+          this.hooks.onAnnouncementFinished?.({
+            approval_id: p.approval_id,
+            kind: typeof p.kind === 'string' ? p.kind : undefined,
+            ok: true,
+            response_id: typeof p.response_id === 'string' ? p.response_id : undefined,
+            task_id: typeof p.task_id === 'string' ? p.task_id : undefined,
+          });
+        }
         return;
 
       case 'speech.tts_cancelled':
@@ -101,6 +123,28 @@ export class RobotdEventBridge {
           played: int(p.played),
         });
         this.speakText.delete(String(p.response_id ?? ''));
+        if (typeof p.approval_id === 'string' && p.approval_id) {
+          this.hooks.onAnnouncementFinished?.({
+            approval_id: p.approval_id,
+            kind: typeof p.kind === 'string' ? p.kind : undefined,
+            ok: false,
+            reason: typeof p.reason === 'string' ? p.reason : 'interrupted',
+            response_id: typeof p.response_id === 'string' ? p.response_id : undefined,
+            task_id: typeof p.task_id === 'string' ? p.task_id : undefined,
+          });
+        }
+        return;
+
+      case 'speech.announce_failed':
+        if (typeof p.approval_id === 'string' && p.approval_id) {
+          this.hooks.onAnnouncementFinished?.({
+            approval_id: p.approval_id,
+            kind: typeof p.kind === 'string' ? p.kind : undefined,
+            ok: false,
+            reason: typeof p.reason === 'string' ? p.reason : 'announce_failed',
+            task_id: typeof p.task_id === 'string' ? p.task_id : undefined,
+          });
+        }
         return;
 
       case 'device.lost':
@@ -281,6 +325,7 @@ function normCancelReason(reason: unknown): string {
     case 'interrupted':
     case 'bridge_exit':
     case 'muted':
+    case 'stop':
     case 'requested':
       return r;
     default:

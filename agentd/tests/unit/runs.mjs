@@ -147,6 +147,82 @@ for (const key of ['ok', 'run', 'steps', 'tool_calls', 'approvals', 'result', 'd
 }
 check('run 必填字段齐全', ['run_id', 'prompt', 'status', 'created_at', 'route'].every((k) => k in d.run));
 
+console.log('— 审批播报与确认窗口');
+const r6 = svc.submitRun({ prompt: '跟着穿红衣服的人', route: 'fast' });
+const ap1 = svc.createApproval({
+  runId: r6.run_id,
+  capability: 'robot_follow',
+  actionLabel: '向前跟随',
+  argsSummary: '目标：穿红衣服的人',
+  argsJson: '{"target":"穿红衣服的人"}',
+});
+check('审批先落库', svc.getApproval(ap1.approval_id)?.status === 'persisted');
+svc.markApprovalAnnounced(ap1.approval_id, '请确认：向前跟随。参数：目标：穿红衣服的人。确认请说“确认”。');
+check('播报受理后状态 announced', svc.getApproval(ap1.approval_id)?.status === 'announced');
+check(
+  '受理不等于开窗',
+  svc.getRunDetail(r6.run_id).run.status !== 'waiting_confirmation',
+  svc.getRunDetail(r6.run_id).run.status,
+);
+
+const win = svc.openConfirmationWindow(ap1.approval_id, 30000);
+check('播报完成后开窗', win.opened === true);
+check('run 进入 waiting_confirmation', svc.getRunDetail(r6.run_id).run.status === 'waiting_confirmation');
+const apRow = svc.getApproval(ap1.approval_id);
+check('审批进入 waiting', apRow.status === 'waiting');
+check('窗口开启时刻落库', typeof apRow.window_opens_at === 'string' && apRow.window_opens_at.length > 0);
+check('窗口关闭时刻晚于开启', Date.parse(apRow.window_closes_at) > Date.parse(apRow.window_opens_at));
+const waitRow = store.one(
+  'SELECT params_json FROM events WHERE type = ? AND run_id = ?',
+  'run.waiting_confirmation',
+  r6.run_id,
+);
+const waitParams = JSON.parse(waitRow.params_json);
+check('waiting_confirmation 带 approval_id', waitParams.approval_id === ap1.approval_id);
+check('waiting_confirmation 带窗口开启时刻', waitParams.window_opened_at === apRow.window_opens_at);
+
+const winAgain = svc.openConfirmationWindow(ap1.approval_id, 30000);
+const waitCount = store.one(
+  'SELECT COUNT(*) AS n FROM events WHERE type = ? AND run_id = ?',
+  'run.waiting_confirmation',
+  r6.run_id,
+).n;
+check('重复完成事件幂等', winAgain.opened === true && winAgain.reason === 'already_open' && waitCount === 1);
+svc.cancelRun(r6.run_id, '清理审批用例');
+
+console.log('— 播报失败不开窗');
+const r7 = svc.submitRun({ prompt: '跟着我', route: 'fast' });
+const ap2 = svc.createApproval({
+  runId: r7.run_id,
+  capability: 'robot_follow',
+  actionLabel: '向前跟随',
+  argsSummary: '目标：我',
+});
+const aborted = svc.abortApproval(ap2.approval_id, '系统播报未完成（bridge_exit）');
+check('失败收尾生效', aborted.changed === true);
+check('失败后 run failed', svc.getRunDetail(r7.run_id).run.status === 'failed');
+check('失败后审批 cancelled', svc.getApproval(ap2.approval_id)?.status === 'cancelled');
+const unavailable = store.one(
+  'SELECT COUNT(*) AS n FROM events WHERE type = ? AND approval_id = ?',
+  'approval.unavailable',
+  ap2.approval_id,
+).n;
+check('失败发 approval.unavailable', unavailable === 1);
+const windowForR7 = store.one(
+  'SELECT COUNT(*) AS n FROM events WHERE type = ? AND run_id = ?',
+  'run.waiting_confirmation',
+  r7.run_id,
+).n;
+check('失败绝不开窗', windowForR7 === 0);
+
+console.log('— 确认窗口只能由播报完成开启');
+const r8 = svc.submitRun({ prompt: '绕过检查', route: 'fast' });
+check(
+  'transition 不能直改 waiting_confirmation',
+  expectApi(() => svc.transition(r8.run_id, 'waiting_confirmation'), 'E_CONFLICT') === 'ok',
+);
+svc.cancelRun(r8.run_id, '清理');
+
 console.log('— 不可写 fail-closed');
 store.markUnwritable('磁盘满（模拟）');
 check('写会话被拒 E_STORE', expectApi(() => svc.createSession('x'), 'E_STORE') === 'ok');

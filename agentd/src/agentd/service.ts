@@ -21,6 +21,7 @@ import { RobotdEventSubscriber } from './robotd-events.ts';
 import { RobotdEventBridge } from './robotd-event-bridge.ts';
 import { RobotdClient } from './robotd-client.ts';
 import { RunService, RUN_STATUSES, approvalView } from './runs.ts';
+import { ApprovalAnnouncer } from './approval-announcer.ts';
 import { matchRoute, ruleTag } from './router.ts';
 import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
@@ -138,11 +139,13 @@ export async function createRuntime(
     baseUrl: config.robotdUrl,
     log: (m, x) => log(m, x),
   });
+  let announcerRef: ApprovalAnnouncer | null = null;
   const robotdBridge = new RobotdEventBridge({
     events,
     store,
     hooks: {
       log: (m, x) => log(m, x),
+      onAnnouncementFinished: (outcome) => announcerRef?.onFinished(outcome),
       // 路由（A11）尚未实现：这里明确不消费，避免让人以为已经接上路由。
     },
   });
@@ -224,6 +227,13 @@ export async function createRuntime(
   };
 
   const runs = new RunService({ store, events, log, onEvent: broadcastByseq });
+  const approvalAnnouncer = new ApprovalAnnouncer({
+    runs,
+    robotd,
+    log,
+    noteSpeak: (taskId, text) => robotdBridge.noteSpeak(taskId, text),
+  });
+  announcerRef = approvalAnnouncer;
   const models = new ModelService({
     store,
     events,
@@ -385,7 +395,7 @@ export async function createRuntime(
       // - 不阻塞响应：先返回 run_id，执行结果经事件流给出；
       // - 失败如实记录，不把未执行过的动作显示成「已停止」。
       if (matched.kind === 'matched' && !result.duplicate) {
-        void executeFastRun(result.run_id, matched.rule.capability, matched.args);
+        void executeFastRun(result.run_id, matched.rule.capability, matched.args, matched.rule.summary);
       }
 
       return {
@@ -413,7 +423,12 @@ export async function createRuntime(
    * （`robot.stop`）不需要审批；将来加需要审批的规则时，这里必须落到
    * `waiting_confirmation` 而不是直接执行——规则不能降低审批门。
    */
-  async function executeFastRun(runId: string, capability: string, args: Record<string, unknown>): Promise<void> {
+  async function executeFastRun(
+    runId: string,
+    capability: string,
+    args: Record<string, unknown>,
+    actionLabel: string = capability,
+  ): Promise<void> {
     try {
       // 能力表可能还没探测；探测失败不静默跳过审批，宁可失败
       let tools = robotd.capabilities.current;
@@ -434,11 +449,18 @@ export async function createRuntime(
         return;
       }
       if (tool.requiresApproval) {
-        // 首版没有审批 UI 绑定，如实停在「等待确认」而不是偷偷执行
-        runs.transition(runId, 'waiting_confirmation', {
-          reason: 'approval_required',
-          detail: `能力 ${capability} 需要确认后才能执行`,
+        // 先持久化审批，再用系统播报复述，**播完**才开确认窗口（run.waiting_confirmation）。
+        // 不能用需审批的 robot_speak：那会让「问用户确认」本身再进入一次等待确认。
+        const summary = compactJson(args).slice(0, 200);
+        const approval = runs.createApproval({
+          runId,
+          capability,
+          actionLabel,
+          argsSummary: summary,
+          argsJson: compactJson(args),
         });
+        // 失败会由 announcer 写 approval.unavailable + run.finished，不在这里重复收尾
+        await approvalAnnouncer.announce(approval.approval_id);
         return;
       }
 

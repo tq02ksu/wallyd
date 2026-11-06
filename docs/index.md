@@ -78,6 +78,10 @@
 | [ADR-0010](decisions/0010-robotd-python-control-isolation.md) | Python 控制隔离与串口所有权（候选 A） | proposed |
 | [ADR-0011](decisions/0011-audio-bridge-app-bundle-tcc.md) | 音频桥做成 .app bundle 并由 open 拉起 | accepted |
 
+## 7. 设计记录（按 issue）
+
+- [GH-19：审批复述的系统播报路径](design/GH-19.md) - `robot_announce` 的契约、事件与确认窗口时序
+
 ## 7. 实测与评测（有时效）
 
 - [视觉延迟实测（2026-10-06）](../eval/vision-latency.md) - VLM 0.84s/帧 vs 系统检测器 4–20ms
