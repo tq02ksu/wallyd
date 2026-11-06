@@ -78,7 +78,11 @@
 | [ADR-0010](decisions/0010-robotd-python-control-isolation.md) | Python 控制隔离与串口所有权（候选 A） | proposed |
 | [ADR-0011](decisions/0011-audio-bridge-app-bundle-tcc.md) | 音频桥做成 .app bundle 并由 open 拉起 | accepted |
 
-## 7. 实测与评测（有时效）
+## 7. 设计记录（按 issue）
+
+- [GH-8：快速路由规则表的长大方式](design/GH-8.md) - 否定作用域、参数槽、三条规则与能力漂移断言
+
+## 8. 实测与评测（有时效）
 
 - [视觉延迟实测（2026-10-06）](../eval/vision-latency.md) - VLM 0.84s/帧 vs 系统检测器 4–20ms
 - [视觉评测脚本使用说明](../eval/README.md) - 上面那份实测怎么复跑
@@ -87,7 +91,7 @@
 - [本地大脑全链路验证（2026-10-25）](../eval/brain-qwen3-toolcalling-2026-10-25.md) - Codex→moon-bridge→mlx_lm→Qwen3-4B 端到端与工具调用通过率
 - [Codex app-server 接入取证（A01）](../eval/codex-harness-probe.md) - SDK 分发、进程边界与 `CODEX_HOME` 隔离的实证
 
-## 8. 历史归档（不代表现状）
+## 9. 历史归档（不代表现状）
 
 - [历史文档归档说明](archive/README.md) - 归档范围与「以现行文档为准」的声明
 - [POC 使用说明](archive/poc-readme.md) - 已删除的 POC 的启动与排错记录

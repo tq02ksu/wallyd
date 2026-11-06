@@ -64,7 +64,7 @@ UI 可落 `src/panel/`，不强制 React 或新增构建工具。
 | A08 | M2 模型 profile 与凭证引用 | P0 | A01、A05 | schema、不可变 revision、安全存储适配 | 已完成 |
 | A09 | M2 兼容测试、激活与回退 | P0 | A08 | 分项探测、验证失效、CAS 激活 | 已完成 |
 | A10 | M2 app-server 生命周期适配 | P0 | A01、A04、A09 | 受管 Harness、线程/turn/中断、协议隔离 | 未开始（依赖已就位：`@openai/codex-sdk` 提供 `Codex`/`Thread`/`runStreamed`/`turn/interrupt`；生命周期与事件映射待写） |
-| A11 | M3 输入路由与会话 | P1 | A02、A05、A10 | ASR/文本去重、快速路由、澄清 | 部分（**快速路由已可用**：规则表 `stop_robot@1` + 否定守卫 + 歧义/澄清分流 + 真实执行与步骤落库，`agentd/src/agentd/router.ts`，测试 `tests/unit/router.test.ts`；ASR 输入去重与更多规则待补） |
+| A11 | M3 输入路由与会话 | P1 | A02、A05、A10 | ASR/文本去重、快速路由、澄清 | 部分（**快速路由已可用**：`stop_robot@1` / `follow_me@1` / `come_here@1` 三条规则 + 作用域否定守卫 + 结构化参数槽 + 歧义/澄清分流 + 真实执行与步骤落库，`agentd/src/agentd/router.ts`，测试 `tests/unit/router.test.ts` 与 `tests/contract/router.mjs`；ASR 输入去重待补） |
 | A12 | M3 run 编排与工具执行对账 | P0 | A06、A07、A10、A11 | 状态机、步骤、robot task 关联、未知结果 | 部分（状态机/步骤/工具调用/outcome_unknown 已实现；未接 Harness 执行） |
 | A13 | M3 语音审批与一次性授权 | P0 | A02、A05、A12 | 审计、确认窗口、授权绑定、robotd 联调 | 未开始 |
 | A14 | M3 停止、取消与故障降级 | P0 | A06、A12、A13 | 无模型停止、取消竞态、旧授权失效 | 部分（停止旁路与取消竞态已实现；旧授权失效随 A13） |

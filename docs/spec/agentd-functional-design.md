@@ -134,6 +134,7 @@ agentd 保持 TypeScript，robotd 的 Python 迁移不影响这个分工。
 
 1. **否定/疑问守卫**先跑：`不要|不用|别|甭|无需|不必|能不能|可不可以|可以吗|是不是|要不要`
    命中即**返回无匹配**（交给 Harness）。「不要停」被 stop 规则吃掉会执行一次真实且无法撤销的停止。
+   （这条整串守卫已在 [3.1.2](#312-实现记录2026-11-06规则表可扩展化gh-8) 改为按作用域判断。）
 2. **受保护规则单独一轮**：命中即决，扩展规则不能延迟 STOP。
 3. 其余规则求候选集：0 条 → Harness；1 条 → 查前提；≥2 条 → **澄清**（列出候选，不按第一条执行）。
 
@@ -175,6 +176,32 @@ agentd 保持 TypeScript，robotd 的 Python 迁移不影响这个分工。
 
 **同步补的契约字段**：`RunSummary.fast_rule`（此前只有 `RunAccepted` 有，详情接口拿不到，
 违反「可追溯」要求）。
+
+#### 3.1.2 实现记录（2026-11-06：规则表可扩展化，GH-8）
+
+3.1.1 的**整串否定守卫**（`不要|不用|别|…|能不能|可以吗` 命中即 `none`）已替换为**作用域判断**：
+它会把「能不能往前走一点」「可以跟着我吗」这类最常用请求一并挡回 Harness。
+
+**判定形状**（`agentd/src/agentd/router.ts`）：
+
+- `FastRule.negationScope: 'adjacent' | 'sentence'`，默认 `adjacent`。
+  `adjacent` 用规则命中的**位置**切片动词前缀：前缀必须是合法引导语（句首 / 逗号后分句 /
+  少量礼貌词），且否定词必须紧贴动词（否定词后 0–2 个空格或逗号）。
+  `别停`、`别过来` 仍判否定；`别着急，过来`、`别着急，往前走` 不再被整句吞掉。
+- **受保护规则恒为 `sentence`**（`scopeOf()` 强制，声明 `adjacent` 也不放宽）：
+  STOP 命中时整句任意否定/疑问都拦掉，然后交给 Harness。
+- `FastRule.slots?: { name, pattern, required }[]` 取代旧的 `args(m)`：
+  `matchRoute` 统一抽参，缺必填槽 → `clarify`（`missing: slot:<name>`），不带着空参数执行。
+
+**规则表**：`stop_robot@1`（表达与版本不变，`protected`）、`follow_me@1`、`come_here@1`。
+后两条都映射 `robot_follow`（当前公开运动能力只有这一个），并要求 `target_track_id`：
+未绑定时澄清——规格本文 §3.1 的「目标可靠绑定才映射 `robot_follow`，否则澄清」。
+`come_here` 的「过来」因此是 `clarify(come_here)`，不是直接执行；执行层仍按能力契约取审批要求。
+
+**新增契约漂移断言**：`agentd/tests/contract/router.mjs`（已接进 `npm run test:contract`）
+要求每条规则的能力名出现在 `contracts/generated/mcp-tools.json` 的 `name` 集合、
+每个参数槽名是该能力 `inputSchema.properties` 的字段，并禁止规则携带审批字段。
+设计取舍与「目标未绑定 → 澄清」的差异说明见 [GH-8 设计记录](../design/GH-8.md)。
 
 ### 3.2 任务生命周期与中断
 
