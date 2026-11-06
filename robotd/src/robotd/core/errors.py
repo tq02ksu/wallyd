@@ -111,3 +111,12 @@ def wrap_unexpected(exc: BaseException) -> RobotdError:
     if isinstance(exc, RobotdError):
         return exc
     return RobotdError(ErrorCode.INTERNAL, f"{type(exc).__name__}: {exc}")
+
+
+class EventContractError(RobotdError, ValueError):
+    """事件不符合契约：调用方写错了事件名或 payload（如未知设备名）。
+
+    同时是 ``ValueError``——调用点可以按普通参数错误处理，测试也可以直接
+    ``pytest.raises(ValueError)``；同时是 ``RobotdError``——HTTP 层走统一错误体，
+    落 400 ``E_VALIDATION``，而不是被 ``wrap_unexpected`` 收成 500 ``E_INTERNAL``。
+    """

@@ -35,6 +35,7 @@
     "motion.*",
     "safety.*",
     "speech.*",
+    "state.*",
     "task.*"
   ],
   "events": [
@@ -205,6 +206,21 @@
       "required_fields": [
         "device",
         "state"
+      ]
+    },
+    {
+      "type": "state.rejected",
+      "category": "state",
+      "payload_ref": null,
+      "payload_fields": [
+        "type",
+        "payload_keys",
+        "reason"
+      ],
+      "required_fields": [
+        "type",
+        "payload_keys",
+        "reason"
       ]
     },
     {

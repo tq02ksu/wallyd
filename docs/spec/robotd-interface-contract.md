@@ -202,6 +202,11 @@ accepted → running → completed | failed | cancelled
 订阅经过过滤时，未看到某些全局 `seq` 不代表丢包；事件流不替代状态快照。发现补发不可用或状态不确定时，
 客户端重新读取 `/v1/robot/state`。
 
+`seq` 只在事件**已经生效**时才分配：事件先在一份归并工作副本上校验、再一次性发布状态。
+校验失败的 `emit` 不消耗序号、不写保留日志、不分发，因此「补齐 `seq`」永远对应一次真实的因果变化；
+契约不合法的调用方输入直接按 `E_VALIDATION` 拒绝，归并内部失败则发一条 `state.rejected`
+（`{type, payload_keys, reason}`，不含 payload 原文）说明这次迁移没有生效。
+
 ### 6.2 事件类别
 
 公开事件至少覆盖以下有业务意义的变化；字段以 OpenAPI 的 WS schema / 事件登记表进一步机器化。
@@ -211,6 +216,7 @@ accepted → running → completed | failed | cancelled
 | 任务 | `task.started`, `task.progress`, `task.completed`, `task.failed`, `task.cancelled` | `task_id`、能力名、进度或终态/错误 |
 | 运动/安全 | `motion.plan`, `safety.stopped` | 计划摘要或停止原因；不宣称实际到位 |
 | 设备 | `device.ready`, `device.lost`, `device.recovered`, `device.reset`, `device.changed` | 设备名、变化/原因、可确认的固件信息 |
+| 状态 | `state.rejected` | 被拒事件的 `type`、`payload_keys` 与 `reason`；不含 payload 原文 |
 | 视觉 | `vision.*`, `camera.*`, `people.*`, `person.*` | 观测、有效性与时间信息；不得把模型原始格式直接作为稳定能力契约 |
 | 语音 | `speech.*`, `audio.state` | utterance/task 关联、partial revision 或 final 文本、音频状态 |
 

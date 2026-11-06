@@ -55,6 +55,7 @@
 - [agentd 详细功能与界面设计](spec/agentd-functional-design.md) - 编排、模型配置、总览/任务/事件界面与安全边界
 - [agentd 开发任务清单](spec/agentd-development-plan.md) - 六阶段任务与分批交付门槛
 - [摄像头自动检测与配置](spec/camera-detection.md) - macOS UVC 判定与采集配置
+- [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
 
 ## 5. 契约专题（有时效）
 

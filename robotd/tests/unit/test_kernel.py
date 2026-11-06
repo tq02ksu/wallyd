@@ -9,12 +9,32 @@ import pytest
 from robotd.core.errors import ErrorCode, RobotdError
 from robotd.core.kernel import EventKernel, matches_filter
 from robotd.core.state import RobotStateStore
-from robotd.core.types import Exclusivity, TaskState
+from robotd.core.types import FORBIDDEN_PAYLOAD_KEYS, Exclusivity, TaskState
 
 
 def make_kernel(**kwargs) -> EventKernel:
     st = RobotStateStore(robot_id="test-bot", transport="sim", **kwargs.pop("state_kwargs", {}))
     return EventKernel(state=st, instance_id="inst-test", **kwargs)
+
+
+def state_fields(snap: dict, *, with_cursor: bool = False) -> dict:
+    """快照里真正的状态字段。
+
+    ``ts`` 是「这次读取的时刻」，不是状态；内部失败后仍会发一条 ``state.rejected``，
+    所以那条路径还要忽略推进了一格的 ``event_seq`` 游标。
+    """
+    ignored = {"ts"} if with_cursor else {"ts", "event_seq"}
+    return {key: value for key, value in snap.items() if key not in ignored}
+
+
+def boom_at(step_name: str) -> object:
+    """构造一个「归并走到某一步就抛错」的注入点。"""
+
+    def hook(step: str) -> None:
+        if step == step_name:
+            raise RuntimeError(f"injected reduce failure at {step}")
+
+    return hook
 
 
 # ---------------------------------------------------------------- 过滤语义
@@ -99,7 +119,10 @@ def test_subscription_gets_snapshot_and_no_cursor_gap():
     got: list = []
     handle = k.subscribe(["device.*"], got.append)
     assert handle.snapshot["event_seq"] == 3
-    assert handle.backlog == []
+    assert handle.cursor == 3
+    # 早先的 `backlog` 恒为空却自称「回放 seq > 游标」，属于假语义；
+    # 补发统一由 resume() 判定，subscribe() 只负责「快照即起点」。
+    assert not hasattr(handle, "backlog")
     for i in range(2):
         k.emit("device.changed", device="pump", state=f"late{i}")
     handle.close()
@@ -297,3 +320,160 @@ def test_snapshot_cursor_matches_last_seq():
         k.emit("device.changed", device="pump", state="on")
     snap = k.snapshot()
     assert snap["event_seq"] == k.last_seq == 7
+
+
+# ---------------------------------------------------------------- 归并失败：先算后发（GH-17）
+def test_invalid_device_name_rejected_without_side_effects():
+    """验收 1：未知 device 是契约错误——不动序号、不进日志、不补发、不改状态。"""
+    k = make_kernel()
+    pushed: list = []
+    k.subscribe(["*"], pushed.append)
+    before = k.snapshot()
+
+    with pytest.raises(ValueError) as ei:
+        k.emit("device.lost", device="lidar")
+
+    # 统一错误体：不再是越过 RobotdError 的 builtins.KeyError → 500/E_INTERNAL
+    assert isinstance(ei.value, RobotdError)
+    assert ei.value.code is ErrorCode.VALIDATION
+    assert ei.value.http_status == 400
+
+    assert k.last_seq == 0
+    assert len(k._log) == 0
+    assert k.resume("inst-test", 0) == ("ok", [])
+    assert pushed == []
+    assert state_fields(k.snapshot(), with_cursor=True) == state_fields(before, with_cursor=True)
+    assert ei.value.to_public()["error"]["code"] == "E_VALIDATION"
+
+
+def test_failed_emit_does_not_consume_seq():
+    """失败不消耗序号：下一条成功事件仍然紧接上一条，「补 seq」对应真实因果。"""
+    k = make_kernel()
+    with pytest.raises(ValueError):
+        k.emit("device.lost", device="lidar")
+
+    ev = k.emit("device.ready", device="esp32", firmware="poc-2.1")
+    assert ev.seq == 1
+    assert k.last_seq == 1
+    assert [item.seq for item in k.resume("inst-test", 0)[1]] == [1]
+
+
+def test_rejection_record_keeps_keys_not_values():
+    """被拒事件只留形状：{type, payload_keys, reason}，不含 payload 原文。"""
+    k = make_kernel()
+    with pytest.raises(ValueError):
+        k.emit("device.lost", device="lidar")
+
+    [record] = k.rejections()
+    assert record == {"type": "device.lost", "payload_keys": ["device"], "reason": "unknown_device"}
+    assert "lidar" not in str(record)
+    assert k.stats()["rejections"] == 1
+
+
+def test_pending_state_invisible_during_reduce():
+    """验收 1：归并只写工作副本；发布之前 snapshot() 看不到 pending 状态。"""
+    k = make_kernel()
+    k.emit("device.ready", device="esp32", firmware="poc-2.1")
+    seen: list[dict] = []
+
+    def hook(step: str) -> None:
+        if step == "device.reset.link":
+            # 同一线程重入 RLock：读到的是权威状态，不是 pending 副本
+            seen.append(k.snapshot())
+
+    k.reduce_step_hook = hook
+    k.emit("device.reset", device="esp32", firmware="poc-3.0", pose_valid=False, odometry_reset=True)
+    k.reduce_step_hook = None
+
+    assert seen and seen[0]["firmware"] == "poc-2.1"
+    assert seen[0]["pose"]["valid"] is True
+    # 只有发布那一刻才生效
+    assert k.snapshot()["firmware"] == "poc-3.0"
+    assert k.snapshot()["pose"]["valid"] is False
+
+
+def test_device_reset_failure_restores_pose_and_odometry():
+    """验收 3：device.reset 中途失败，pose 与 odometry 回到 emit 之前。"""
+    from robotd.core.types import Pose
+
+    k = make_kernel()
+    k.emit("device.ready", device="esp32", firmware="poc-2.1")
+    k.state._apply_pose(Pose(x=1.2, y=0.3, theta=0.1))
+    k.state._apply_odometry(left_commanded=500, right_commanded=500)
+    before = k.snapshot()
+
+    k.reduce_step_hook = boom_at("device.reset.pose")
+    with pytest.raises(RuntimeError, match="injected reduce failure"):
+        k.emit(
+            "device.reset",
+            device="esp32",
+            firmware="poc-9.9",
+            pose_valid=False,
+            odometry_reset=True,
+        )
+    k.reduce_step_hook = None
+
+    after = k.snapshot()
+    assert after["pose"] == before["pose"]
+    assert after["pose"]["valid"] is True
+    assert after["odometry"]["left_commanded"] == 500
+    assert after["odometry"]["right_commanded"] == 500
+    assert after["firmware"] == "poc-2.1"
+    assert k.state.esp32.value == "ready"
+
+
+def test_injected_reduce_failure_publishes_state_rejected_event():
+    """验收 4/5：注入式归并失败，原事件丢弃，改发一条 state.rejected。"""
+    k = make_kernel()
+    pushed: list = []
+    k.subscribe(["*"], pushed.append)
+    first = k.emit("device.ready", device="esp32", firmware="poc-2.1")
+    before = k.snapshot()
+
+    k.reduce_step_hook = boom_at("device.reset.odometry")
+    with pytest.raises(RuntimeError, match="injected reduce failure"):
+        k.emit(
+            "device.reset",
+            device="esp32",
+            firmware="poc-9.9",
+            pose_valid=False,
+            odometry_reset=True,
+        )
+    k.reduce_step_hook = None
+
+    # 被拒事件本身不进日志、不补发；只有说明「这次归并没有生效」的 state.rejected
+    assert [ev.type for ev in k._log] == ["device.ready", "state.rejected"]
+    assert [ev.type for ev in pushed] == ["device.ready", "state.rejected"]
+    verdict, replay = k.resume("inst-test", first.seq)
+    assert verdict == "ok"
+    assert [(ev.seq, ev.type) for ev in replay] == [(first.seq + 1, "state.rejected")]
+    assert k.last_seq == first.seq + 1
+
+    # 状态回到 emit 之前（游标推进了一条 state.rejected，其余字段逐字段相同）
+    assert state_fields(k.snapshot()) == state_fields(before)
+    assert k.stats()["rejections"] == 1
+
+    rejected = k._log[-1]
+    assert set(rejected.payload) == {"type", "payload_keys", "reason"}
+    assert rejected.payload["type"] == "device.reset"
+    assert rejected.payload["payload_keys"] == ["device", "firmware", "odometry_reset", "pose_valid"]
+    assert rejected.payload["reason"] == "reduce_failed"
+    assert not (set(rejected.payload) & FORBIDDEN_PAYLOAD_KEYS)
+    assert "poc-9.9" not in str(rejected.to_public())
+
+
+def test_state_rejected_has_no_payload_values():
+    """验收 5：state.rejected 只带键名与原因，不带被拒 payload 的值。"""
+    k = make_kernel()
+    k.reduce_step_hook = boom_at("device.lost.apply")
+    with pytest.raises(RuntimeError):
+        k.emit("device.lost", device="camera", reason="unplugged-secret-marker")
+    k.reduce_step_hook = None
+
+    [record] = k.rejections()
+    assert record == {
+        "type": "device.lost",
+        "payload_keys": ["device", "reason"],
+        "reason": "reduce_failed",
+    }
+    assert "unplugged-secret-marker" not in str(record)

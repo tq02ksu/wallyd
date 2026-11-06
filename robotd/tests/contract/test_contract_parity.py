@@ -127,6 +127,14 @@ def test_registered_events_have_required_payload_fields(events):
         assert isinstance(ev["payload_fields"], list), ev["type"]
 
 
+def test_state_rejected_event_is_registered_without_payload_values(events):
+    """state.rejected 只能说明「哪条字段被拒、为什么」，不得携带 payload 原文。"""
+    registered = {ev["type"]: ev for ev in events["events"]}
+    rejected = registered["state.rejected"]
+    assert set(rejected["payload_fields"]) == {"type", "payload_keys", "reason"}
+    assert set(rejected["required_fields"]) == {"type", "payload_keys", "reason"}
+
+
 def test_events_never_carry_internal_clock(events):
     banned = set(events["envelope"]["forbidden_payload_keys"])
     for ev in events["events"]:
