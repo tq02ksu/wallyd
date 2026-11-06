@@ -33,6 +33,7 @@
 - [层与模块关系（唯一口径）](layers-and-modules.md) - 「层」这个词的唯一解释：执行位置、边界 B1–B4、接口面 A–C
 - [分层通信与接口设计](communication-protocol.md) - 进程内/进程间/线协议每条边界的传输方式
 - [语音输入输出改造方案（流式优先）](voice-architecture.md) - 语音从 request/response 改为流式管线；方案已部分落地
+- [GH-4 语音桥双管道设计](design/GH-4.md) - 拾音（采集→VAD→ASR）与出话（分句→合成→有界队列→渲染）拆分及可替换 engine 边界
 - [模型选型](model-selection.md) - LLM / TTS / ASR 选型（苹果生态优先，2026-09-17 口径）
 - [产品定位与套件化约束](product-positioning.md) - 平台而非成品、套件化销售的口述决策
 - [可行性评估与技术风险清单](risk-assessment.md) - R1–R7 风险项与验证顺序

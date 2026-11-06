@@ -40,6 +40,8 @@ class Utterance:
 
     utterance_id: str
     task_id: str | None
+    #: True = 桥的 VAD 在常听模式下自动开启，而不是 ``POST /v1/speech/listen`` 发起
+    auto: bool = False
     revision: int = 0
     partial: str | None = None
     speech_ms: int | None = None
@@ -157,6 +159,11 @@ class AudioRuntime:
             if self.muted:
                 raise RuntimeError("当前处于静音状态，不会开始新的识别")
             if self.utt is not None:
+                # 常听模式下桥可能已经用 VAD 自动开了一轮。显式 listen 直接认领这一轮，
+                # 不再发第二个 listen（桥会按 E_BUSY 拒绝，且会让两套 id 对不上）。
+                if self.utt.auto and self.utt.task_id is None:
+                    self.utt.task_id = task_id
+                    return self.utt
                 raise RuntimeError("上一轮听还没结束")
             utt = Utterance(utterance_id=f"utt-{uuid.uuid4().hex[:8]}", task_id=task_id)
             self.utt = utt
@@ -249,6 +256,9 @@ class AudioRuntime:
                 self.mic_format = str(ev.get("asr_format") or "")
                 self.last_error = None
             return
+        if name == "ready":
+            self._adopt_auto_utterance(ev)
+            return
         if name == "vad_calibrated":
             with self._lock:
                 self.calibrated = True
@@ -261,7 +271,7 @@ class AudioRuntime:
             # 桥的 VAD 判出「开始说了」
             if str(ev.get("state")) == "speech":
                 with self._lock:
-                    utt = self.utt
+                    utt = self._utterance_for(ev)
                     if utt is not None and not utt.saw_speech:
                         utt.saw_speech = True
                         self._emit(
@@ -278,7 +288,7 @@ class AudioRuntime:
             return
         if name == "partial":
             with self._lock:
-                utt = self.utt
+                utt = self._utterance_for(ev)
                 if utt is None:
                     return
                 utt.revision += 1
@@ -292,7 +302,7 @@ class AudioRuntime:
             return
         if name == "endpoint":
             with self._lock:
-                utt = self.utt
+                utt = self._utterance_for(ev)
                 if utt is None:
                     return
                 utt.speech_ms = _int(ev.get("speech_ms"))
@@ -332,17 +342,64 @@ class AudioRuntime:
                 self.last_error = str(ev.get("message") or ev.get("code") or "桥报错")
             log.warning("语音桥错误：%s", self.last_error)
 
+    def _utterance_for(self, ev: dict[str, Any]) -> Utterance | None:
+        """只返回事件对应的一轮。
+
+        桥在常听模式下会连续自动开启多轮；旧轮迟到的 partial/final 绝不能写进新轮。
+        事件没带 utterance_id 时保持旧行为，避免把兼容路径误伤。
+        """
+        utt = self.utt
+        if utt is None:
+            return None
+        event_id = ev.get("utterance_id")
+        if event_id is None or str(event_id) == utt.utterance_id:
+            return utt
+        log.debug("忽略 %s 的迟到事件：当前轮是 %s", event_id, utt.utterance_id)
+        return None
+
+    def _adopt_auto_utterance(self, ev: dict[str, Any]) -> None:
+        """把桥用 VAD 自动开的一轮认领到运行时。
+
+        没有这一步，``utt-auto-*`` 的 partial/final 会因为运行时没有当前轮而被丢掉——
+        「一直在听」就只剩桥自己在听。
+        """
+        utterance_id = str(ev.get("utterance_id") or "")
+        if not utterance_id:
+            return
+        with self._lock:
+            if self.muted:
+                return
+            current = self.utt
+            if current is not None:
+                # 显式 listen 会先创建同 id 的轮，再收到桥的 ready；自动轮则直接认领。
+                return
+            utt = Utterance(utterance_id=utterance_id, task_id=None, auto=True)
+            self.utt = utt
+        self._emit(
+            "speech.ready",
+            {
+                "utterance_id": utt.utterance_id,
+                "task_id": None,
+                "locale": str(ev.get("locale") or "zh_CN"),
+                "auto_endpoint": bool(ev.get("auto_endpoint", True)),
+            },
+        )
+
     # ------------------------------------------------------------ 各事件细节
     def _finish_utterance(self, ev: dict[str, Any]) -> None:
         with self._lock:
-            utt = self.utt
-            self.utt = None
+            utt = self._utterance_for(ev)
+            if utt is self.utt:
+                self.utt = None
         if utt is None:
             return
         text = str(ev.get("text") or "").strip()
-        no_speech = bool(ev.get("no_speech")) or not text
+        # 桥显式给了 no_speech 就尊重它：engine_unavailable 会带 text="" + no_speech=false，
+        # 这种情况是失败，不是「用户没说话」。只在字段缺失时才按空文本推断。
+        explicit_no_speech = ev.get("no_speech")
+        no_speech = bool(explicit_no_speech) if explicit_no_speech is not None else not text
         stop_reason = str(ev.get("stop_reason") or ("silence" if not utt.saw_speech else "endpoint"))
-        if no_speech and not utt.saw_speech:
+        if no_speech and not utt.saw_speech and stop_reason not in {"engine_unavailable"}:
             stop_reason = "silence"
         if text:
             with self._lock:
@@ -357,7 +414,8 @@ class AudioRuntime:
             },
         )
         if self.on_utterance_done is not None:
-            self.on_utterance_done(utt, "completed", None)
+            failed = stop_reason in {"engine_unavailable", "engine_error"}
+            self.on_utterance_done(utt, "failed" if failed else "completed", stop_reason if failed else None)
 
     def _tts_started(self, ev: dict[str, Any]) -> None:
         resp = self.response
