@@ -243,6 +243,73 @@ console.log('— 参数槽：统一抽参，缺必填 → clarify');
 }
 
 // ---------------------------------------------------------------- 其它既有纪律
+// ---------------------------------------------------------------- 守卫原因
+// 评审（issue #8 评论）指出：`guarded()` 曾把「语义否定」和「前缀污染」混成一个 boolean。
+// 两者都必须拦，但理由不同——前者是语义，后者是词边界保护。将来放宽 `LEAD_IN`
+// 词表时，若以为两者等价，就会把保护一起放宽掉。所以原因必须是可区分的返回值。
+console.log('— 守卫原因：否定 / 疑问 / 前缀污染三种原因可区分');
+{
+  const r = matchRoute('别停', ctx) as any;
+  // 「别停」是被 `^停$` 这个锚点挡住的，不是守卫——所以没有 blocked 原因。
+  // 这条断言防止有人以为「停」的否定保护来自守卫，把它放宽掉。
+  check('「别停」→ none，且没有 blocked（pattern 的锚点就挡住了）', r.kind === 'none' && r.blocked === undefined, show(r));
+}
+{
+  const r = matchRoute('别跟着我走', ctx) as any;
+  check('「别跟着我走」→ none 且原因是「否定」', r.kind === 'none' && r.blocked?.[0]?.reason === 'negation', show(r));
+  check('原因里记下被拦的规则是 follow_me@1', r.blocked?.[0]?.rule === 'follow_me@1', show(r));
+}
+{
+  const carry = matchRoute('拿过来', ctx) as any;
+  check(
+    '「拿过来」→ 前缀污染（词边界保护，不是语义否定）',
+    carry.kind === 'none' && carry.blocked?.[0]?.reason === 'prefix',
+    show(carry),
+  );
+  const cont = matchRoute('继续跟着我走', ctx) as any;
+  check('「继续跟着我走」→ 前缀污染', cont.kind === 'none' && cont.blocked?.[0]?.reason === 'prefix', show(cont));
+  const stopFollow = matchRoute('停止跟着我', ctx) as any;
+  check('「停止跟着我」→ 前缀污染（不猜成 follow）', stopFollow.kind === 'none' && stopFollow.blocked?.[0]?.reason === 'prefix', show(stopFollow));
+}
+{
+  const r = matchRoute('别，过来', ctx) as any;
+  check('「别，过来」→ 紧邻否定（不是前缀污染）', r.kind === 'none' && r.blocked?.[0]?.reason === 'negation', show(r));
+  check('原因里记的是 come_here@1', r.blocked?.[0]?.rule === 'come_here@1', show(r));
+}
+{
+  // 疑问只对受保护规则生效（`sentence` 作用域），而当前唯一受保护规则的 pattern 是 `^停$`，
+  // 「能不能停」根本到不了守卫。所以用一条尾部锚定的受保护规则来验证守卫本身。
+  const tailStop = {
+    id: 'tail_stop',
+    version: 1,
+    capability: 'robot_stop',
+    protected: true,
+    summary: '停',
+    patterns: [/停(?:下来)?$/u],
+  };
+  const q = matchRoute('能不能停下来', ctx, [tailStop]) as any;
+  check('受保护规则：疑问记成「疑问」，不是「否定」', q.kind === 'none' && q.blocked?.[0]?.reason === 'question', show(q));
+  const n = matchRoute('别着急，停下来', ctx, [tailStop]) as any;
+  check('受保护规则：句中否定记成「否定」', n.kind === 'none' && n.blocked?.[0]?.reason === 'negation', show(n));
+  // 受保护规则恒为 `sentence` 作用域，只判整句否定/疑问，不做前缀检查——
+  // 所以前缀污染用一条普通规则验证（`stop_robot` 的 `^停$` 锚点自己就挡住了词中拼接）。
+  const looseTail = { ...tailStop, id: 'tail_open', protected: false };
+  const p = matchRoute('继续停下来', ctx, [looseTail]) as any;
+  check('非受保护规则：前缀污染记成「前缀」', p.kind === 'none' && p.blocked?.[0]?.reason === 'prefix', show(p));
+}
+{
+  const r = matchRoute('你好', ctx) as any;
+  check('没有任何规则命中时没有 blocked 原因', r.kind === 'none' && r.blocked === undefined, show(r));
+}
+{
+  const known = new Set(['negation', 'question', 'prefix']);
+  const samples = ['别跟着我走', '拿过来', '继续跟着我走'].map(
+    (s) => (matchRoute(s, ctx) as any).blocked?.[0]?.reason,
+  );
+  check('原因只有三种取值', samples.every((x) => known.has(x)), samples.join(','));
+}
+
+// ---------------------------------------------------------------- 其它既有纪律
 console.log('— 无匹配 → harness');
 for (const s of ['帮我看看这是什么', '你好', '', '  ', '往前走两米']) {
   const r = matchRoute(s, ctx);

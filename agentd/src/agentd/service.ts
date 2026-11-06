@@ -361,6 +361,11 @@ export async function createRuntime(
         speaking: false,
       };
       const matched = matchRoute(prompt, routeCtx);
+      // 被守卫拦下的命中：留一条可解释的原因（否定 / 疑问 / 词边界）。
+      // 这三种都走 Harness，但排查时要能分开——判据是 `BlockedReason`，不回写规则表。
+      if (matched.kind === 'none' && matched.blocked && matched.blocked.length > 0) {
+        log('router.blocked', { blocked: matched.blocked });
+      }
       // 歧义与缺条件都属于「需要澄清」：按规格「缺参、歧义或规则冲突时进入澄清，
       // 不按第一条命中执行」。交给 Harness 会让模型替用户猜一个，那正是要避免的。
       const route =
