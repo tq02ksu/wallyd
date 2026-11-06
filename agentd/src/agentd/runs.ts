@@ -748,7 +748,10 @@ export class RunService {
     this.store.requireWritable();
     this.store.transaction((tx) => {
       // prompt_text 始终补上：即使 tts_finished 抢在 HTTP 响应前到达，审计正文也不能丢。
-      tx.run('UPDATE approvals SET prompt_text = ? WHERE approval_id = ?', promptText, approvalId);
+      // 空串不覆盖已有正文：漏回正文时保留上一次可审计的句子。
+      if (promptText) {
+        tx.run('UPDATE approvals SET prompt_text = ? WHERE approval_id = ?', promptText, approvalId);
+      }
       tx.run(
         `UPDATE approvals SET status = 'announced'
          WHERE approval_id = ? AND status = 'persisted'`,
@@ -813,14 +816,18 @@ export class RunService {
     const opens = nowIso();
     const closes = new Date(Date.parse(opens) + windowMs).toISOString();
     const seqs: number[] = [];
+    let won = false;
     this.store.transaction((tx) => {
-      tx.run(
+      // 条件更新是这道门的原子性所在：只有仍处于可开窗状态的审批能赢。
+      // 迟到的重复完成事件、并发的取消、重启对账都不会写出第二个确认窗口。
+      won = tx.run(
         `UPDATE approvals SET status = 'waiting', window_opens_at = ?, window_closes_at = ?
-         WHERE approval_id = ?`,
+         WHERE approval_id = ? AND status IN ('persisted','announced')`,
         opens,
         closes,
         approvalId,
-      );
+      ).changes === 1;
+      if (!won) return;
       tx.run(
         `UPDATE runs SET status = 'waiting_confirmation', updated_at = ?,
            blocking_reason = 'awaiting_voice_confirmation'
@@ -858,6 +865,25 @@ export class RunService {
         }).seq,
       );
     });
+    if (!won) {
+      // 输给另一个完成/取消事件：按当前落库状态如实回答，不伪造开窗。
+      const fresh = this.getApproval(approvalId);
+      if (!fresh) {
+        return { opened: false, reason: 'not_found', ...base, window_opens_at: null, window_closes_at: null };
+      }
+      const freshBase = {
+        approval_id: fresh.approval_id,
+        run_id: fresh.run_id,
+        action_label: fresh.action_label,
+        args_summary: fresh.args_summary,
+        window_opens_at: fresh.window_opens_at,
+        window_closes_at: fresh.window_closes_at,
+      };
+      if (fresh.status === 'waiting') {
+        return { opened: true, reason: 'already_open', ...freshBase };
+      }
+      return { opened: false, reason: `approval_${fresh.status}`, ...freshBase };
+    }
     for (const seq of seqs) this.notify(seq);
     return {
       opened: true,
@@ -880,7 +906,7 @@ export class RunService {
   abortApproval(
     approvalId: string,
     reason: string,
-    opts: { byStop?: boolean } = {},
+    opts: { byStop?: boolean; kind?: string } = {},
   ): { changed: boolean; reason: string; run_id: string | null } {
     this.store.requireWritable();
     const a = this.getApproval(approvalId);
@@ -894,14 +920,17 @@ export class RunService {
       : null;
     const ts = nowIso();
     const seqs: number[] = [];
+    let won = false;
     this.store.transaction((tx) => {
-      tx.run(
+      // 与开窗使用同一组可操作状态做条件更新：先赢的那个事件决定终局。
+      won = tx.run(
         `UPDATE approvals SET status = 'cancelled', decided_at = ?, decided_by = ?
-         WHERE approval_id = ?`,
+         WHERE approval_id = ? AND status IN ('persisted','announced','waiting')`,
         ts,
         opts.byStop ? 'stop' : 'announce_failed',
         approvalId,
-      );
+      ).changes === 1;
+      if (!won) return;
       if (next && run) {
         tx.run(
           `UPDATE runs SET status = ?, finished_at = ?, updated_at = ?, blocking_reason = ?
@@ -948,11 +977,15 @@ export class RunService {
             run_id: a.run_id,
             approval_id: approvalId,
             session_id: run?.session_id ?? null,
-            params: { reason, kind: 'no_audio' },
+            params: { reason, kind: opts.kind ?? 'no_audio' },
           }).seq,
         );
       }
     });
+    if (!won) {
+      const fresh = this.getApproval(approvalId);
+      return { changed: false, reason: fresh ? `approval_${fresh.status}` : 'not_found', run_id: a.run_id };
+    }
     for (const seq of seqs) this.notify(seq);
     return { changed: true, reason: opts.byStop ? 'cancelled_by_stop' : 'announce_failed', run_id: a.run_id };
   }

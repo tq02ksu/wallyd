@@ -304,6 +304,8 @@ def _h_announce(ctx: RouteContext) -> dict[str, Any]:
             if resp is not None:
                 # 受理后发送失败：清掉运行时引用，避免 audio.state 永远显示 speaking
                 runtime.clear_response(resp)
+                # 已经发出去的句子要在桥侧停住；否则 agentd 判定失败后机器人还在念。
+                runtime.cancel_speaking("announce_failed")
             ctx.app.kernel.finish(
                 task.task_id,
                 TaskState.FAILED,

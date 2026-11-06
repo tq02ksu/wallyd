@@ -509,6 +509,7 @@
           "required": true,
           "enum": [
             "no_audio",
+            "announce_timeout",
             "audit_failed",
             "robotd_no_check"
           ]

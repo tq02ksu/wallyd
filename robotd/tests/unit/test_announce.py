@@ -29,6 +29,15 @@ class FakeAudioBridge:
         self.sent.append(cmd)
 
 
+class FailingSpeakBridge(FakeAudioBridge):
+    """发包失败，但停止指令仍能送达：验证失败路径会主动停住已发出的播报。"""
+
+    def send(self, cmd: dict, best_effort: bool = False) -> None:  # noqa: FBT001, FBT002
+        self.sent.append(cmd)
+        if cmd.get("cmd") == "speak":
+            raise RuntimeError("桥写入失败")
+
+
 def make_app(*, with_bridge: bool = True) -> tuple[App, FakeAudioBridge | None]:
     work = Path(__file__).resolve().parents[2] / "work" / "pytest-announce"
     work.mkdir(parents=True, exist_ok=True)
@@ -104,6 +113,19 @@ def test_announce_without_bridge_fails_loudly_with_event():
     assert failed[0].payload["approval_id"] == "appr-1"
     assert failed[0].payload["kind"] == "approval_repeat"
     assert failed[0].payload["task_id"]
+
+
+def test_announce_failure_after_send_stops_bridge_and_clears_response():
+    app, _ = make_app(with_bridge=False)
+    bridge = FailingSpeakBridge()
+    app.audio.attach(bridge)
+    with pytest.raises(RobotdError) as exc:
+        _h_announce(ctx(app, valid_body()))
+    assert exc.value.code is ErrorCode.UNAVAILABLE
+    assert any(c.get("cmd") == "stop_speak" for c in bridge.sent)
+    assert app.audio.response is None, "失败后不能留下 speaking 状态"
+    failed = [e for e in app.kernel.recent_events(20) if e.type == "speech.announce_failed"]
+    assert len(failed) == 1
 
 
 def test_stop_interrupts_announcement_and_cancels_task():

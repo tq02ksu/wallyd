@@ -29,10 +29,13 @@ class FakeRobotd {
   constructor() {
     this.calls = [];
     this.error = null;
+    // 让测试能把「HTTP 响应」卡在播报完成事件之后，验证竞态。
+    this.beforeReturn = null;
   }
   async announce(input) {
     this.calls.push(input);
     if (this.error) throw new Error(this.error);
+    if (this.beforeReturn) await this.beforeReturn(input);
     return {
       task_id: `t-${this.calls.length}`,
       status: 'accepted',
@@ -53,6 +56,7 @@ const announcer = new ApprovalAnnouncer({
   robotd,
   log: () => {},
   windowMs: 30_000,
+  announceTimeoutMs: 30_000,
   noteSpeak: (taskId, text) => noted.push({ taskId, text }),
 });
 const bridge = new RobotdEventBridge({
@@ -108,10 +112,25 @@ console.log('— 成功路径：受理 → tts_finished → 开窗');
   check('播完后 run waiting_confirmation', runs.getRunDetail(run.run_id).run.status === 'waiting_confirmation');
   check('播完后开窗事件只一条', countEvents('run.waiting_confirmation', approval.approval_id) === 1);
   check('approval.waiting 也写了', countEvents('approval.waiting', approval.approval_id) === 1);
+  const spokenSeq = store.one(
+    "SELECT seq FROM events WHERE type = 'speech.spoken' ORDER BY seq DESC LIMIT 1",
+  ).seq;
+  const waitSeq = store.one(
+    'SELECT seq FROM events WHERE type = ? AND approval_id = ?',
+    'run.waiting_confirmation',
+    approval.approval_id,
+  ).seq;
+  check('tts_played 事件先于开窗进入事件流', spokenSeq < waitSeq, { spokenSeq, waitSeq });
 
   bridge.handle({
     type: 'speech.tts_finished',
-    payload: { response_id: 'tts-1', approval_id: approval.approval_id, chunks: 2, played: 2 },
+    payload: {
+      response_id: 'tts-1',
+      approval_id: approval.approval_id,
+      kind: 'approval_repeat',
+      chunks: 2,
+      played: 2,
+    },
   });
   check('重复完成幂等', countEvents('run.waiting_confirmation', approval.approval_id) === 1);
   runs.cancelRun(run.run_id, '清理');
@@ -173,10 +192,123 @@ console.log('— 已经结束的 run 收到迟到完成事件：不开窗');
   runs.cancelRun(run.run_id, '用户取消');
   bridge.handle({
     type: 'speech.tts_finished',
-    payload: { response_id: 'tts-3', approval_id: approval.approval_id, chunks: 1, played: 1 },
+    payload: {
+      response_id: 'tts-3',
+      approval_id: approval.approval_id,
+      kind: 'approval_repeat',
+      chunks: 1,
+      played: 1,
+    },
   });
   check('终态 run 不被改回 waiting_confirmation', runs.getRunDetail(run.run_id).run.status === 'cancelled');
   check('迟到完成不开窗', countEvents('run.waiting_confirmation', approval.approval_id) === 0);
+}
+
+console.log('— 完成事件抢在 HTTP 响应之前：仍只开一次窗，正文不丢');
+{
+  const { run, approval } = approvalFor('竞态复述');
+  let release;
+  robotd.beforeReturn = () => new Promise((resolve) => {
+    release = resolve;
+  });
+  const pending = announcer.announce(approval.approval_id);
+  bridge.handle({
+    type: 'speech.tts_finished',
+    payload: {
+      response_id: 'tts-race',
+      approval_id: approval.approval_id,
+      kind: 'approval_repeat',
+      task_id: 't-race',
+      chunks: 1,
+      played: 1,
+    },
+  });
+  check('先到的完成事件已开窗', runs.getRunDetail(run.run_id).run.status === 'waiting_confirmation');
+  release();
+  const res = await pending;
+  check('HTTP 响应随后返回成功', res.ok === true);
+  const row = runs.getApproval(approval.approval_id);
+  check('开窗状态没有被响应回退', row.status === 'waiting');
+  check('审计正文仍被补上', typeof row.prompt_text === 'string' && row.prompt_text.includes('确认请说'));
+  check('窗口事件只有一条', countEvents('run.waiting_confirmation', approval.approval_id) === 1);
+  robotd.beforeReturn = null;
+  runs.cancelRun(run.run_id, '清理');
+}
+
+console.log('— 终态事件丢失：超时按失败收尾，不开窗');
+{
+  const short = new ApprovalAnnouncer({
+    runs,
+    robotd,
+    log: () => {},
+    windowMs: 30_000,
+    announceTimeoutMs: 20,
+  });
+  const { run, approval } = approvalFor('事件丢失');
+  const res = await short.announce(approval.approval_id);
+  check('受理成功', res.ok === true);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  check('超时后 run failed', runs.getRunDetail(run.run_id).run.status === 'failed');
+  check('超时不开窗', countEvents('run.waiting_confirmation', approval.approval_id) === 0);
+  const unavailable = store.one(
+    'SELECT params_json FROM events WHERE type = ? AND approval_id = ?',
+    'approval.unavailable',
+    approval.approval_id,
+  );
+  check('超时写 approval.unavailable', Boolean(unavailable));
+  check(
+    '超时原因可区分',
+    unavailable ? JSON.parse(unavailable.params_json).kind === 'announce_timeout' : false,
+  );
+}
+
+console.log('— 非审批复述/未知审批的终态事件：忽略');
+{
+  const { run, approval } = approvalFor('无关事件');
+  await announcer.announce(approval.approval_id);
+  bridge.handle({
+    type: 'speech.tts_finished',
+    payload: {
+      response_id: 'tts-x',
+      approval_id: approval.approval_id,
+      kind: 'robot_speak',
+      chunks: 1,
+      played: 1,
+    },
+  });
+  check('非 approval_repeat 不开窗', countEvents('run.waiting_confirmation', approval.approval_id) === 0);
+  bridge.handle({
+    type: 'speech.tts_finished',
+    payload: { response_id: 'tts-nokind', approval_id: approval.approval_id },
+  });
+  check('缺 kind 的完成事件不开窗', countEvents('run.waiting_confirmation', approval.approval_id) === 0);
+  bridge.handle({
+    type: 'speech.tts_finished',
+    payload: { response_id: 'tts-y', approval_id: 'appr-does-not-exist', kind: 'approval_repeat' },
+  });
+  check('未知审批不开窗', countEvents('run.waiting_confirmation', approval.approval_id) === 0);
+  check('未知审批不影响当前 run', runs.getRunDetail(run.run_id).run.status !== 'waiting_confirmation');
+  bridge.handle({
+    type: 'speech.tts_finished',
+    payload: { response_id: 'tts-z', approval_id: approval.approval_id, kind: 'approval_repeat' },
+  });
+  check('真正的复述完成仍能开窗', runs.getRunDetail(run.run_id).run.status === 'waiting_confirmation');
+  runs.cancelRun(run.run_id, '清理');
+}
+
+console.log('— 已开窗的审批不再二次播报');
+{
+  const { run, approval } = approvalFor('重复播报');
+  await announcer.announce(approval.approval_id);
+  bridge.handle({
+    type: 'speech.tts_finished',
+    payload: { response_id: 'tts-d', approval_id: approval.approval_id, kind: 'approval_repeat' },
+  });
+  const callsBefore = robotd.calls.length;
+  const again = await announcer.announce(approval.approval_id);
+  check('二次播报被拒绝', again.ok === false);
+  check('没有再次调用 robotd', robotd.calls.length === callsBefore);
+  runs.cancelRun(run.run_id, '清理');
 }
 
 store.close();
