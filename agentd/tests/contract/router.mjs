@@ -95,7 +95,9 @@ console.log('— 安全底线：受保护的停止规则仍在，且映射无审
   check('存在 stop_robot', Boolean(stop));
   check('stop_robot 受保护', stop?.protected === true);
   check('stop_robot 映射 robot_stop', stop?.capability === 'robot_stop', stop?.capability);
-  check('robot_stop 不需要审批（与契约一致）', byName.get('robot_stop')?.requiresApproval === false);
+  // 与 service.ts 的判定同源：字段存在即需审批。
+  const needsApproval = (tool) => tool != null && 'approvalParams' in tool;
+  check('robot_stop 不需要审批（与契约一致）', !needsApproval(byName.get('robot_stop')));
 }
 
 console.log('');

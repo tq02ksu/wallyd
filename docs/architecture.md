@@ -863,7 +863,9 @@ STEP/DIR 脉冲与最终失联停机仍由 ESP32 负责。当前 POC 尚未实�
 
 复杂语音 / 视觉输入产生意图后，Codex Harness 负责规划；明确的常见指令可由 agentd 快速路由直接调用已发布能力，
 无需进入 Harness。无论走哪条路径，Harness 与快速路由都不能直接执行物理动作。OpenAPI 操作通过
-`x-requires-approval: true` 声明审批策略，生成的 MCP 工具携带该元数据。`robot-mcp` 把待执行操作
+`x-requires-approval: { params: [...] }` 声明审批策略与**必须被用户听见并绑定的字段**，生成的
+MCP 工具携带 `approvalParams: string[]`（字段存在即需审批，`[]` 表示需审批但无参数可绑）。
+`robot-mcp` 把待执行操作
 （capability + 参数 + requester）提交给 `agentd`；agentd 建立审批记录并挂起该次调用。随后机器人通过系统 TTS
 复述动作和关键参数；播报结束后才打开限定时间的确认窗口，等待用户明确口头确认或拒绝。语音确认必须明确对应当前动作
 （例如“确认，向前移动三十厘米”），泛化的“好 / 可以”或 ASR 歧义不能批准。ASR 结果作为语音事件送到 agentd，
@@ -878,6 +880,10 @@ STEP/DIR 脉冲与最终失联停机仍由 ESP32 负责。当前 POC 尚未实�
 2. 多个待审批操作排队逐个播报；一次只有一个与口头确认关联的活动审批 ID。机器人复述动作与关键参数，播报完成后才开启限时确认窗口；
    用户明确复述确认对象并表达肯定/拒绝才可 settle，窗口外的旧转写、含糊肯定词或机器人 TTS 回声不能确认。
 3. 肯定确认后，agentd 将结果和短时、一次性授权凭据绑定到**同一 capability 与同一组参数**；
+   参数摘要只覆盖契约声明的 `approvalParams`，规范化规则由
+   [`contracts/approval-digest.json`](../contracts/approval-digest.json) 定死
+   （键按码点排序、数字最简形式、缺失按 `null`、未声明字段排除、字符串不做归一化、UTF-8 + SHA-256），
+   Python 与 TS 各有一份实现并读同一份规则，不各写一份；
    拒绝、超时、取消、听不清或服务错误均 fail closed，不生成可执行授权。
 4. `robotd` 在执行物理动作前校验授权的签发者、capability、参数摘要、有效期与一次性使用状态；
    校验成功后才执行，并将结果回传。其他本地调用路径也不能绕过审批策略。

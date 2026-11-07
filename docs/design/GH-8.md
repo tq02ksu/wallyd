@@ -106,7 +106,7 @@ issue 表格写「`跟着我走` / `跟紧点` / `过来` → matched follow_me 
 - `可以跟着我吗` → `clarify(follow_me)`：疑问句不会被否定守卫吞掉，也不会执行。
 
 命中的 `fast_rule` 仍记录 `follow_me@1` / `come_here@1`，可追溯性不变。
-执行层照旧从能力契约取 `requiresApproval`：`robot_follow` 需要审批，
+执行层照旧从能力契约取 `approvalParams`（存在即需审批）：`robot_follow` 需要审批，
 即便 `matched` 也会停在 `waiting_confirmation`，不会因为命中快速路由就动。
 
 ## 决策 5：能力漂移在 CI 就红

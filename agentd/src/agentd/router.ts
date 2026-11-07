@@ -16,7 +16,7 @@
  *
  * 1. **不用模型判断「是否明确」**。判断依据是规则与当前证据，不是置信度分数。
  *    （这是规格原话；也让快速路由在模型离线时仍然可用。）
- * 2. **审批要求只从能力契约取**（`CapabilityInfo.requiresApproval`），规则不能降低它。
+ * 2. **审批要求只从能力契约取**（`CapabilityInfo.approvalParams` 存在即需审批），规则不能降低它。
  *    规则里**不写**审批标志——写进规则就变成了第二份真值。
  * 3. **参数来自明确的表达**，不从自由文本里猜。规则匹配「动词短语 + 可选参数槽」，
  *    不做无边界子串匹配；参数只从 `slots` 的捕获组取，缺必填槽就澄清。
@@ -53,7 +53,7 @@ export type MatchResult =
    * 命中唯一规则，可以直接执行。
    *
    * **注意这里没有 `requires_approval`**：审批要求只存在于能力契约
-   * （`CapabilityInfo.requiresApproval`）。执行层必须自己从契约取，
+   * （`CapabilityInfo.approvalParams`）。执行层必须自己从契约取，
    * 不要把「路由命中」当成「不用审批」——规格原话是「快速路由也经过同一权限与审批门」。
    */
   | { kind: 'matched'; rule: FastRule; args: Record<string, unknown> }

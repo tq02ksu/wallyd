@@ -16,3 +16,6 @@ node scripts/ci/ci-config.test.mjs
 
 printf '[static] generated contracts match sources\n'
 npm run contract:check
+
+printf '[static] approval-parameter contract guards\n'
+npm run contract:test --silent

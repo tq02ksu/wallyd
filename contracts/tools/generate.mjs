@@ -26,6 +26,14 @@ const OPENAPI_JSON = path.join(OUT_DIR, 'openapi.json');
 const MCP_TOOLS_JSON = path.join(OUT_DIR, 'mcp-tools.json');
 const TYPES_TS = path.join(OUT_DIR, 'robotd-types.ts');
 const EVENTS_OUT = path.join(OUT_DIR, 'robotd-events.json');
+// 沙箱里 spawnSync 可能拿不到子进程的 stdout/stderr；测试用这个文件读诊断，
+// 运行时照旧写到 stderr。
+const DIAGNOSTICS = process.env.CONTRACT_DIAGNOSTICS_FILE ?? null;
+
+function reportDiagnostics(lines) {
+  if (!DIAGNOSTICS) return;
+  fs.writeFileSync(DIAGNOSTICS, lines.map((line) => `${line}\n`).join(''));
+}
 
 const specText = fs.readFileSync(YAML, 'utf8');
 const spec = parse(specText);
@@ -71,10 +79,50 @@ for (const ev of events.events ?? []) {
 if (problems.length) {
   console.error('contract: event registry 校验失败');
   for (const p of problems) console.error(`  - ${p}`);
+  reportDiagnostics(['FAIL contract: event registry 校验失败', ...problems.map((p) => `FAIL ${p}`)]);
   process.exit(1);
 }
 
 // ---------------------------------------------------------------- OpenAPI → MCP 工具面
+const toolProblems = [];
+const warnings = [];
+
+/**
+ * 解析 `x-requires-approval`。
+ *
+ * 唯一允许的新形态是对象 `{ params: [...] }`。旧布尔 `true` 仍然接受（视同
+ * `{ params: [] }`），但会报 warning 要求迁移；本轮仓内三个端点必须全部是对象。
+ * 返回 `null` 表示该操作不需要审批（生成物里就不出现 `approvalParams`）。
+ */
+function parseApproval(op) {
+  const raw = op['x-requires-approval'];
+  const id = op.operationId ?? '(无 operationId)';
+  if (raw === undefined || raw === false) return null;
+  if (raw === true) {
+    warnings.push(
+      `${id} 仍在使用 x-requires-approval: true；请迁移到 \`{ params: [...] }\`（本轮视同 params: []）`,
+    );
+    return { params: [] };
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw) || raw === null) {
+    toolProblems.push(`${id} 的 x-requires-approval 必须是对象 { params: [...] }，实际 ${JSON.stringify(raw)}`);
+    return { params: [] };
+  }
+  const extra = Object.keys(raw).filter((key) => key !== 'params');
+  if (extra.length) {
+    toolProblems.push(`${id} 的 x-requires-approval 含未知键 ${extra.join(', ')}（只允许 params）`);
+  }
+  const params = raw.params;
+  if (!Array.isArray(params) || params.some((p) => typeof p !== 'string' || !p)) {
+    toolProblems.push(`${id} 的 x-requires-approval.params 必须是字符串数组（元素非空）`);
+    return { params: [] };
+  }
+  if (new Set(params).size !== params.length) {
+    toolProblems.push(`${id} 的 x-requires-approval.params 含重复字段`);
+  }
+  return { params: [...params] };
+}
+
 function lookupRef(ref) {
   const parts = ref.replace(/^#\//, '').split('/').map((p) => p.replace(/~1/g, '/').replace(/~0/g, '~'));
   return parts.reduce((node, key) => node?.[key], spec);
@@ -124,19 +172,47 @@ for (const [route, item] of Object.entries(spec.paths ?? {})) {
     // 系统路径（审批复述等）不是 Agent 可调用的能力：显式排除，而不是靠调用方自觉。
     if ((op.tags ?? []).includes('debug') || op['x-websocket'] || op['x-mcp-exclude'] === true) continue;
     const name = op.operationId ?? `${method}_${route.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
-    tools.push({
+    const inputSchema = buildInputSchema(op);
+    const approval = parseApproval(op);
+    if (approval) {
+      for (const param of approval.params) {
+        if (!(param in (inputSchema.properties ?? {}))) {
+          toolProblems.push(
+            `${name} 的 approvalParams 字段 ${param} 不在该端点的 requestBody schema 里`,
+          );
+        }
+      }
+    }
+    const tool = {
       name,
       description: [op.summary, op.description].filter(Boolean).join('\n'),
-      inputSchema: buildInputSchema(op),
-      requiresApproval: op['x-requires-approval'] === true,
+      inputSchema,
       operation: {
         method: method.toUpperCase(),
         path: route,
         pathParams: (op.parameters ?? []).filter((p) => p.in === 'path').map((p) => p.name),
       },
-    });
+    };
+    // 只输出对象形态：approvalParams 存在即需审批；[] 表示需审批但不绑参数。
+    // 不再输出 requiresApproval 布尔——一个字段说完整的事。
+    if (approval) tool.approvalParams = approval.params;
+    tools.push(tool);
   }
 }
+
+for (const warning of warnings) console.warn(`WARN contract: ${warning}`);
+
+if (toolProblems.length) {
+  console.error('contract: 审批参数声明校验失败');
+  for (const problem of toolProblems) console.error(`  - ${problem}`);
+  reportDiagnostics([
+    ...warnings.map((w) => `WARN contract: ${w}`),
+    'FAIL contract: 审批参数声明校验失败',
+    ...toolProblems.map((p) => `FAIL ${p}`),
+  ]);
+  process.exit(1);
+}
+reportDiagnostics(warnings.map((w) => `WARN contract: ${w}`));
 
 // ---------------------------------------------------------------- 事件登记表 → 索引视图
 const eventIndex = {

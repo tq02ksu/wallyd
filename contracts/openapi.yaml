@@ -5,6 +5,36 @@ info:
   description: |
     robotd 的对外契约。HTTP 用于控制与查询，`GET /v1/events` 升级为 WebSocket 后用于事件订阅。
     标记为 `debug` 的端点只在 robotd 以 `--debug` 启动时开放，不进 MCP 工具面。
+
+    ## 审批参数绑定（`x-requires-approval`）
+
+    物理动作的审批声明是**对象**，不是布尔：
+
+    ```yaml
+    x-requires-approval:
+      params: [text]      # 必须被用户听见并绑定的字段（可为空数组）
+    ```
+
+    `params` 列出**用户确认时必须听见、授权凭据必须绑定**的请求字段。
+    `contracts/generated/mcp-tools.json` 把它投影成 `approvalParams: string[]`；
+    **字段存在即表示该能力需要审批**，`[]` 表示需审批但无参数可绑。
+
+    授权凭据里的 `args_digest` 必须由两端用**同一份规范化规则**计算，规则本体是
+    [`contracts/approval-digest.json`](approval-digest.json)（机器可读，Python 与 TS
+    实现都读它，不各写一份）：
+
+    - 只取 `params` 声明的字段，未声明的额外字段一律**排除**；
+    - 键按 Unicode 码点升序排序；
+    - 数字用 JSON 最简形式（`2` 不写 `2.0`、不用科学计数法）；
+    - **缺失字段按 `null` 参与**（「没说」与「说是 null」不算同一个摘要）；
+    - 字符串**不做** trim / 大小写折叠；
+    - 规范化结果 UTF-8 编码后取 SHA-256，形如 `sha256:<hex>`。
+
+    审批参数里的数字必须能用 IEEE-754 双精度精确表示（整数不超过 `2^53-1`）。
+    超出范围的整数在 JSON 解析阶段就会失去精度，两端复算不可能一致；校验层应直接拒绝。
+
+    可执行实现：`contracts/tools/approval-digest.mjs` 与
+    `robotd/src/robotd/approval_digest.py`。
 servers:
   # 端口由启动配置（--http / ROBOTD_HTTP_PORT）决定，默认 8787；此处只示意回环地址，
   # 不要把某个具体端口写死成契约的一部分（robotd 只绑 127.0.0.1，不监听 0.0.0.0）。
@@ -81,7 +111,8 @@ paths:
                 $ref: "#/components/schemas/Calibration"
     put:
       operationId: robot_calibration_set
-      x-requires-approval: true
+      x-requires-approval:
+        params: [steps_per_m, wheelbase_mm]
       tags: [robot]
       summary: 设置标定参数并下发到板侧（无需重刷固件）
       requestBody:
@@ -106,7 +137,8 @@ paths:
   /v1/robot/speak:
     post:
       operationId: robot_speak
-      x-requires-approval: true
+      x-requires-approval:
+        params: [text]
       tags: [robot]
       summary: 请求机器人播报
       requestBody:
@@ -262,7 +294,8 @@ paths:
   /v1/robot/follow:
     post:
       operationId: robot_follow
-      x-requires-approval: true
+      x-requires-approval:
+        params: [target_track_id, target]
       tags: [robot]
       summary: 跟随目标人物
       description: |

@@ -111,7 +111,11 @@ export interface CapabilityInfo {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  requiresApproval: boolean;
+  /**
+   * 审批绑定声明。**存在即表示该能力需要审批**；`[]` 表示需审批但不绑定任何参数。
+   * 值来自契约 `x-requires-approval: { params: [...] }`，不是本地策略。
+   */
+  approvalParams?: string[];
   operation?: { method: string; path: string; pathParams: string[] };
 }
 
@@ -323,14 +327,14 @@ export class RobotdClient {
       name: string;
       description: string;
       inputSchema: Record<string, unknown>;
-      requiresApproval: boolean;
+      approvalParams?: string[];
       operation: { method: string; path: string; pathParams: string[] };
     }>;
     return raw.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
-      requiresApproval: t.requiresApproval === true,
+      approvalParams: t.approvalParams,
       operation: t.operation,
     }));
   }

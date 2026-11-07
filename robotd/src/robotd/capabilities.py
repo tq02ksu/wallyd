@@ -45,6 +45,9 @@ class Capability:
     summary: str
     exclusivity: Exclusivity = Exclusivity.SOFT
     requires_approval: bool = False
+    # 审批凭据必须绑定的字段（契约 ``x-requires-approval.params`` 的实现侧镜像）。
+    # 摘要规范化由 ``approval_digest`` 执行；这里只保存「绑定哪些字段」。
+    approval_params: tuple[str, ...] = ()
     handler: Callable[..., Awaitable[Any]] | None = None
     unavailable_reason: str | None = None
 
@@ -130,6 +133,7 @@ def default_capabilities() -> list[Capability]:
             implementation=Implementation.UNIMPLEMENTED,
             summary="设置标定参数并下发板侧",
             requires_approval=True,
+            approval_params=("steps_per_m", "wheelbase_mm"),
             unavailable_reason="串口与 calib 下发待 R11",
         ),
         Capability(
@@ -140,6 +144,7 @@ def default_capabilities() -> list[Capability]:
             summary="跟随目标人物（需要快速检测 + track + 安全边界）",
             exclusivity=Exclusivity.MOTION,
             requires_approval=True,
+            approval_params=("target_track_id", "target"),
             unavailable_reason="依赖 R15 检测/跟踪、R16 安全边界、R17 闭环",
         ),
         # 语音（R14）：契约行为已实现，实际可用性取决于常驻桥是否就绪。
@@ -152,6 +157,7 @@ def default_capabilities() -> list[Capability]:
             implementation=Implementation.IMPLEMENTED,
             summary="请求播报（分句流式 + 有界队列 + 可打断）",
             requires_approval=True,
+            approval_params=("text",),
         ),
         # 审批复述是审批链路本身：免审批，但只接受结构化审批字段并由 robotd 渲染正文。
         # 它不是 Agent 可调用的能力，契约里标了 x-mcp-exclude，不进 MCP 工具面。
@@ -222,6 +228,7 @@ class Registry:
                 "group": c.group,
                 "implementation": c.implementation.value,
                 "requires_approval": c.requires_approval,
+                "approval_params": list(c.approval_params),
                 "exclusivity": c.exclusivity.value,
                 "unavailable_reason": c.unavailable_reason,
             }

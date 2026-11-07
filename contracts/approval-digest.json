@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "wally-approval-args-digest",
+  "description": "审批凭据 args_digest 的唯一规范化规则。Python 与 TypeScript 实现都必须读这份文件，不得各写一份。",
+  "algorithm": "sha256",
+  "digest_prefix": "sha256:",
+  "encoding": "utf-8",
+  "field_selection": "approval_params_only",
+  "unlisted_fields": "exclude",
+  "missing_fields": "null",
+  "key_order": "unicode_code_point_ascending",
+  "number_format": "json_minimal_no_exponent",
+  "string_normalization": "none",
+  "string_escaping": "json_minimal",
+  "implementations": {
+    "typescript": "contracts/tools/approval-digest.mjs",
+    "python": "robotd/src/robotd/approval_digest.py"
+  }
+}

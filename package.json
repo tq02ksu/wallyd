@@ -10,6 +10,7 @@
     "contract:agentd": "node contracts/tools/generate-agentd.mjs",
     "contract:all": "npm run contract:generate && npm run contract:agentd",
     "contract:check": "node contracts/tools/check.mjs",
+    "contract:test": "node contracts/tools/approval-contract.test.mjs",
     "docs:check": "node scripts/ci/check-doc-links.mjs",
     "robotd": "PYTHONPATH=robotd/src robotd/.venv/bin/python -m robotd --port /dev/cu.usbserial-A5069RR4 --http 8787 serve",
     "robotd:sim": "PYTHONPATH=robotd/src robotd/.venv/bin/python -m robotd --sim --http 8787 serve",

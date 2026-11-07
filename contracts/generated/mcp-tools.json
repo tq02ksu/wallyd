@@ -8,7 +8,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "GET",
       "path": "/v1/health",
@@ -24,7 +23,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "GET",
       "path": "/v1/robot/state",
@@ -40,7 +38,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "GET",
       "path": "/v1/robot/odometry/calibration",
@@ -70,12 +67,15 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": true,
     "operation": {
       "method": "PUT",
       "path": "/v1/robot/odometry/calibration",
       "pathParams": []
-    }
+    },
+    "approvalParams": [
+      "steps_per_m",
+      "wheelbase_mm"
+    ]
   },
   {
     "name": "robot_speak",
@@ -106,12 +106,14 @@
       ],
       "additionalProperties": false
     },
-    "requiresApproval": true,
     "operation": {
       "method": "POST",
       "path": "/v1/robot/speak",
       "pathParams": []
-    }
+    },
+    "approvalParams": [
+      "text"
+    ]
   },
   {
     "name": "audio_state",
@@ -122,7 +124,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "GET",
       "path": "/v1/audio/state",
@@ -138,7 +139,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "POST",
       "path": "/v1/audio/mute",
@@ -154,7 +154,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "POST",
       "path": "/v1/audio/unmute",
@@ -185,7 +184,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "POST",
       "path": "/v1/speech/listen",
@@ -234,12 +232,15 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": true,
     "operation": {
       "method": "POST",
       "path": "/v1/robot/follow",
       "pathParams": []
-    }
+    },
+    "approvalParams": [
+      "target_track_id",
+      "target"
+    ]
   },
   {
     "name": "robot_stop",
@@ -250,7 +251,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "POST",
       "path": "/v1/robot/stop",
@@ -266,7 +266,6 @@
       "required": [],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "GET",
       "path": "/v1/tasks",
@@ -288,7 +287,6 @@
       ],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "GET",
       "path": "/v1/tasks/{task_id}",
@@ -312,7 +310,6 @@
       ],
       "additionalProperties": false
     },
-    "requiresApproval": false,
     "operation": {
       "method": "DELETE",
       "path": "/v1/tasks/{task_id}",
