@@ -21,7 +21,7 @@ import { RobotdEventSubscriber } from './robotd-events.ts';
 import { RobotdEventBridge } from './robotd-event-bridge.ts';
 import { RobotdClient } from './robotd-client.ts';
 import { RunService, RUN_STATUSES, approvalView } from './runs.ts';
-import { matchRoute, ruleTag } from './router.ts';
+import { submitRunRequest } from './run-request.ts';
 import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
 import { codexHomePath } from './paths.ts';
@@ -342,70 +342,26 @@ export async function createRuntime(
         body.session_id === undefined ? undefined : requireString(body.session_id, 'session_id', { max: 120 });
       const source = optionalEnum(body.source, 'source', ['text', 'asr'] as const) ?? 'text';
 
-      // 活动上限 1：忙就 409，不排队后突然执行
-      const busy = runs.activeRun();
-      if (busy) {
-        throw new ApiError('E_BUSY', '已有任务在进行中，请先等待或取消', {
-          details: { run_id: busy.run_id, status: busy.status },
-          hint: '不用排队等待——先看当前任务，或取消它',
-        });
-      }
-
-      // 输入路由（A11）：确定性规则优先，无匹配才交给 Harness。
-      // 在此之前这里写死 `route: 'harness'`，等于快速路由不存在——说「停」也要等模型。
-      const routeCtx = {
-        available: robotd.capabilities.current
-          ? new Set(robotd.capabilities.current.map((c) => c.name))
-          : null,
-        busy: false, // 上面已经挡掉了活动 run；执行期的忙由 robotd 自己判
-        speaking: false,
-      };
-      const matched = matchRoute(prompt, routeCtx);
-      // 被守卫拦下的命中：留一条可解释的原因（否定 / 疑问 / 词边界）。
-      // 这三种都走 Harness，但排查时要能分开——判据是 `BlockedReason`，不回写规则表。
-      if (matched.kind === 'none' && matched.blocked && matched.blocked.length > 0) {
-        log('router.blocked', { blocked: matched.blocked });
-      }
-      // 歧义与缺条件都属于「需要澄清」：按规格「缺参、歧义或规则冲突时进入澄清，
-      // 不按第一条命中执行」。交给 Harness 会让模型替用户猜一个，那正是要避免的。
-      const route =
-        matched.kind === 'matched' ? 'fast' : matched.kind === 'none' ? 'harness' : 'clarified';
-      const fastRule = matched.kind === 'matched' || matched.kind === 'clarify' ? ruleTag(matched.rule) : null;
-
-      const result = runs.submitRun({
-        prompt,
-        session_id: sessionId,
-        source,
-        idempotency_key: idem,
-        route,
-        fast_rule: fastRule,
-      });
-
-      // 快速路由必须**真的执行**，不能只标一个 `route: fast` 就停在那儿。
-      // 早先版本就是这样：响应说走了快速路径，robotd 却什么都没收到——比不做更糟，
-      // 因为界面会显示「已走快速路径」。这里把执行接上。
-      //
-      // 纪律：
-      // - 同样过审批门：规则不能降低能力契约的审批要求（这里从契约取，不从规则取）；
-      // - 不阻塞响应：先返回 run_id，执行结果经事件流给出；
-      // - 失败如实记录，不把未执行过的动作显示成「已停止」。
-      if (matched.kind === 'matched' && !result.duplicate) {
-        void executeFastRun(result.run_id, matched.rule.capability, matched.args);
-      }
-
-      return {
-        ok: true,
-        run_id: result.run_id,
-        status: result.status,
-        route: result.route,
-        fast_rule: result.fast_rule,
-        created_at: result.created_at,
-        duplicate: result.duplicate,
-        // 歧义时把候选给出来，让界面能问「你是说哪一个」——不执行，不猜。
-        ...(matched.kind === 'ambiguous' ? { ambiguous: matched.candidates } : {}),
-        // 澄清原因（缺能力 / 前提不满足）同样如实返回
-        ...(matched.kind === 'clarify' ? { clarify: { question: matched.question, missing: matched.missing } } : {}),
-      };
+      // 「一句话 → run 还是澄清」的决策在 run-request.ts：
+      // 澄清不建 run（否则会留下永不推进的活动任务），受保护的 STOP 不受忙限制。
+      return submitRunRequest(
+        {
+          runs,
+          availableCapabilities: () =>
+            robotd.capabilities.current
+              ? new Set(robotd.capabilities.current.map((c) => c.name))
+              : null,
+          // 守卫拦下的命中要能在日志里解释原因（否定 / 疑问 / 词边界）。
+          log: (m, x) => log(m, x),
+          // 快速路由必须**真的执行**：规则命中后启动执行，不阻塞响应。
+          // 纪律：同样过审批门（executeFastRun 从能力契约取审批要求）；
+          // 失败如实记录，不把未执行过的动作显示成「已停止」。
+          executeFast: (runId, capability, args) => {
+            void executeFastRun(runId, capability, args);
+          },
+        },
+        { prompt, session_id: sessionId, source, idempotency_key: idem },
+      );
     }),
   );
 

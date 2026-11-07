@@ -55,7 +55,7 @@
 顺序也有讲究：先判否定、再判前缀。`别跟着我走` 的前缀「别」不是合法引导语，
 但它首先是否定——顺序反过来，拦截决策不变，原因却会骗人。
 
-`service.ts` 在 `/api/run` 里对这种命中记一条 `router.blocked` 日志（只记规则与原因，
+`run-request.ts` 在 `/api/run` 的决策里对这种命中记一条 `router.blocked` 日志（只有装配层注入了 logger 时才记；只记规则与原因，
 不重复记原句）。**刻意不写进 run 事件或 HTTP 响应**：那要改
 `agentd/contracts/openapi.yaml` 的响应形状，属于契约变更，不在本 issue 范围；
 等有人真的要用它做规则命中率分析时再按「契约 → 生成物 → 测试 → 实现」走一遍。
@@ -121,7 +121,17 @@ issue 表格写「`跟着我走` / `跟紧点` / `过来` → matched follow_me 
 读生成物而不是 YAML：`npm run contract:check` 已证明生成物 == 契约源，
 本测试证明「规则表 == 生成物」，两段合起来才是完整链路。
 
-## 拒绝的方案
+## 合入 main 后的落点（GH-27 / #28）
+
+`#28`（GH-27）把「一句话 → run 还是澄清」的决策搬进 `agentd/src/agentd/run-request.ts`，
+本 issue 的 `router.blocked` 日志因此落在那里（`submitRunRequest()` 里 `matchRoute` 之后），
+logger 由 `service.ts` 用同一个 `makeLogger` 注入，不新造日志设施。
+
+澄清不建 run 之后，「目标未绑定 → `clarify`」不再占活动名额：说过一句「过来」不会让机器人
+一直忙到重启。受保护的 `stop_robot` 在忙时仍是安全旁路。这两条都不改变规则表的判据——
+规则只回答「这句话是不是这个意图」，要不要执行、要不要审批由能力契约与 run 状态机决定。
+
+ . "## 拒绝的方案"
 
 - **NLU / 模型做意图分类**：违反 ADR-0006 与规格 §3.1 的「确定性优先」；
 - **同义词表**：`停`/`停止` 靠 pattern，不靠词典；

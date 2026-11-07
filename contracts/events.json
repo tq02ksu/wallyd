@@ -140,6 +140,20 @@
       }
     },
     {
+      "type": "state.rejected",
+      "category": "state",
+      "payload": {
+        "type": {"type": "string", "required": true},
+        "payload_keys": {"type": "array", "required": true},
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": ["unknown_device", "invalid_device_status", "reduce_failed"]
+        }
+      },
+      "notes": "某条事件通过了契约校验但归并没有生效：只说明被拒事件的类型、字段名与原因。不得携带 payload 原文——重放原文等于绕过 scrub 把被拒输入再发布一次。"
+    },
+    {
       "type": "audio.state",
       "category": "audio",
       "payload": {"$ref": "AudioState"}

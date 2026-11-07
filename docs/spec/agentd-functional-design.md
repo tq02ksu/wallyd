@@ -134,7 +134,6 @@ agentd 保持 TypeScript，robotd 的 Python 迁移不影响这个分工。
 
 1. **否定/疑问守卫**先跑：`不要|不用|别|甭|无需|不必|能不能|可不可以|可以吗|是不是|要不要`
    命中即**返回无匹配**（交给 Harness）。「不要停」被 stop 规则吃掉会执行一次真实且无法撤销的停止。
-   （这条整串守卫已在 [3.1.2](#312-实现记录2026-11-06规则表可扩展化gh-8) 改为按作用域判断。）
 2. **受保护规则单独一轮**：命中即决，扩展规则不能延迟 STOP。
 3. 其余规则求候选集：0 条 → Harness；1 条 → 查前提；≥2 条 → **澄清**（列出候选，不按第一条执行）。
 
@@ -160,12 +159,14 @@ agentd 保持 TypeScript，robotd 的 Python 迁移不影响这个分工。
 | 不要停 | `harness` | — | 否定守卫生效，robotd 未收到任何 stop |
 | 帮我看看这是什么 | `harness` | — | — |
 
-测试 `agentd/tests/unit/router.test.ts`（33 项，反例多于正例：否定、疑问、前缀污染、冲突、歧义、前提不满足）。
+测试 `agentd/tests/unit/router.test.ts`（反例多于正例：否定、疑问、前缀污染、冲突、歧义、前提不满足；
+2026-11-06 起含作用域否定与参数槽用例，见 3.1.2）。
 
 **执行纪律（`service.ts` 的 `executeFastRun`）**：
 
-- **审批只从能力契约取**（`CapabilityInfo.requiresApproval`）。首版唯一规则 `robot_stop` 不需要审批；
-  将来加需要审批的规则时，这里落到 `waiting_confirmation` 而不是直接执行——规则不能降低审批门。
+- **审批只从能力契约取**（`CapabilityInfo.requiresApproval`）。`robot_stop` 不需要审批；
+  `robot_follow`（`follow_me` / `come_here`）需要审批，命中后落到 `waiting_confirmation`
+  而不是直接执行——规则不能降低审批门。
 - **能力缺失 → `failed` 并写明「未执行任何动作」**，不静默成功。
 - **步骤与工具调用都落库**：只有状态没有步骤会出现「succeeded 但看不出执行过什么」。
 - **失败如实记 `failed`**：不能把「没执行成」显示成「已停止」。
@@ -192,16 +193,42 @@ agentd 保持 TypeScript，robotd 的 Python 迁移不影响这个分工。
   STOP 命中时整句任意否定/疑问都拦掉，然后交给 Harness。
 - `FastRule.slots?: { name, pattern, required }[]` 取代旧的 `args(m)`：
   `matchRoute` 统一抽参，缺必填槽 → `clarify`（`missing: slot:<name>`），不带着空参数执行。
+- 拦下的原因分三类（`BlockedReason`：否定 / 疑问 / 词边界），`kind: 'none'` 时带
+  `blocked: { rule, reason }[]`，`run-request.ts` 据此记一条 `router.blocked` 日志。
 
 **规则表**：`stop_robot@1`（表达与版本不变，`protected`）、`follow_me@1`、`come_here@1`。
 后两条都映射 `robot_follow`（当前公开运动能力只有这一个），并要求 `target_track_id`：
 未绑定时澄清——规格本文 §3.1 的「目标可靠绑定才映射 `robot_follow`，否则澄清」。
 `come_here` 的「过来」因此是 `clarify(come_here)`，不是直接执行；执行层仍按能力契约取审批要求。
 
+**与 3.1.3（GH-27）的衔接**：澄清不建 run，所以「目标未绑定 → 澄清」不再占活动名额，
+下一句不会被 `E_BUSY` 挡住；受保护的 `stop_robot` 在忙时仍是安全旁路。规则表不携带任何
+审批字段，命中也照旧从能力契约取审批要求。
+
 **新增契约漂移断言**：`agentd/tests/contract/router.mjs`（已接进 `npm run test:contract`）
 要求每条规则的能力名出现在 `contracts/generated/mcp-tools.json` 的 `name` 集合、
 每个参数槽名是该能力 `inputSchema.properties` 的字段，并禁止规则携带审批字段。
 设计取舍与「目标未绑定 → 澄清」的差异说明见 [GH-8 设计记录](../design/GH-8.md)。
+
+#### 3.1.3 实现记录（2026-11-06：澄清不建 run，GH-27）
+
+GH-27：路由返回 `clarify` / `ambiguous` 时，`service.ts` 原先仍调用 `submitRun`，
+且没带 `status`，落成非终态的 `accepted`；`activeRun()` 因此把它当成活动任务，
+而 `executeFastRun` 只在 `matched` 时调用——这条 run 永远不会推进。结果是说一句需要澄清的
+话，机器人就一直「忙」，连「停」都被 `E_BUSY` 挡在 `matchRoute` 之前。
+
+现在（方案 B，详见 `docs/design/GH-27.md`）：
+
+- **澄清/歧义不建 run**：只写 `route.clarify` 事件（已登记的类型，无需扩张事件面）；
+  有会话时用户那句话仍进会话消息（`run_id` 为空）。`/api/run` 的 `RunAccepted` 里
+  `run_id` / `status` 因此可空，前端把 `clarify.question` 显示在输入卡上。
+- **停止是安全旁路**：受保护规则（`stop_robot`）在 `activeRun()` 命中时仍允许提交并执行；
+  其余请求照旧 409。`routeCtx.busy` 传真实值，不再写死 `false`。
+- **启动对账**：升级前遗留的 `route='clarified'` 非终态 run 标为 `cancelled`
+  （从未执行），不再报成 `interrupted`。
+
+决策入口收敛到 `agentd/src/agentd/run-request.ts`；单测
+`agentd/tests/unit/run-request.mjs` 用注入的规则表复现「过来缺目标」而不改 `matchRoute`。
 
 ### 3.2 任务生命周期与中断
 

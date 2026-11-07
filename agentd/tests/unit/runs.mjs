@@ -122,9 +122,17 @@ store.transaction((tx) => {
     requiresApproval: true,
   });
 });
+// GH-27：升级前遗留的 clarified run 停在 accepted，重启时不得被报成 interrupted。
+const legacyClarified = svc.submitRun({ prompt: '过来', route: 'clarified' });
+check('遗留澄清 run 仍是 accepted（模拟旧行为）', legacyClarified.status === 'accepted', legacyClarified.status);
 const rec = svc.reconcileOnStartup();
-// 3 条：r3（有未决调用）、r4，外加幂等用例里停在 accepted 的 dup run
+// 3 条：r3（有未决调用）、r4，外加幂等用例里停在 accepted 的 dup run；遗留澄清 run 不算中断
 check('对账报告中断数', rec.interrupted === 3, JSON.stringify(rec));
+check('澄清类 run 不算中断', rec.details.every((d) => !d.startsWith(legacyClarified.run_id)), JSON.stringify(rec.details));
+const legacyDetail = svc.getRunDetail(legacyClarified.run_id);
+check('遗留澄清 run → cancelled（从未执行）', legacyDetail.run.status === 'cancelled', legacyDetail.run.status);
+const legacyEv = events.query({ limit: 200 }).events.filter((e) => e.type === 'run.finished' && e.run_id === legacyClarified.run_id);
+check('遗留澄清 run 写「已取消」而非中断', legacyEv.length === 1 && legacyEv[0].title === '任务已取消', JSON.stringify(legacyEv.map((e) => e.title)));
 const r3d = svc.getRunDetail(r3.run_id);
 const r4d = svc.getRunDetail(r4.run_id);
 check('有未决调用的 → outcome_unknown', r3d.run.status === 'outcome_unknown', r3d.run.status);

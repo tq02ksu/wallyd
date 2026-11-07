@@ -33,6 +33,7 @@
 - [层与模块关系（唯一口径）](layers-and-modules.md) - 「层」这个词的唯一解释：执行位置、边界 B1–B4、接口面 A–C
 - [分层通信与接口设计](communication-protocol.md) - 进程内/进程间/线协议每条边界的传输方式
 - [语音输入输出改造方案（流式优先）](voice-architecture.md) - 语音从 request/response 改为流式管线；方案已部分落地
+- [GH-4 语音桥双管道设计](design/GH-4.md) - 拾音（采集→VAD→ASR）与出话（分句→合成→有界队列→渲染）拆分及可替换 engine 边界
 - [模型选型](model-selection.md) - LLM / TTS / ASR 选型（苹果生态优先，2026-09-17 口径）
 - [产品定位与套件化约束](product-positioning.md) - 平台而非成品、套件化销售的口述决策
 - [可行性评估与技术风险清单](risk-assessment.md) - R1–R7 风险项与验证顺序
@@ -54,6 +55,9 @@
 - [agentd 详细功能与界面设计](spec/agentd-functional-design.md) - 编排、模型配置、总览/任务/事件界面与安全边界
 - [agentd 开发任务清单](spec/agentd-development-plan.md) - 六阶段任务与分批交付门槛
 - [摄像头自动检测与配置](spec/camera-detection.md) - macOS UVC 判定与采集配置
+- [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
+- [GH-27 澄清不建 run 的设计](design/GH-27.md) - 澄清/歧义只写 `route.clarify` 事件、不占活动名额；受保护的停止规则不受忙限制
+- [GH-8 快速路由规则表的长大方式](design/GH-8.md) - 否定按作用域判断、结构化参数槽、三条规则与能力漂移断言
 
 ## 5. 契约专题（有时效）
 
@@ -78,11 +82,7 @@
 | [ADR-0010](decisions/0010-robotd-python-control-isolation.md) | Python 控制隔离与串口所有权（候选 A） | proposed |
 | [ADR-0011](decisions/0011-audio-bridge-app-bundle-tcc.md) | 音频桥做成 .app bundle 并由 open 拉起 | accepted |
 
-## 7. 设计记录（按 issue）
-
-- [GH-8：快速路由规则表的长大方式](design/GH-8.md) - 否定作用域、参数槽、三条规则与能力漂移断言
-
-## 8. 实测与评测（有时效）
+## 7. 实测与评测（有时效）
 
 - [视觉延迟实测（2026-10-06）](../eval/vision-latency.md) - VLM 0.84s/帧 vs 系统检测器 4–20ms
 - [视觉评测脚本使用说明](../eval/README.md) - 上面那份实测怎么复跑
@@ -91,7 +91,7 @@
 - [本地大脑全链路验证（2026-10-25）](../eval/brain-qwen3-toolcalling-2026-10-25.md) - Codex→moon-bridge→mlx_lm→Qwen3-4B 端到端与工具调用通过率
 - [Codex app-server 接入取证（A01）](../eval/codex-harness-probe.md) - SDK 分发、进程边界与 `CODEX_HOME` 隔离的实证
 
-## 9. 历史归档（不代表现状）
+## 8. 历史归档（不代表现状）
 
 - [历史文档归档说明](archive/README.md) - 归档范围与「以现行文档为准」的声明
 - [POC 使用说明](archive/poc-readme.md) - 已删除的 POC 的启动与排错记录

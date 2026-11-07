@@ -14,10 +14,33 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import copy
+from dataclasses import dataclass, field, fields
 from typing import Any, Mapping
 
 from .types import DeviceStatus, Pose, RobotMode, now_ms
+
+
+class StateRejection(Exception):
+    """归并规则拒绝把一条事件应用到状态。
+
+    ``contract`` 为真表示「调用方写错了事件内容」（未知设备名、非法设备状态），
+    内核据此按契约错误（``E_VALIDATION``）拒绝整条事件；否则视为归并内部失败。
+    ``reason`` 是稳定原因码，会进 ``state.rejected``，**不得携带 payload 的值**。
+    """
+
+    def __init__(self, reason: str, *, contract: bool = False) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.contract = contract
+
+
+def _device_status(status: str) -> DeviceStatus:
+    """字符串 → ``DeviceStatus``；非法取值是契约错误，不是内部故障。"""
+    try:
+        return DeviceStatus(status)
+    except ValueError:
+        raise StateRejection("invalid_device_status", contract=True) from None
 
 
 def derive_mode(*, link_ready: bool, has_motion_task: bool) -> RobotMode:
@@ -106,10 +129,12 @@ class RobotStateStore:
 
         ``event_seq`` 由调用方（EventKernel）在**同一把锁内**传入，保证「快照 ↔ 游标」
         原子对应。这里不自己去问 kernel 要序号，避免两次读取之间插入新事件。
+
+        这是**只读**操作：时间戳只出现在返回值里，不写回 ``self.ts``——读一次快照
+        不该让权威状态发生变化（否则「失败前后状态逐字段相同」无法成立）。
         """
         stamp = now_ms() if ts is None else ts
         seq = self.event_seq if event_seq is None else event_seq
-        self.ts = stamp
         return {
             "robot_id": self.robot_id,
             "version": self.version,
@@ -133,6 +158,23 @@ class RobotStateStore:
             "pump": self.pump,
         }
 
+    # ------------------------------------------------------------ 归并工作副本
+    def _stage(self) -> "RobotStateStore":
+        """取一份归并工作副本（``pending``）。
+
+        归并只在这份副本上算，权威实例一个字节都不动；副本不对外暴露，
+        所以 ``snapshot()`` / ``resume()`` / 订阅者永远看不到未发布的状态。
+        """
+        return copy.deepcopy(self)
+
+    def _publish(self, staged: "RobotStateStore") -> None:
+        """把工作副本一次性写回唯一实例——状态对外可见的唯一时刻。
+
+        整体赋值而不是逐规则写入，是因为归并已经把整条规则算完：这里只做发布。
+        """
+        for item in fields(self):
+            setattr(self, item.name, getattr(staged, item.name))
+
     # ------------------------------------------------------------ 受控写入
     def _apply_link(self, status: DeviceStatus, firmware: str | None = None) -> None:
         self.esp32 = status
@@ -142,15 +184,16 @@ class RobotStateStore:
 
     def _apply_device(self, device: str, status: str) -> None:
         if device == "camera":
-            self.camera = DeviceStatus(status)
+            self.camera = _device_status(status)
         elif device == "audio":
-            self.audio = DeviceStatus(status)
+            self.audio = _device_status(status)
         elif device == "esp32":
-            self._apply_link(DeviceStatus(status))
+            self._apply_link(_device_status(status))
         elif device == "pump":
             self.pump = status
         else:
-            raise KeyError(f"未知设备 {device}")
+            # 写事件的地方传错了设备名：这是契约错误，不是内部故障。
+            raise StateRejection("unknown_device", contract=True)
 
     def _apply_pose(self, pose: Pose) -> None:
         self.pose = pose

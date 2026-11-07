@@ -113,6 +113,13 @@ export interface paths {
          *
          *     执行路径由 agentd 的 Input/Router 决定：命中确定性快速路由 → 直接走能力调用
          *     （仍经同一审批门）；否则交给 Harness 理解。响应里的 `route` 说明实际走了哪条。
+         *
+         *     **需要澄清（`route=clarified`）不创建 run**：没有执行意图就不占活动名额，
+         *     响应里没有 `run_id` / `status`，只带 `clarify`（或 `ambiguous`）。因此澄清之后
+         *     可以立即再提交下一条请求，不会被 `E_BUSY` 挡住。
+         *
+         *     受保护的停止规则（`stop_robot`）是安全旁路：即使已有活动 run 也允许提交，
+         *     不受「活动 run 上限 1」限制；其余请求遇忙仍返回 409。
          */
         post: operations["agentd_submit_run"];
         delete?: never;
@@ -535,8 +542,13 @@ export interface components {
         };
         RunAccepted: {
             ok: boolean;
-            run_id: string;
-            status: string;
+            /**
+             * @description 本次请求对应的 run。`route=clarified` 时**为 null**（或缺失）：
+             *     澄清没有执行意图，不创建 run，也不占用活动名额。
+             */
+            run_id?: string | null;
+            /** @description run 的初始状态。`route=clarified` 时没有 run，因此为 null（或缺失）。 */
+            status?: string | null;
             /**
              * @description fast=确定性快速路由；harness=交给模型理解；clarified=需澄清
              * @enum {string}
@@ -546,14 +558,15 @@ export interface components {
             fast_rule?: string | null;
             /** Format: date-time */
             created_at: string;
-            /** @description 幂等键命中已有 run 时为 true */
+            /** @description 幂等键命中已有 run 时为 true；澄清不建 run，因此不会出现该字段 */
             duplicate?: boolean;
             /**
-             * @description `route=harness` 且原因是**多条快速规则同时命中**时，列出候选规则 ID@version。
-             *     出现这个字段表示「没有执行任何动作」——歧义时按规格要求先问清楚，不按第一条命中执行。
+             * @description `route=clarified` 且原因是**多条快速规则同时命中**时，列出候选规则 ID@version。
+             *     出现这个字段表示「没有执行任何动作」，也不创建 run——歧义时按规格要求先问清楚，
+             *     不按第一条命中执行。
              */
             ambiguous?: string[];
-            /** @description `route=clarified` 时的澄清内容。澄清同样是**未执行**状态。 */
+            /** @description `route=clarified` 时的澄清内容。澄清同样是**未执行**状态，且不创建 run。 */
             clarify?: {
                 /** @description 面向用户的一句话，说明为什么没执行、需要什么 */
                 question?: string;
