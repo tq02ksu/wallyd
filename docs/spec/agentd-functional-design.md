@@ -141,7 +141,7 @@ agentd 保持 TypeScript，robotd 的 Python 迁移不影响这个分工。
 
 - **不做子串匹配**。「停止跟随」若按子串匹配会被 stop 吃掉，实际是「停止跟随」这条另一个指令；
   现在这种带未知尾巴的输入一律交给 Harness。
-- **审批标志不写在规则里**。审批只从能力契约取（`CapabilityInfo.requiresApproval`），
+- **审批标志不写在规则里**。审批只从能力契约取（`CapabilityInfo.approvalParams !== undefined`），
   规则不能降低它。`MatchResult.matched` 里也**故意没有** `requires_approval` 字段，
   免得执行层误以为「路由命中 = 不用审批」。
 - **能力表未知（`null`）时不拒绝**。还没探测到不代表没有；由执行层在真正调用时报错。
@@ -163,7 +163,8 @@ agentd 保持 TypeScript，robotd 的 Python 迁移不影响这个分工。
 
 **执行纪律（`service.ts` 的 `executeFastRun`）**：
 
-- **审批只从能力契约取**（`CapabilityInfo.requiresApproval`）。首版唯一规则 `robot_stop` 不需要审批；
+- **审批只从能力契约取**（`CapabilityInfo.approvalParams` 存在即需审批，值即绑定字段）。
+  首版唯一规则 `robot_stop` 不需要审批；
   将来加需要审批的规则时，这里落到 `waiting_confirmation` 而不是直接执行——规则不能降低审批门。
 - **能力缺失 → `failed` 并写明「未执行任何动作」**，不静默成功。
 - **步骤与工具调用都落库**：只有状态没有步骤会出现「succeeded 但看不出执行过什么」。

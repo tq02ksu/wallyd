@@ -379,7 +379,7 @@ export async function createRuntime(
    *
    * 状态机：`accepted → executing → succeeded | failed | waiting_confirmation`
    *
-   * **审批只从能力契约取**（`CapabilityInfo.requiresApproval`）。当前首版规则
+   * **审批只从能力契约取**（`CapabilityInfo.approvalParams` 存在即需审批）。当前首版规则
    * （`robot.stop`）不需要审批；将来加需要审批的规则时，这里必须落到
    * `waiting_confirmation` 而不是直接执行——规则不能降低审批门。
    */
@@ -410,7 +410,7 @@ export async function createRuntime(
         });
         return;
       }
-      if (tool.requiresApproval) {
+      if (tool.approvalParams !== undefined) {
         // 先持久化审批，再用系统播报复述，**播完**才开确认窗口（run.waiting_confirmation）。
         // 不能用需审批的 robot_speak：那会让「问用户确认」本身再进入一次等待确认。
         const summary = compactJson(args).slice(0, 200);

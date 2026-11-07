@@ -46,6 +46,8 @@ if (gen.status !== 0) {
   fs.rmSync(TMP, { recursive: true, force: true });
   process.exit(1);
 }
+// 生成器对旧布尔写法只报 warning（不红）；转发出去，别让迁移护栏静默。
+if (gen.stderr) process.stderr.write(gen.stderr);
 
 const files = ['openapi.json', 'mcp-tools.json', 'robotd-types.ts', 'robotd-events.json'];
 let failed = false;
@@ -133,15 +135,28 @@ if (!failed) {
 }
 
 // 2.5 审批属性必须显式（物理动作不许靠 Agent 自觉）
+//
+// 审批声明是对象 `{ params: [...] }`：字段存在即需审批，params 列出必须被用户听见
+// 并绑定的参数。旧布尔 true 仍然可被生成器接受（会 warning），但本仓库要求迁完。
 const APPROVAL_REQUIRED = ['robot_follow', 'robot_speak', 'robot_calibration_set'];
+const approvalWarning = [];
+function approvalOf(operation) {
+  const raw = operation['x-requires-approval'];
+  if (raw === undefined || raw === false) return null;
+  return raw;
+}
 for (const [, item] of Object.entries(spec.paths ?? {})) {
   for (const method of ['post', 'put']) {
     const op = item[method];
     if (!op) continue;
-    if (APPROVAL_REQUIRED.includes(op.operationId) && op['x-requires-approval'] !== true) {
-      semantic.push(`${op.operationId} 缺少 x-requires-approval: true`);
+    const approval = approvalOf(op);
+    if (approval === true) {
+      approvalWarning.push(`${op.operationId} 仍用布尔 x-requires-approval: true；请迁移到 { params: [...] }`);
     }
-    if (op.operationId === 'robot_stop' && op['x-requires-approval'] === true) {
+    if (APPROVAL_REQUIRED.includes(op.operationId) && (approval === null || typeof approval !== 'object')) {
+      semantic.push(`${op.operationId} 缺少对象形态的 x-requires-approval: { params: [...] }`);
+    }
+    if (op.operationId === 'robot_stop' && approval !== null) {
       semantic.push('robot_stop 不应要求审批（安全旁路必须无审批可达）');
     }
   }
@@ -159,7 +174,7 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
     if (announce.operationId !== 'robot_announce') {
       semantic.push(`/v1/robot/announce 的 operationId 必须是 robot_announce，实际 ${announce.operationId}`);
     }
-    if (announce['x-requires-approval'] === true) {
+    if (approvalOf(announce) !== null) {
       semantic.push('robot_announce 不得要求审批：它就是审批复述路径，要求审批会递归');
     }
     if (announce['x-mcp-exclude'] !== true) {
@@ -168,12 +183,36 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
   }
   const mcpPath = path.join(ROOT, 'generated', 'mcp-tools.json');
   if (fs.existsSync(mcpPath)) {
-    const names = JSON.parse(fs.readFileSync(mcpPath, 'utf8')).map((t) => t.name);
+    const mcpTools = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
+    const names = mcpTools.map((t) => t.name);
     if (names.includes('robot_announce')) semantic.push('robot_announce 出现在 mcp-tools.json；系统路径不得成为 Agent 工具');
     if (names.length !== 14) semantic.push(`MCP 工具面应为 14 项，实际 ${names.length}`);
-    const speak = JSON.parse(fs.readFileSync(mcpPath, 'utf8')).find((t) => t.name === 'robot_speak');
-    if (!speak || speak.requiresApproval !== true) {
-      semantic.push('robot_speak 仍必须是唯一带 requiresApproval 的发声工具');
+    for (const tool of mcpTools) {
+      if ('requiresApproval' in tool) {
+        semantic.push(`${tool.name} 的生成物仍带 requiresApproval 布尔；只允许 approvalParams`);
+      }
+      const contractOp = Object.values(spec.paths ?? {})
+        .flatMap((item) => ['get', 'post', 'put', 'delete', 'patch'].map((m) => item[m]))
+        .find((op) => op?.operationId === tool.name);
+      const declared = contractOp ? approvalOf(contractOp) : null;
+      if (declared === null) {
+        if ('approvalParams' in tool) semantic.push(`${tool.name} 不需要审批却生成了 approvalParams`);
+      } else if (typeof declared === 'object') {
+        const want = declared.params ?? [];
+        const have = tool.approvalParams;
+        if (!Array.isArray(have) || JSON.stringify(have) !== JSON.stringify(want)) {
+          semantic.push(`${tool.name} 的 approvalParams 与契约不一致：${JSON.stringify(have)} vs ${JSON.stringify(want)}`);
+        }
+      } else if (declared === true) {
+        // 旧布尔形态：生成器必须仍把它投影成 approvalParams: []（迁移期不能丢审批门）。
+        if (!Array.isArray(tool.approvalParams) || tool.approvalParams.length !== 0) {
+          semantic.push(`${tool.name} 用布尔形态声明审批，生成物必须是 approvalParams: []，实际 ${JSON.stringify(tool.approvalParams)}`);
+        }
+      }
+    }
+    const speak = mcpTools.find((t) => t.name === 'robot_speak');
+    if (!Array.isArray(speak?.approvalParams) || !speak.approvalParams.includes('text')) {
+      semantic.push('robot_speak 的 approvalParams 必须存在且包含 text（播报内容必须被听见并绑定）');
     }
   }
 }
@@ -294,6 +333,7 @@ if (fs.existsSync(path.join(AGENTD_DIR, 'openapi.yaml'))) {
 }
 
 for (const msg of semantic) console.error(`FAIL ${msg}`);
+for (const msg of approvalWarning) console.error(`WARN ${msg}`);
 if (semantic.length) failed = true;
 
 if (failed) process.exit(1);

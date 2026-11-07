@@ -93,12 +93,13 @@ def test_robot_announce_is_contract_declared_system_path(spec, tools):
     """审批复述必须有一条契约可见、免审批、且不在 Agent 工具面的路径。"""
     operation = spec["paths"]["/v1/robot/announce"]["post"]
     assert operation["operationId"] == "robot_announce"
-    assert operation.get("x-requires-approval") is not True
+    assert operation.get("x-requires-approval") in (None, False)
     assert operation.get("x-mcp-exclude") is True
     assert "robot_announce" not in {t["name"] for t in tools}
 
     speak = next(t for t in tools if t["name"] == "robot_speak")
-    assert speak["requiresApproval"] is True
+    assert speak["approvalParams"] is not None
+    assert "text" in speak["approvalParams"]
     assert "text" in speak["inputSchema"]["properties"]
 
     announce_body = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
@@ -114,6 +115,32 @@ def test_no_hardware_primitives_in_public_tools(tools):
             assert word not in tool["name"], f"公开工具 {tool['name']} 含硬件原语 {word}"
 
 
+def _approval_params(operation: dict) -> list[str] | None:
+    """契约里 ``x-requires-approval`` 的对象形态；不存在返回 None。"""
+    raw = operation.get("x-requires-approval")
+    if raw is None or raw is False:
+        return None
+    assert isinstance(raw, dict), (
+        f"{operation.get('operationId')} 的 x-requires-approval 必须是对象 {{ params: [...] }}，"
+        f"实际 {type(raw).__name__}"
+    )
+    assert set(raw) == {"params"}, f"{operation.get('operationId')} 的 x-requires-approval 只允许 params"
+    params = raw["params"]
+    assert isinstance(params, list) and all(isinstance(p, str) and p for p in params)
+    return params
+
+
+def test_contract_owner_declares_no_boolean_approval_flag(spec):
+    """本仓库的 3 个审批端点必须全部是对象形态，0 处残留布尔 true。"""
+    boolean_form = [
+        op["operationId"]
+        for item in spec["paths"].values()
+        for op in item.values()
+        if isinstance(op, dict) and op.get("x-requires-approval") is True
+    ]
+    assert not boolean_form, f"仍有端点使用布尔形态 x-requires-approval: true：{boolean_form}"
+
+
 def test_approval_flags_in_contract_are_reflected_in_capabilities(spec):
     registry = Registry()
     for item in spec["paths"].values():
@@ -122,7 +149,69 @@ def test_approval_flags_in_contract_are_reflected_in_capabilities(spec):
             if not operation or "debug" in operation.get("tags", []):
                 continue
             cap = registry.by_public_name(operation["operationId"])
-            assert cap.requires_approval is operation.get("x-requires-approval", False)
+            params = _approval_params(operation)
+            assert cap.requires_approval is (params is not None), (
+                f"{operation['operationId']} 的 Capability.requires_approval 与契约不一致"
+            )
+            assert list(cap.approval_params) == (params or []), (
+                f"{operation['operationId']} 的 Capability.approval_params 与契约 params 不一致"
+            )
+
+
+def test_approval_params_cover_speak_follow_and_calibration(spec):
+    """验收判据 1：三个物理/发声端点必须声明“必须被听见并绑定”的字段。"""
+    declared = {
+        op["operationId"]: _approval_params(op)
+        for item in spec["paths"].values()
+        for op in item.values()
+        if isinstance(op, dict) and op.get("operationId")
+    }
+    assert "text" in declared["robot_speak"]
+    assert {"target", "target_track_id"} <= set(declared["robot_follow"])
+    assert {"steps_per_m", "wheelbase_mm"} <= set(declared["robot_calibration_set"])
+
+
+def test_approval_params_reference_real_request_body_fields(spec, tools):
+    """一致性门禁：声明的字段必须真的存在于该端点的 requestBody schema 里。
+
+    字段改名（schema 改了、审批声明没改，或反之）两边都必须红，否则用户听见的
+    参数名与 robotd 实际接收的参数名可以悄悄分叉。
+    """
+    by_name = {tool["name"]: tool for tool in tools}
+    for item in spec["paths"].values():
+        for operation in item.values():
+            if not isinstance(operation, dict) or not operation.get("operationId"):
+                continue
+            params = _approval_params(operation)
+            if params is None:
+                continue
+            body = (
+                operation.get("requestBody", {})
+                .get("content", {})
+                .get("application/json", {})
+                .get("schema", {})
+            )
+            ref = body.get("$ref")
+            assert ref, f"{operation['operationId']} 有 approvalParams 却没有 JSON requestBody schema"
+            schema = spec["components"]["schemas"][ref.rsplit("/", 1)[-1]]
+            unknown = [p for p in params if p not in schema.get("properties", {})]
+            assert not unknown, (
+                f"{operation['operationId']} 的 approvalParams 不在 requestBody schema 里：{unknown}"
+            )
+            tool = by_name[operation["operationId"]]
+            assert tool["approvalParams"] == params, (
+                f"mcp-tools.json 的 {operation['operationId']}.approvalParams 与契约不一致"
+            )
+
+
+def test_generated_tools_use_approval_params_only(tools):
+    """生成物只能有 approvalParams：存在即需审批，[] 表示需审批但无参数可绑。"""
+    approval_tools = {t["name"] for t in tools if "approvalParams" in t}
+    assert approval_tools == {"robot_follow", "robot_speak", "robot_calibration_set"}
+    for tool in tools:
+        assert "requiresApproval" not in tool, f"{tool['name']} 仍生成 requiresApproval 布尔"
+        if "approvalParams" in tool:
+            assert isinstance(tool["approvalParams"], list)
 
 
 def test_approval_flags_in_contract_are_reflected_in_routes(spec):
@@ -139,7 +228,7 @@ def test_approval_flags_in_contract_are_reflected_in_routes(spec):
             operation = item.get(method)
             if not operation or "debug" in operation.get("tags", []):
                 continue
-            declared[operation["operationId"]] = bool(operation.get("x-requires-approval", False))
+            declared[operation["operationId"]] = _approval_params(operation) is not None
 
     routed = {r.operation_id: r.requires_approval for r in build_routes(debug=False)}
     assert routed.keys() == (declared.keys() - {"events_subscribe"})

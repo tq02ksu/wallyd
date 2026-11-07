@@ -43,7 +43,7 @@ try {
 
   // 能力表已知但没有 robot_stop → 路由必须澄清
   runtime.robotd.capabilities.store(
-    [{ name: 'robot_speak', description: '', inputSchema: {}, requiresApproval: true }],
+    [{ name: 'robot_speak', description: '', inputSchema: {}, approvalParams: ['text'] }],
     null,
   );
   const c = await call({ prompt: '停' });
@@ -57,7 +57,7 @@ try {
 
   // 恢复能力表：紧接着的「停」必须真的执行
   runtime.robotd.capabilities.store(
-    [{ name: 'robot_stop', description: '', inputSchema: {}, requiresApproval: false }],
+    [{ name: 'robot_stop', description: '', inputSchema: {} }],
     null,
   );
   let stopped = 0;
