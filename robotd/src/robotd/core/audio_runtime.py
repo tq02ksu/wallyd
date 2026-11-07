@@ -86,6 +86,9 @@ class AudioRuntime:
         self.mic_format = ""
         self.last_final: str | None = None
         self.last_error: str | None = None
+        #: 桥最近一次 aec_echo_probe 的 ERLE 估计（事实，不是判定）。
+        self.last_erle_db: float | None = None
+        self.last_erle_ms: int = 0
         #: 最近一次 utterance 的终态回调（由 app 注入，用于把任务表收尾）
         self.on_utterance_done: Callable[[Utterance, str, str | None], None] | None = None
         self.on_response_done: Callable[[Response, str], None] | None = None
@@ -311,6 +314,14 @@ class AudioRuntime:
                 self.silence_db = _num(ev.get("silence_db"))
             self.emit_state()
             return
+        if name == "aec_echo_probe":
+            # 只记事实：ERLE 的判定（这一轮是不是回声）归 agentd，robotd 不猜。
+            erle = _num(ev.get("aec_erle_db"))
+            if erle is not None:
+                with self._lock:
+                    self.last_erle_db = erle
+                    self.last_erle_ms = now_ms()
+            return
         if name == "speech_state":
             # 桥的 VAD 判出「开始说了」
             if str(ev.get("state")) == "speech":
@@ -318,14 +329,15 @@ class AudioRuntime:
                     utt = self._utterance_for(ev)
                     if utt is not None and not utt.saw_speech:
                         utt.saw_speech = True
-                        self._emit(
-                            "speech.started",
-                            {
-                                "utterance_id": utt.utterance_id,
-                                "task_id": utt.task_id,
-                                "rms_db": _num(ev.get("rms_db")),
-                            },
-                        )
+                        payload: dict[str, Any] = {
+                            "utterance_id": utt.utterance_id,
+                            "task_id": utt.task_id,
+                            "rms_db": _num(ev.get("rms_db")),
+                        }
+                        # 只带 1 秒内的 ERLE：更早的探测属于上一轮播报，拿来判本轮回声会误伤。
+                        if self.last_erle_db is not None and now_ms() - self.last_erle_ms <= 1000:
+                            payload["aec_erle_db"] = round(self.last_erle_db, 1)
+                        self._emit("speech.started", payload)
                         # barge-in：用户开口 → 停掉正在播的话
                         if self.response is not None:
                             self.cancel_speaking("barge_in")

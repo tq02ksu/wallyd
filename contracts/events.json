@@ -174,7 +174,12 @@
       "payload": {
         "utterance_id": {"type": "string", "required": true},
         "task_id": {"type": "string", "required": false},
-        "rms_db": {"type": "number", "required": false}
+        "rms_db": {"type": "number", "required": false},
+        "aec_erle_db": {
+          "type": "number",
+          "required": false,
+          "notes": "桥在最近 1 秒内上报的 AEC 回声抑制量（render_db - mic_db）。只是事实，不是判定；是否回声由 agentd 决定。"
+        }
       }
     },
     {

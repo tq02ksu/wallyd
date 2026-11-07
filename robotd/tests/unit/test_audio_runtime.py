@@ -117,6 +117,31 @@ def test_announcement_events_carry_approval_id_and_complete_only_on_bridge_finis
     assert finished["played"] == 1
 
 
+def test_speech_started_carries_fresh_aec_erle_db():
+    """确认窗口的回声判断需要事实：桥最近 1 秒的 ERLE 要随 speech.started 上报。"""
+    rt, emitted = make_runtime()
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-echo-1"})
+    rt.handle_bridge_event({"ev": "aec_echo_probe", "aec_erle_db": 2.5, "render_db": -12.0})
+    rt.handle_bridge_event({"ev": "speech_state", "state": "speech", "utterance_id": "utt-echo-1"})
+
+    started = [p for t, p in emitted if t == "speech.started"]
+    assert len(started) == 1
+    assert started[0]["aec_erle_db"] == 2.5
+
+
+def test_speech_started_omits_stale_aec_erle_db():
+    """更早的探测属于上一轮播报，不能拿来判本轮回声。"""
+    rt, emitted = make_runtime()
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-echo-2"})
+    rt.last_erle_db = 2.5
+    rt.last_erle_ms = 0  # 1970：一定过期
+    rt.handle_bridge_event({"ev": "speech_state", "state": "speech", "utterance_id": "utt-echo-2"})
+
+    started = [p for t, p in emitted if t == "speech.started"]
+    assert len(started) == 1
+    assert "aec_erle_db" not in started[0]
+
+
 def test_abort_response_emits_cancelled_immediately_and_clears_active_response():
     rt, emitted = make_runtime()
     resp = rt.new_response(task_id="t-ann", approval_id="appr-2", kind="approval_repeat")

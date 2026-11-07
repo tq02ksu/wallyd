@@ -269,7 +269,8 @@
       "payload_fields": [
         "utterance_id",
         "task_id",
-        "rms_db"
+        "rms_db",
+        "aec_erle_db"
       ],
       "required_fields": [
         "utterance_id"

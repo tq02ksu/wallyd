@@ -790,7 +790,7 @@
                 "waiting",
                 "approved",
                 "denied",
-                "expired",
+                "timeout",
                 "cancelled"
               ]
             }
@@ -1755,6 +1755,15 @@
             "type": "string",
             "description": "规范化、脱敏后的参数摘要（用于复述与审计）"
           },
+          "requires_approval": {
+            "type": "boolean",
+            "description": "本次调用是否需要（且已经获得）语音审批"
+          },
+          "approval_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "绑定到本次调用的审批记录；批准只对原 capability 与原参数有效"
+          },
           "state": {
             "type": "string",
             "enum": [
@@ -2446,7 +2455,7 @@
               "waiting",
               "approved",
               "denied",
-              "expired",
+              "timeout",
               "cancelled"
             ]
           },

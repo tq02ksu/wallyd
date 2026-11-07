@@ -36,6 +36,8 @@
     "error": "故障"
   },
   "registered_types": [
+    "approval.expired",
+    "approval.ignored",
     "approval.resolved",
     "approval.unavailable",
     "approval.waiting",
@@ -459,13 +461,53 @@
         "approval_id",
         "action_label",
         "status",
-        "decided_by"
+        "decided_by",
+        "utterance_id"
       ],
       "required_fields": [
         "approval_id",
         "action_label",
         "status",
         "decided_by"
+      ]
+    },
+    {
+      "type": "approval.expired",
+      "category": "approval",
+      "severity": "warning",
+      "title": "确认窗口已过期",
+      "summary": "「{action_label}」的确认窗口已过期，没有执行。",
+      "impact": "迟到的「确认」不会再生效。",
+      "advice": "需要执行的话，请重新说一次指令。",
+      "is_recovery": false,
+      "payload_fields": [
+        "approval_id",
+        "action_label",
+        "expired_at"
+      ],
+      "required_fields": [
+        "approval_id",
+        "action_label",
+        "expired_at"
+      ]
+    },
+    {
+      "type": "approval.ignored",
+      "category": "approval",
+      "severity": "info",
+      "title": "这句话没有作为确认",
+      "summary": "没有采纳这次所谓的确认（{reason}）。",
+      "impact": "需要确认的动作仍然不会执行。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "approval_id",
+        "reason",
+        "utterance_id"
+      ],
+      "required_fields": [
+        "approval_id",
+        "reason"
       ]
     },
     {

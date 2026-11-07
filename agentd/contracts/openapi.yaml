@@ -530,7 +530,7 @@ paths:
           required: false
           schema:
             type: string
-            enum: [persisted, announced, waiting, approved, denied, expired, cancelled]
+            enum: [persisted, announced, waiting, approved, denied, timeout, cancelled]
         - $ref: "#/components/parameters/Limit"
       responses:
         "200":
@@ -1104,6 +1104,13 @@ components:
         args_summary:
           type: string
           description: 规范化、脱敏后的参数摘要（用于复述与审计）
+        requires_approval:
+          type: boolean
+          description: 本次调用是否需要（且已经获得）语音审批
+        approval_id:
+          type: string
+          nullable: true
+          description: 绑定到本次调用的审批记录；批准只对原 capability 与原参数有效
         state:
           type: string
           enum: [requested, awaiting_approval, running, succeeded, failed, outcome_unknown, denied]
@@ -1518,7 +1525,7 @@ components:
           type: string
         status:
           type: string
-          enum: [persisted, announced, waiting, approved, denied, expired, cancelled]
+          enum: [persisted, announced, waiting, approved, denied, timeout, cancelled]
         prompt_text:
           type: string
           description: 系统播报的复述文本，与语音确认窗口绑定

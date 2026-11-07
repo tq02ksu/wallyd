@@ -227,14 +227,17 @@ export class RobotdClient {
     route: string,
     body?: unknown,
     timeoutMs?: number,
+    extraHeaders?: Record<string, string>,
   ): Promise<any> {
     const url = `${this.baseUrl}${route}`;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs ?? this.timeoutMs);
     try {
+      const headers: Record<string, string> = { ...(extraHeaders ?? {}) };
+      if (body !== undefined) headers['content-type'] = 'application/json';
       const res = await fetch(url, {
         method,
-        headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: ctl.signal,
       });
@@ -386,7 +389,7 @@ export class RobotdClient {
   async callCapability(
     name: string,
     args: Record<string, unknown>,
-    opts: { instanceId?: string | null } = {},
+    opts: { instanceId?: string | null; approvalHeader?: string | null } = {},
   ): Promise<{ body: unknown; robot_task_id: string | null }> {
     let tools = this.capabilities.current;
     if (!tools || this.capabilities.needsRefresh(opts.instanceId ?? null)) {
@@ -417,7 +420,9 @@ export class RobotdClient {
     }
 
     const method = tool.operation.method.toUpperCase();
-    const result = await this.request(method, route, method === 'GET' ? undefined : body);
+    // 需审批端点必须带 X-Wally-Approval；没有凭据就不发请求（fail closed 在上层）。
+    const extra = opts.approvalHeader ? { 'X-Wally-Approval': opts.approvalHeader } : undefined;
+    const result = await this.request(method, route, method === 'GET' ? undefined : body, undefined, extra);
     const robotTaskId =
       result && typeof result === 'object' && typeof (result as any).task_id === 'string'
         ? ((result as any).task_id as string)

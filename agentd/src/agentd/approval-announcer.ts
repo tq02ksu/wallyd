@@ -23,6 +23,11 @@ export interface AnnouncementOutcome {
   reason?: string;
   response_id?: string;
   task_id?: string;
+  /**
+   * `speech.tts_finished.played`。**缺失 ≠ 0**：字段缺失按「没报」处理（兼容旧桥），
+   * 明确为 0 则说明一句都没播出去，不能开确认窗口。
+   */
+  played?: number;
 }
 
 export class ApprovalAnnouncer {
@@ -47,7 +52,7 @@ export class ApprovalAnnouncer {
     this.runs = opts.runs;
     this.robotd = opts.robotd;
     this.log = opts.log;
-    this.windowMs = opts.windowMs ?? 30_000;
+    this.windowMs = opts.windowMs ?? 60_000;
     this.announceTimeoutMs = opts.announceTimeoutMs ?? 30_000;
     this.noteSpeak = opts.noteSpeak;
   }
@@ -106,6 +111,15 @@ export class ApprovalAnnouncer {
     }
     this.clearTimeout(outcome.approval_id);
     if (outcome.ok) {
+      if (outcome.played === 0) {
+        // 桥报了 tts_finished，但一句都没播出去：用户没听见复述，不能问「确认吗」。
+        this.runs.abortApproval(
+          outcome.approval_id,
+          '系统播报没有真正播放（played=0）',
+          { byStop: false, kind: 'no_audio' },
+        );
+        return;
+      }
       const opened = this.runs.openConfirmationWindow(outcome.approval_id, this.windowMs);
       if (!opened.opened) {
         this.log('播报完成但确认窗口未开启', {

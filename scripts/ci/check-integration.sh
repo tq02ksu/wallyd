@@ -52,3 +52,6 @@ fi
 
 printf '[integration] agentd client against robotd sim\n'
 npm --prefix agentd run test:live
+
+printf '[integration] TypeScript-issued approval credential accepted by robotd Python verifier\n'
+ROBOTD_PYTHON="$ROOT/robotd/.venv/bin/python" node --experimental-strip-types agentd/tests/integration/approval-cross-check.mjs
