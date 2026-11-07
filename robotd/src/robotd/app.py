@@ -284,12 +284,21 @@ class App:
 
         板侧下发在 R08；这里先把「停止」这件事在状态与任务表上落实，
         并明确报告是否真的联系到了板侧——**不把「本地已停」说成「物理已停」**。
+
+        系统播报（审批复述）免审批，但**必须能被 stop 打断**：用户说「停」要立刻停，
+        不能等桥回应，也不能因为桥不可用就静默成功。``abort_response`` 会立刻发出
+        ``speech.tts_cancelled``（带 approval_id），agentd 据此不会开启确认窗口。
         """
+        self.audio.abort_response("stop")
         stopped_motion = 0
         for task in self.kernel.list_tasks():
             if task.exclusivity is Exclusivity.MOTION and not task.terminal:
                 self.kernel.finish(task.task_id, TaskState.CANCELLED, reason="stop")
                 stopped_motion += 1
+            elif task.capability in {"robot.speak", "robot.announce"} and not task.terminal:
+                # 兜底：没有活跃 response 的播报任务（例如桥未接上）也必须收尾为 cancelled，
+                # 不能留在 running 让调用方以为还在念。
+                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason="stop")
         board_ack: bool | None = None
         if self.board is not None:
             if self.state.link_ready:

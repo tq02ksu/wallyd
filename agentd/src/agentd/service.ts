@@ -25,6 +25,8 @@ import { submitRunRequest } from './run-request.ts';
 import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
 import { codexHomePath } from './paths.ts';
+import { ApprovalAnnouncer } from './approval-announcer.ts';
+import { FAST_RULES } from './router.ts';
 import {
   ApiError,
   Router,
@@ -138,11 +140,13 @@ export async function createRuntime(
     baseUrl: config.robotdUrl,
     log: (m, x) => log(m, x),
   });
+  let announcerRef: ApprovalAnnouncer | null = null;
   const robotdBridge = new RobotdEventBridge({
     events,
     store,
     hooks: {
       log: (m, x) => log(m, x),
+      onAnnouncementFinished: (outcome) => announcerRef?.onFinished(outcome),
       // 路由（A11）尚未实现：这里明确不消费，避免让人以为已经接上路由。
     },
   });
@@ -224,6 +228,13 @@ export async function createRuntime(
   };
 
   const runs = new RunService({ store, events, log, onEvent: broadcastByseq });
+  const approvalAnnouncer = new ApprovalAnnouncer({
+    runs,
+    robotd,
+    log,
+    noteSpeak: (taskId, text) => robotdBridge.noteSpeak(taskId, text),
+  });
+  announcerRef = approvalAnnouncer;
   const models = new ModelService({
     store,
     events,
@@ -374,7 +385,14 @@ export async function createRuntime(
    * （`robot.stop`）不需要审批；将来加需要审批的规则时，这里必须落到
    * `waiting_confirmation` 而不是直接执行——规则不能降低审批门。
    */
-  async function executeFastRun(runId: string, capability: string, args: Record<string, unknown>): Promise<void> {
+  async function executeFastRun(
+    runId: string,
+    capability: string,
+    args: Record<string, unknown>,
+    // 复述里念给用户的是规则的中文摘要（`FastRule.summary`），不是能力名。
+    // 装配层只拿到能力名，这里按能力反查默认规则；找不到再退回能力名。
+    actionLabel: string = FAST_RULES.find((r) => r.capability === capability)?.summary ?? capability,
+  ): Promise<void> {
     try {
       // 能力表可能还没探测；探测失败不静默跳过审批，宁可失败
       let tools = robotd.capabilities.current;
@@ -395,11 +413,18 @@ export async function createRuntime(
         return;
       }
       if (tool.requiresApproval) {
-        // 首版没有审批 UI 绑定，如实停在「等待确认」而不是偷偷执行
-        runs.transition(runId, 'waiting_confirmation', {
-          reason: 'approval_required',
-          detail: `能力 ${capability} 需要确认后才能执行`,
+        // 先持久化审批，再用系统播报复述，**播完**才开确认窗口（run.waiting_confirmation）。
+        // 不能用需审批的 robot_speak：那会让「问用户确认」本身再进入一次等待确认。
+        const summary = compactJson(args).slice(0, 200);
+        const approval = runs.createApproval({
+          runId,
+          capability,
+          actionLabel,
+          argsSummary: summary,
+          argsJson: compactJson(args),
         });
+        // 失败会由 announcer 写 approval.unavailable + run.finished，不在这里重复收尾
+        await approvalAnnouncer.announce(approval.approval_id);
         return;
       }
 

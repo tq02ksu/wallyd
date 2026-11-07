@@ -20,7 +20,9 @@
     "test:contract": "node --experimental-strip-types tests/contract/events.mjs && node --experimental-strip-types tests/contract/router.mjs",
     "test:live": "node --experimental-strip-types tests/integration/client.mjs",
     "test:codex": "node --experimental-strip-types tests/integration/codex-probe.mjs",
-    "test:e2e": "node --experimental-strip-types tests/e2e/agentd.mjs"
+    "test:e2e": "node --experimental-strip-types tests/e2e/agentd.mjs",
+    "pretest": "npm run test:announcer",
+    "test:announcer": "node --experimental-strip-types tests/unit/announcer.mjs"
   },
   "dependencies": {
     "@openai/codex-sdk": "^0.164.0"

@@ -199,6 +199,69 @@
         }
       }
     },
+    "/v1/robot/announce": {
+      "post": {
+        "operationId": "robot_announce",
+        "x-mcp-exclude": true,
+        "tags": [
+          "robot"
+        ],
+        "summary": "系统播报审批复述（不调用需审批的 robot_speak）",
+        "description": "robotd 内部的系统播报路径：只接受结构化的审批复述请求，由 robotd 用固定模板渲染，\n**不接受任意自由文本**（没有 `text` 字段；未知字段一律 400）。\n\n与 `/v1/robot/speak` 的区别是契约级的，不是「调用方自觉」：\n\n- 本端点不要求审批，因为它本身就是审批链路的一环；\n- 因此它只念审批复述与系统提示，参数必须来自 agentd 的审批记录\n  （`approval_id` + 固定 `kind` + 有界 `action_label`/`args_summary`）；\n- 播报完成后由 `speech.tts_finished`（带 `approval_id`/`kind`）告知调用方\n  **真的播完了**，而不是「请求已受理」。agentd 必须等这条事件才开启确认窗口。\n\n可被 `robot_stop` 打断：停止会中止当前播报并发出 `speech.tts_cancelled`，\n调用方不得因「请求已受理」就认为已经问过用户。\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnounceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已受理（受理不等于播完；以 speech.tts_finished 为准）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnounceAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法或试图传入自由文本",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "已有一条同类系统播报在跑",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "音频桥不可用（播报失败会同时发 speech.announce_failed 事件）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/audio/state": {
       "get": {
         "operationId": "audio_state",
@@ -1030,6 +1093,79 @@
             "type": "boolean",
             "default": false,
             "description": "是否要求板侧持久化（掉电保留）；默认仅本次运行有效"
+          }
+        }
+      },
+      "AnnounceRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "审批复述请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的\n`robot_speak`，否则本端点就成了它的免审批版本。\n",
+        "required": [
+          "approval_id",
+          "kind",
+          "action_label",
+          "args_summary"
+        ],
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "description": "agentd 审批记录的 ID；robotd 只用于回显与事件关联，不持有审批状态。"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "approval_repeat"
+            ],
+            "description": "固定播报种类；当前只允许审批复述。"
+          },
+          "action_label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "动作的人类可读名称，来自 agentd 的审批记录。"
+          },
+          "args_summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "关键参数摘要，来自 agentd 的审批记录；robotd 用固定模板念出。"
+          }
+        }
+      },
+      "AnnounceAccepted": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "status",
+          "approval_id",
+          "kind",
+          "text"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted"
+            ]
+          },
+          "approval_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "approval_repeat"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "description": "robotd 实际交给 TTS 的完整句子（固定模板渲染结果），供 agentd 存审计。"
           }
         }
       },

@@ -227,6 +227,151 @@ def test_task_list_filter(live):
     assert any(x["task_id"] == t.task_id for x in body["tasks"])
 
 
+# --------------------------------------------------------------------- 系统播报
+class FakeAudioBridge:
+    """只回答 ready() 并记录命令的桥替身（不碰麦克风/扬声器）。"""
+
+    def __init__(self) -> None:
+        from robotd.core.types import DeviceStatus
+
+        self.status = DeviceStatus.READY
+        self.sent: list[dict[str, Any]] = []
+
+    def ready(self) -> bool:
+        return True
+
+    def send(self, cmd: dict, best_effort: bool = False) -> None:  # noqa: FBT001, FBT002
+        self.sent.append(cmd)
+
+
+def _attach_fake_audio(app: App) -> FakeAudioBridge:
+    bridge = FakeAudioBridge()
+    app.audio.attach(bridge)
+    return bridge
+
+
+def test_announce_is_system_path_without_approval_and_emits_tts_events(live):
+    app, port = live
+    bridge = _attach_fake_audio(app)
+
+    status, body, _ = call(
+        port,
+        "POST",
+        "/v1/robot/announce",
+        {
+            "approval_id": "appr-1",
+            "kind": "approval_repeat",
+            "action_label": "向前跟随",
+            "args_summary": "目标：穿红衣服的人",
+        },
+    )
+    assert status == 200, body
+    assert body["status"] == "accepted"
+    assert body["approval_id"] == "appr-1"
+    assert body["kind"] == "approval_repeat"
+    # 固定模板由 robotd 渲染；调用方给的不是「要念的原文」
+    assert "向前跟随" in body["text"] and "目标：穿红衣服的人" in body["text"]
+    assert "确认" in body["text"]
+
+    speak = [c for c in bridge.sent if c.get("cmd") == "speak"]
+    assert len(speak) == 1
+    assert speak[0]["text"] == body["text"]
+    assert speak[0]["response_id"]
+
+    response_id = speak[0]["response_id"]
+    app.audio.handle_bridge_event({"ev": "tts_started", "response_id": response_id, "chunks": 2})
+    app.audio.handle_bridge_event(
+        {"ev": "tts_finished", "response_id": response_id, "chunks": 2, "played": 2}
+    )
+
+    events = app.kernel.recent_events(20)
+    finished = [e for e in events if e.type == "speech.tts_finished"]
+    assert len(finished) == 1
+    payload = finished[0].payload
+    assert payload["approval_id"] == "appr-1"
+    assert payload["kind"] == "approval_repeat"
+    assert payload["task_id"] == body["task_id"]
+    assert payload["played"] == 2
+
+
+def test_announce_rejects_free_text(live):
+    app, port = live
+    _attach_fake_audio(app)
+
+    status, body, _ = call(
+        port,
+        "POST",
+        "/v1/robot/announce",
+        {"text": "随便说点什么，这不经过审批"},
+    )
+    assert status == 400, body
+    assert body["error"]["code"] == "E_VALIDATION"
+    assert "text" in body["error"]["message"]
+
+    # 正确的结构化字段里夹带自由文本也不接受：未知字段一律拒绝
+    status, body, _ = call(
+        port,
+        "POST",
+        "/v1/robot/announce",
+        {
+            "approval_id": "appr-2",
+            "kind": "approval_repeat",
+            "action_label": "向前",
+            "args_summary": "一米",
+            "text": "我还能念别的东西",
+        },
+    )
+    assert status == 400 and body["error"]["code"] == "E_VALIDATION"
+
+
+def test_announce_rejects_unknown_kind(live):
+    app, port = live
+    _attach_fake_audio(app)
+    status, body, _ = call(
+        port,
+        "POST",
+        "/v1/robot/announce",
+        {
+            "approval_id": "appr-3",
+            "kind": "free_speech",
+            "action_label": "向前",
+            "args_summary": "一米",
+        },
+    )
+    assert status == 400 and body["error"]["code"] == "E_VALIDATION"
+
+
+def test_stop_interrupts_announcement(live):
+    app, port = live
+    bridge = _attach_fake_audio(app)
+
+    status, body, _ = call(
+        port,
+        "POST",
+        "/v1/robot/announce",
+        {
+            "approval_id": "appr-4",
+            "kind": "approval_repeat",
+            "action_label": "向前",
+            "args_summary": "两米",
+        },
+    )
+    assert status == 200, body
+    assert any(c.get("cmd") == "speak" for c in bridge.sent)
+
+    status, stop_body, _ = call(port, "POST", "/v1/robot/stop", {})
+    assert status == 200, stop_body
+    assert any(c.get("cmd") == "stop_speak" for c in bridge.sent), "stop 必须打断系统播报"
+
+    cancelled = [e for e in app.kernel.recent_events(30) if e.type == "speech.tts_cancelled"]
+    assert cancelled, "被打断必须发 speech.tts_cancelled，不能静默"
+    assert cancelled[-1].payload["approval_id"] == "appr-4"
+    assert cancelled[-1].payload["reason"] == "stop"
+
+    task = app.kernel.get_task(body["task_id"])
+    assert task.state.value == "cancelled"
+
+
 # --------------------------------------------------------------------- 板侧故障
 def test_board_lost_makes_state_degraded_and_stop_reports_no_ack(live):
     app, port = live

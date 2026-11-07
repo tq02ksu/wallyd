@@ -153,6 +153,16 @@ def default_capabilities() -> list[Capability]:
             summary="请求播报（分句流式 + 有界队列 + 可打断）",
             requires_approval=True,
         ),
+        # 审批复述是审批链路本身：免审批，但只接受结构化审批字段并由 robotd 渲染正文。
+        # 它不是 Agent 可调用的能力，契约里标了 x-mcp-exclude，不进 MCP 工具面。
+        Capability(
+            name="robot.announce",
+            public_name="robot_announce",
+            group="speech",
+            implementation=Implementation.IMPLEMENTED,
+            summary="系统播报审批复述（免审批；不接受任意自由文本）",
+            requires_approval=False,
+        ),
         Capability(
             name="speech.listen",
             public_name="speech_listen",
