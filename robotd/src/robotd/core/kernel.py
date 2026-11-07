@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
 from .errors import ErrorCode, EventContractError, RobotdError
+from .event_registry import load_event_registry
 from .state import RobotStateStore, StateRejection
 from .types import (
     DeviceStatus,
@@ -45,6 +46,19 @@ def _valid_event_type(name: str) -> bool:
         return False
     head, _, tail = name.partition(".")
     return bool(head and tail) and all(ch.islower() or ch.isdigit() or ch in "._" for ch in name)
+
+
+def _require_registered_event(name: str) -> None:
+    """形状 + 登记双重校验。两项都在分配序号之前完成。
+
+    形状校验挡不住拼写错误（``device.recoverd`` 完全合法）；登记表才是判据。
+    拒绝路径照抄 #17 的规则：这条事件「没发生过」——不消耗序号、不进日志、
+    不进补发窗口、不发 ``state.rejected``。
+    """
+    if not _valid_event_type(name):
+        raise EventContractError(ErrorCode.VALIDATION, f"事件名不合规：{name!r}")
+    if not load_event_registry().allows(name):
+        raise EventContractError(ErrorCode.VALIDATION, f"事件类型未登记：{name!r}")
 
 
 def matches_filter(filters: Iterable[str], event_type: str) -> bool:
@@ -274,8 +288,7 @@ class EventKernel:
         副本扔掉，``seq`` 不消耗，日志不追加。``pending`` 坐落在工作副本里，
         ``snapshot()`` / ``resume()`` / 订阅者从结构上就读不到它。
         """
-        if not _valid_event_type(event_type):
-            raise EventContractError(ErrorCode.VALIDATION, f"事件名不合规：{event_type!r}")
+        _require_registered_event(event_type)
         clean = scrub_payload(payload)
 
         staged = self.state._stage()
@@ -305,6 +318,9 @@ class EventKernel:
         staged: RobotStateStore | None = None,
     ) -> Event:
         """提交一条事件：状态 → 序号 → 保留日志 → 分发。"""
+        # 校验必须在 ``state._publish`` 与 ``_seq += 1`` 之前：直接调用本方法
+        # （内部发布口）同样不能把未登记事件写进状态或日志。
+        _require_registered_event(event_type)
         if staged is not None:
             # 状态只在发布这一刻生效
             self.state._publish(staged)
