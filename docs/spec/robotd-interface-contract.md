@@ -57,12 +57,14 @@ ADR-0006 仍标记为 proposed；ADR-0007 已于 2026-10-23 接受。
 | 发现与状态 | `GET /v1/health`、`GET /v1/robot/state` | 服务信息；一次性取得整体一致状态快照 |
 | 标定 | `GET/PUT /v1/robot/odometry/calibration` | 读取或更新 robotd 权威的标定值；更新会下发板侧，不能静默部分成功 |
 | 运动/行为 | `POST /v1/robot/follow`、`POST /v1/robot/stop` | 跟随返回任务；stop 是无审批、幂等、可抢占的有序停止 |
-| 语音 | `POST /v1/robot/speak`、`POST /v1/speech/listen`、`GET /v1/audio/state`、`POST /v1/audio/mute`、`POST /v1/audio/unmute` | 请求播报/流式听音、读常听状态、切换静音 |
+| 语音 | `POST /v1/robot/speak`、`POST /v1/robot/announce`、`POST /v1/speech/listen`、`GET /v1/audio/state`、`POST /v1/audio/mute`、`POST /v1/audio/unmute` | 请求播报/系统审批复述/流式听音、读常听状态、切换静音 |
 | 任务 | `GET /v1/tasks/{task_id}`、`DELETE /v1/tasks/{task_id}` | 查询与取消任务；任务状态变化也经事件流通知 |
 | 实时订阅 | `GET /v1/events`（WebSocket Upgrade） | 初始状态同步后接收增量事件 |
 
 `operationId` 是公开工具名，所有物理动作的审批属性必须由契约明确表达，不能依赖 Agent 自行判断。
 当前 `robot_speak`、`robot_follow` 和标定写操作标记为需审批；`robot_stop` 与只读操作不需审批。
+`robot_announce` 是审批链路自身的系统播报：**免审批**、只接受结构化审批字段、标 `x-mcp-exclude`
+不进入 Agent 工具面；不能用 `robot_speak` 做审批复述，否则会递归。
 `motion.estop` **不在 v1 公开面**：硬件/固件急停路径尚未实现并验证前，不得以软件 stop 冒充急停。
 `motion.move`、`motion.rotate`、`robot.capabilities` 等未进入公开 OpenAPI 的能力也不因内部已有代码而被视为本契约已发布。
 

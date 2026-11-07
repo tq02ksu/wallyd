@@ -72,6 +72,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/robot/announce": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 系统播报审批复述（不调用需审批的 robot_speak）
+         * @description robotd 内部的系统播报路径：只接受结构化的审批复述请求，由 robotd 用固定模板渲染，
+         *     **不接受任意自由文本**（没有 `text` 字段；未知字段一律 400）。
+         *
+         *     与 `/v1/robot/speak` 的区别是契约级的，不是「调用方自觉」：
+         *
+         *     - 本端点不要求审批，因为它本身就是审批链路的一环；
+         *     - 因此它只念审批复述与系统提示，参数必须来自 agentd 的审批记录
+         *       （`approval_id` + 固定 `kind` + 有界 `action_label`/`args_summary`）；
+         *     - 播报完成后由 `speech.tts_finished`（带 `approval_id`/`kind`）告知调用方
+         *       **真的播完了**，而不是「请求已受理」。agentd 必须等这条事件才开启确认窗口。
+         *
+         *     可被 `robot_stop` 打断：停止会中止当前播报并发出 `speech.tts_cancelled`，
+         *     调用方不得因「请求已受理」就认为已经问过用户。
+         */
+        post: operations["robot_announce"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/audio/state": {
         parameters: {
             query?: never;
@@ -455,6 +487,33 @@ export interface components {
              */
             persist?: boolean;
         };
+        /**
+         * @description 审批复述请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的
+         *     `robot_speak`，否则本端点就成了它的免审批版本。
+         */
+        AnnounceRequest: {
+            /** @description agentd 审批记录的 ID；robotd 只用于回显与事件关联，不持有审批状态。 */
+            approval_id: string;
+            /**
+             * @description 固定播报种类；当前只允许审批复述。
+             * @enum {string}
+             */
+            kind: "approval_repeat";
+            /** @description 动作的人类可读名称，来自 agentd 的审批记录。 */
+            action_label: string;
+            /** @description 关键参数摘要，来自 agentd 的审批记录；robotd 用固定模板念出。 */
+            args_summary: string;
+        };
+        AnnounceAccepted: {
+            task_id: string;
+            /** @enum {string} */
+            status: "accepted";
+            approval_id: string;
+            /** @enum {string} */
+            kind: "approval_repeat";
+            /** @description robotd 实际交给 TTS 的完整句子（固定模板渲染结果），供 agentd 存审计。 */
+            text: string;
+        };
         SpeakRequest: {
             text: string;
             voice?: string;
@@ -792,6 +851,57 @@ export interface operations {
             };
             /** @description 已有任务在跑 */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    robot_announce: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnnounceRequest"];
+            };
+        };
+        responses: {
+            /** @description 已受理（受理不等于播完；以 speech.tts_finished 为准） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnounceAccepted"];
+                };
+            };
+            /** @description 参数不合法或试图传入自由文本 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 已有一条同类系统播报在跑 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 音频桥不可用（播报失败会同时发 speech.announce_failed 事件） */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -147,6 +147,37 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
   }
 }
 
+// 2.6 系统播报是审批链路的组成部分，不是 Agent 能力：
+//     - 必须在契约里（不能靠「谁知道内部方法」区分）；
+//     - 必须明确免审批；
+//     - 必须被排除出 MCP 工具面，且工具面总数保持 14。
+{
+  const announce = spec.paths?.['/v1/robot/announce']?.post;
+  if (!announce) {
+    semantic.push('缺少 POST /v1/robot/announce（审批复述的系统播报路径）');
+  } else {
+    if (announce.operationId !== 'robot_announce') {
+      semantic.push(`/v1/robot/announce 的 operationId 必须是 robot_announce，实际 ${announce.operationId}`);
+    }
+    if (announce['x-requires-approval'] === true) {
+      semantic.push('robot_announce 不得要求审批：它就是审批复述路径，要求审批会递归');
+    }
+    if (announce['x-mcp-exclude'] !== true) {
+      semantic.push('robot_announce 必须标 x-mcp-exclude: true（系统路径不是 Agent 工具）');
+    }
+  }
+  const mcpPath = path.join(ROOT, 'generated', 'mcp-tools.json');
+  if (fs.existsSync(mcpPath)) {
+    const names = JSON.parse(fs.readFileSync(mcpPath, 'utf8')).map((t) => t.name);
+    if (names.includes('robot_announce')) semantic.push('robot_announce 出现在 mcp-tools.json；系统路径不得成为 Agent 工具');
+    if (names.length !== 14) semantic.push(`MCP 工具面应为 14 项，实际 ${names.length}`);
+    const speak = JSON.parse(fs.readFileSync(mcpPath, 'utf8')).find((t) => t.name === 'robot_speak');
+    if (!speak || speak.requiresApproval !== true) {
+      semantic.push('robot_speak 仍必须是唯一带 requiresApproval 的发声工具');
+    }
+  }
+}
+
 // ---------------------------------------------------------------- 3. agentd 契约（ADR-0007 双契约门禁）
 // agentd 的契约与生成物独立维护。这里只做「生成物一致 + 三条硬约束」，
 // 不复用 robotd 的断言：两边的安全模型不同（agentd 没有模型工具面，反而有审批写入口禁令）。

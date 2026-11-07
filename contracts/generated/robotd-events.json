@@ -354,7 +354,9 @@
         "response_id",
         "task_id",
         "voice",
-        "chunks"
+        "chunks",
+        "approval_id",
+        "kind"
       ],
       "required_fields": [
         "response_id"
@@ -392,8 +394,11 @@
       "payload_ref": null,
       "payload_fields": [
         "response_id",
+        "task_id",
         "chunks",
-        "played"
+        "played",
+        "approval_id",
+        "kind"
       ],
       "required_fields": [
         "response_id"
@@ -405,11 +410,31 @@
       "payload_ref": null,
       "payload_fields": [
         "response_id",
+        "task_id",
         "reason",
-        "played"
+        "played",
+        "approval_id",
+        "kind"
       ],
       "required_fields": [
         "response_id",
+        "reason"
+      ]
+    },
+    {
+      "type": "speech.announce_failed",
+      "category": "speech",
+      "payload_ref": null,
+      "payload_fields": [
+        "approval_id",
+        "kind",
+        "task_id",
+        "reason"
+      ],
+      "required_fields": [
+        "approval_id",
+        "kind",
+        "task_id",
         "reason"
       ]
     }

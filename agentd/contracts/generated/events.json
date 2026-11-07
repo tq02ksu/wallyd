@@ -302,11 +302,13 @@
       "is_recovery": false,
       "payload_fields": [
         "approval_id",
-        "action_label"
+        "action_label",
+        "window_opened_at"
       ],
       "required_fields": [
         "approval_id",
-        "action_label"
+        "action_label",
+        "window_opened_at"
       ]
     },
     {
@@ -434,12 +436,14 @@
         "approval_id",
         "action_label",
         "args_summary",
+        "window_opened_at",
         "window_closes_at"
       ],
       "required_fields": [
         "approval_id",
         "action_label",
-        "args_summary"
+        "args_summary",
+        "window_opened_at"
       ]
     },
     {

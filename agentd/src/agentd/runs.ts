@@ -138,6 +138,25 @@ interface ToolCallRow {
   finished_at: string | null;
 }
 
+export interface ApprovalRow {
+  approval_id: string;
+  run_id: string | null;
+  tool_call_id: string | null;
+  capability: string;
+  action_label: string;
+  args_summary: string;
+  args_json: string;
+  prompt_text: string;
+  status: string;
+  window_opens_at: string | null;
+  window_closes_at: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+  authorization_json: string | null;
+  authorization_consumed: number;
+  created_at: string;
+}
+
 function sessionView(row: SessionRow): Record<string, unknown> {
   return {
     session_id: row.session_id,
@@ -591,6 +610,25 @@ export class RunService {
    */
   transition(runId: string, next: RunStatus, opts: { reason?: string; detail?: string } = {}): void {
     this.store.requireWritable();
+    if (next === 'waiting_confirmation') {
+      // 有审批记录的 run 必须由播报完成事件开启确认窗口；transition 直改会绕过
+      // window_opened_at 与因果顺序，因此一律拒绝。
+      //
+      // 没有审批记录的 run（Harness 工具审批尚未实现，`/api/run` 的澄清/等待语义
+      // 也用它做忙判定）保留既有的「等待」状态入口：它没有任何需要复述的审批，
+      // 也就谈不上跳过复述。审批一旦存在，唯一入口仍是 openConfirmationWindow()。
+      const approvals = this.store.one<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM approvals WHERE run_id = ?',
+        runId,
+      );
+      if ((approvals?.n ?? 0) > 0) {
+        throw new ApiError(
+          'E_CONFLICT',
+          'waiting_confirmation 只能由 openConfirmationWindow() 在播报完成后开启',
+          { details: { run_id: runId } },
+        );
+      }
+    }
     const before = this.getRunRow(runId);
     if (!before) throw new ApiError('E_NOT_FOUND', `任务不存在：${runId}`);
     if (isTerminal(before.status) && before.status !== next) {
@@ -709,6 +747,298 @@ export class RunService {
     });
     this.notify(seq);
     return { detail: this.getRunDetail(runId), changed: true, voidedApprovals: voided };
+  }
+
+  // ---------------------------------------------------------------- 审批与确认窗口
+  /** 持久化一条待审批记录。**先落库，再播报**——播报不能先于审批存在。 */
+  createApproval(input: {
+    runId: string;
+    capability: string;
+    actionLabel: string;
+    argsSummary: string;
+    argsJson?: string;
+    toolCallId?: string | null;
+  }): { approval_id: string } {
+    this.store.requireWritable();
+    const run = this.getRunRow(input.runId);
+    if (!run) throw new ApiError('E_NOT_FOUND', `任务不存在：${input.runId}`);
+    if (isTerminal(run.status)) {
+      throw new ApiError('E_CONFLICT', `任务已结束（${run.status}），不能再创建审批`, {
+        details: { run_id: run.run_id, status: run.status },
+      });
+    }
+    const approvalId = newId('appr');
+    const ts = nowIso();
+    this.store.transaction((tx) => {
+      tx.run(
+        `INSERT INTO approvals(
+           approval_id, run_id, tool_call_id, capability, action_label, args_summary, args_json,
+           prompt_text, status, created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+        approvalId,
+        input.runId,
+        input.toolCallId ?? null,
+        input.capability,
+        input.actionLabel,
+        input.argsSummary,
+        input.argsJson ?? '{}',
+        '',
+        'persisted',
+        ts,
+      );
+    });
+    return { approval_id: approvalId };
+  }
+
+  getApproval(approvalId: string): ApprovalRow | null {
+    return this.store.one<ApprovalRow>('SELECT * FROM approvals WHERE approval_id = ?', approvalId);
+  }
+
+  /** robotd 已受理播报：记下实际渲染正文（审计与界面展示），不改确认窗口。 */
+  markApprovalAnnounced(approvalId: string, promptText: string): void {
+    this.store.requireWritable();
+    this.store.transaction((tx) => {
+      // prompt_text 始终补上：即使 tts_finished 抢在 HTTP 响应前到达，审计正文也不能丢。
+      // 空串不覆盖已有正文：漏回正文时保留上一次可审计的句子。
+      if (promptText) {
+        tx.run('UPDATE approvals SET prompt_text = ? WHERE approval_id = ?', promptText, approvalId);
+      }
+      tx.run(
+        `UPDATE approvals SET status = 'announced'
+         WHERE approval_id = ? AND status = 'persisted'`,
+        approvalId,
+      );
+    });
+  }
+
+  /**
+   * 播报**真的播完**之后才开启确认窗口。
+   *
+   * 这是 §9.3 的因果顺序：请求被受理 ≠ 用户听见了。窗口开启时刻写进
+   * `run.waiting_confirmation`，后续才能判断一句「好」是否发生在本轮复述之后。
+   * 幂等：重复的 `speech.tts_finished` 不会重复开窗或重复写事件。
+   */
+  openConfirmationWindow(
+    approvalId: string,
+    windowMs: number,
+  ): {
+    opened: boolean;
+    reason: string;
+    approval_id: string;
+    run_id: string | null;
+    action_label: string;
+    args_summary: string;
+    window_opens_at: string | null;
+    window_closes_at: string | null;
+  } {
+    this.store.requireWritable();
+    const a = this.getApproval(approvalId);
+    if (!a) {
+      throw new ApiError('E_NOT_FOUND', `审批不存在：${approvalId}`);
+    }
+    const base = {
+      approval_id: a.approval_id,
+      run_id: a.run_id,
+      action_label: a.action_label,
+      args_summary: a.args_summary,
+      window_opens_at: a.window_opens_at,
+      window_closes_at: a.window_closes_at,
+    };
+    if (a.status === 'waiting') {
+      return { opened: true, reason: 'already_open', ...base };
+    }
+    if (!['persisted', 'announced'].includes(a.status)) {
+      return { opened: false, reason: `approval_${a.status}`, ...base };
+    }
+    const run = a.run_id ? this.getRunRow(a.run_id) : null;
+    if (!run || isTerminal(run.status)) {
+      const ts = nowIso();
+      this.store.transaction((tx) => {
+        tx.run(
+          `UPDATE approvals SET status = 'cancelled', decided_at = ?, decided_by = 'run_closed'
+           WHERE approval_id = ? AND status IN ('persisted','announced')`,
+          ts,
+          approvalId,
+        );
+      });
+      return { opened: false, reason: run ? `run_${run.status}` : 'run_missing', ...base };
+    }
+
+    const opens = nowIso();
+    const closes = new Date(Date.parse(opens) + windowMs).toISOString();
+    const seqs: number[] = [];
+    let won = false;
+    this.store.transaction((tx) => {
+      // 条件更新是这道门的原子性所在：只有仍处于可开窗状态的审批能赢。
+      // 迟到的重复完成事件、并发的取消、重启对账都不会写出第二个确认窗口。
+      won = tx.run(
+        `UPDATE approvals SET status = 'waiting', window_opens_at = ?, window_closes_at = ?
+         WHERE approval_id = ? AND status IN ('persisted','announced')`,
+        opens,
+        closes,
+        approvalId,
+      ).changes === 1;
+      if (!won) return;
+      tx.run(
+        `UPDATE runs SET status = 'waiting_confirmation', updated_at = ?,
+           blocking_reason = 'awaiting_voice_confirmation'
+         WHERE run_id = ?`,
+        opens,
+        run.run_id,
+      );
+      seqs.push(
+        this.events.emit(tx, {
+          type: 'approval.waiting',
+          run_id: run.run_id,
+          approval_id: approvalId,
+          session_id: run.session_id,
+          params: {
+            approval_id: approvalId,
+            action_label: a.action_label,
+            args_summary: a.args_summary,
+            window_opened_at: opens,
+            window_closes_at: closes,
+          },
+        }).seq,
+      );
+      seqs.push(
+        this.events.emit(tx, {
+          type: 'run.waiting_confirmation',
+          run_id: run.run_id,
+          approval_id: approvalId,
+          session_id: run.session_id,
+          params: {
+            approval_id: approvalId,
+            action_label: a.action_label,
+            window_opened_at: opens,
+            window_closes_at: closes,
+          },
+        }).seq,
+      );
+    });
+    if (!won) {
+      // 输给另一个完成/取消事件：按当前落库状态如实回答，不伪造开窗。
+      const fresh = this.getApproval(approvalId);
+      if (!fresh) {
+        return { opened: false, reason: 'not_found', ...base, window_opens_at: null, window_closes_at: null };
+      }
+      const freshBase = {
+        approval_id: fresh.approval_id,
+        run_id: fresh.run_id,
+        action_label: fresh.action_label,
+        args_summary: fresh.args_summary,
+        window_opens_at: fresh.window_opens_at,
+        window_closes_at: fresh.window_closes_at,
+      };
+      if (fresh.status === 'waiting') {
+        return { opened: true, reason: 'already_open', ...freshBase };
+      }
+      return { opened: false, reason: `approval_${fresh.status}`, ...freshBase };
+    }
+    for (const seq of seqs) this.notify(seq);
+    return {
+      opened: true,
+      reason: 'opened',
+      approval_id: approvalId,
+      run_id: run.run_id,
+      action_label: a.action_label,
+      args_summary: a.args_summary,
+      window_opens_at: opens,
+      window_closes_at: closes,
+    };
+  }
+
+  /**
+   * 审批复述失败或被 stop 打断：**不开窗**，并给出明确事件。
+   *
+   * - stop：按取消处理（用户要求停止，不是系统故障）；
+   * - 其它：按失败处理，发 `approval.unavailable`，run 不能显示成「已问过用户」。
+   */
+  abortApproval(
+    approvalId: string,
+    reason: string,
+    opts: { byStop?: boolean; kind?: string } = {},
+  ): { changed: boolean; reason: string; run_id: string | null } {
+    this.store.requireWritable();
+    const a = this.getApproval(approvalId);
+    if (!a) return { changed: false, reason: 'not_found', run_id: null };
+    if (!['persisted', 'announced', 'waiting'].includes(a.status)) {
+      return { changed: false, reason: `approval_${a.status}`, run_id: a.run_id };
+    }
+    const run = a.run_id ? this.getRunRow(a.run_id) : null;
+    const next: RunStatus | null = run && !isTerminal(run.status)
+      ? (opts.byStop ? 'cancelled' : 'failed')
+      : null;
+    const ts = nowIso();
+    const seqs: number[] = [];
+    let won = false;
+    this.store.transaction((tx) => {
+      // 与开窗使用同一组可操作状态做条件更新：先赢的那个事件决定终局。
+      won = tx.run(
+        `UPDATE approvals SET status = 'cancelled', decided_at = ?, decided_by = ?
+         WHERE approval_id = ? AND status IN ('persisted','announced','waiting')`,
+        ts,
+        opts.byStop ? 'stop' : 'announce_failed',
+        approvalId,
+      ).changes === 1;
+      if (!won) return;
+      if (next && run) {
+        tx.run(
+          `UPDATE runs SET status = ?, finished_at = ?, updated_at = ?, blocking_reason = ?
+           WHERE run_id = ?`,
+          next,
+          ts,
+          ts,
+          reason,
+          run.run_id,
+        );
+        const elapsed = Date.parse(ts) - Date.parse(run.created_at);
+        seqs.push(
+          this.events.emit(tx, {
+            type: 'run.finished',
+            run_id: run.run_id,
+            session_id: run.session_id,
+            severity: next === 'failed' ? 'error' : 'warning',
+            params: {
+              outcome: next,
+              detail: reason,
+              duration_ms: Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined,
+            },
+          }).seq,
+        );
+      }
+      if (opts.byStop) {
+        seqs.push(
+          this.events.emit(tx, {
+            type: 'approval.resolved',
+            run_id: a.run_id,
+            approval_id: approvalId,
+            session_id: run?.session_id ?? null,
+            params: {
+              action_label: a.action_label,
+              status: 'cancelled',
+              decided_by: 'stop',
+            },
+          }).seq,
+        );
+      } else {
+        seqs.push(
+          this.events.emit(tx, {
+            type: 'approval.unavailable',
+            run_id: a.run_id,
+            approval_id: approvalId,
+            session_id: run?.session_id ?? null,
+            params: { reason, kind: opts.kind ?? 'no_audio' },
+          }).seq,
+        );
+      }
+    });
+    if (!won) {
+      const fresh = this.getApproval(approvalId);
+      return { changed: false, reason: fresh ? `approval_${fresh.status}` : 'not_found', run_id: a.run_id };
+    }
+    for (const seq of seqs) this.notify(seq);
+    return { changed: true, reason: opts.byStop ? 'cancelled_by_stop' : 'announce_failed', run_id: a.run_id };
   }
 
   /** 当前唯一的活动 run（活动上限为 1）。 */

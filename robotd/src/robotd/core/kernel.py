@@ -461,8 +461,9 @@ class EventKernel:
 
         注册之前已经在日志里的事件**不会**推送（也不回放）：历史补发由
         ``resume()`` 判定——游标过期、实例变更、游标非法都由它给出明确结论，
-        本方法不重复实现第二份补发语义。因此也不存在「快照与订阅之间的竞态」：
-        快照即起点，调用方以 ``Handle.snapshot`` 对齐状态。
+        本方法不重复实现第二份补发语义，避免同一条事件被补发一次、又被订阅回放一次。
+        因此也不存在「快照与订阅之间的竞态」：快照即起点，调用方以 ``Handle.snapshot``
+        对齐状态。
         """
         with self._lock:
             sub = Subscription(filters=set(filters), push=push)
