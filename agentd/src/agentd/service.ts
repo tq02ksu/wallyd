@@ -362,6 +362,8 @@ export async function createRuntime(
             robotd.capabilities.current
               ? new Set(robotd.capabilities.current.map((c) => c.name))
               : null,
+          // 守卫拦下的命中要能在日志里解释原因（否定 / 疑问 / 词边界）。
+          log: (m, x) => log(m, x),
           // 快速路由必须**真的执行**：规则命中后启动执行，不阻塞响应。
           // 纪律：同样过审批门（executeFastRun 从能力契约取审批要求）；
           // 失败如实记录，不把未执行过的动作显示成「已停止」。
@@ -436,7 +438,7 @@ export async function createRuntime(
         tx.run('UPDATE run_steps SET state = ?, finished_at = ?, note = ? WHERE step_id = ?', 'done', nowIso(), detail, sid);
         runs.recordToolCall(tx, runId, capability, `执行 ${capability}`, compactJson(args), 'succeeded', {
           args,
-          requiresApproval: false,
+          approvalParams: [],
         });
       });
       runs.transition(runId, 'succeeded', { reason: 'fast_rule', detail });

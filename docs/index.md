@@ -57,6 +57,7 @@
 - [摄像头自动检测与配置](spec/camera-detection.md) - macOS UVC 判定与采集配置
 - [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
 - [GH-27 澄清不建 run 的设计](design/GH-27.md) - 澄清/歧义只写 `route.clarify` 事件、不占活动名额；受保护的停止规则不受忙限制
+- [GH-8 快速路由规则表的长大方式](design/GH-8.md) - 否定按作用域判断、结构化参数槽、三条规则与能力漂移断言
 
 ## 5. 契约专题（有时效）
 

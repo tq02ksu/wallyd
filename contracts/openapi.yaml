@@ -30,6 +30,9 @@ info:
     - 字符串**不做** trim / 大小写折叠；
     - 规范化结果 UTF-8 编码后取 SHA-256，形如 `sha256:<hex>`。
 
+    审批参数里的数字必须能用 IEEE-754 双精度精确表示（整数不超过 `2^53-1`）。
+    超出范围的整数在 JSON 解析阶段就会失去精度，两端复算不可能一致；校验层应直接拒绝。
+
     可执行实现：`contracts/tools/approval-digest.mjs` 与
     `robotd/src/robotd/approval_digest.py`。
 servers:
@@ -109,7 +112,7 @@ paths:
     put:
       operationId: robot_calibration_set
       x-requires-approval:
-        params: [steps_per_m, wheelbase_mm, persist]
+        params: [steps_per_m, wheelbase_mm]
       tags: [robot]
       summary: 设置标定参数并下发到板侧（无需重刷固件）
       requestBody:
@@ -135,7 +138,7 @@ paths:
     post:
       operationId: robot_speak
       x-requires-approval:
-        params: [text, voice, rate, interruptible]
+        params: [text]
       tags: [robot]
       summary: 请求机器人播报
       requestBody:
@@ -292,7 +295,7 @@ paths:
     post:
       operationId: robot_follow
       x-requires-approval:
-        params: [target_track_id, target, max_speed_mps, stop_width_ratio, max_seconds]
+        params: [target_track_id, target]
       tags: [robot]
       summary: 跟随目标人物
       description: |

@@ -53,24 +53,15 @@ function clarifyEvents() {
   return events.query({ limit: 200 }).events.filter((e) => e.type === 'route.clarify');
 }
 
-// 模拟 V05 的 `过来`：命中规则但缺目标。规则表是注入的，默认 FAST_RULES 不动。
-const comeHere = {
-  id: 'come_here',
-  version: 1,
-  capability: 'robot_follow',
-  summary: '过来',
-  patterns: [/^过来$/u],
-  precondition: () => '「过来」还没指定目标；请说「过来 track:t7」这样的目标。',
-};
-const rules = [...FAST_RULES, comeHere];
-
+// 「过来」现在由规则表里的 `come_here@1` 覆盖：命中但缺 `target_track_id` → 澄清。
+// 这里用生产规则表，不再注入伪造规则（V05 落地前那份注入已经多余且会造成重复 id）。
 const executed = [];
 const deps = {
   runs: svc,
   availableCapabilities: () => new Set(['robot_stop', 'robot_follow']),
   executeFast: (runId, capability, args) => executed.push({ runId, capability, args }),
-  rules,
 };
+
 
 console.log('— 澄清不建 run');
 const c1 = submitRunRequest(deps, { prompt: '过来' });
@@ -78,7 +69,7 @@ check('返回 route=clarified', c1.route === 'clarified', c1.route);
 check('没有 run_id', c1.run_id === undefined || c1.run_id === null, String(c1.run_id));
 check('没有 status', c1.status === undefined || c1.status === null, String(c1.status));
 check('带澄清问题', typeof c1.clarify?.question === 'string' && c1.clarify.question.length > 0, JSON.stringify(c1));
-check('缺参如实给出', c1.clarify?.missing?.includes('precondition') === true, JSON.stringify(c1.clarify));
+check('缺参如实给出', c1.clarify?.missing?.includes('slot:target_track_id') === true, JSON.stringify(c1.clarify));
 check('库里 0 条 run', runCount() === 0, String(runCount()));
 const cev = clarifyEvents();
 check('写了 route.clarify 事件', cev.length === 1, cev.map((e) => e.type).join(','));
@@ -120,12 +111,27 @@ svc.cancelRun(stopBusy.run_id, '测试收尾');
 svc.cancelRun(active.run_id, '测试收尾');
 
 console.log('— 歧义同样不建 run');
-const ambiguousDeps = { ...deps, rules: [...rules, { ...comeHere, id: 'come_here_v2' }] };
+const comeHere = FAST_RULES.find((r) => r.id === 'come_here');
+// 再叠一条同形规则制造歧义：都是「过来」，但 id 不同。
+const ambiguousDeps = { ...deps, rules: [...FAST_RULES, { ...comeHere, id: 'come_here_v2' }] };
 const amb = submitRunRequest(ambiguousDeps, { prompt: '过来' });
 check('歧义返回 route=clarified', amb.route === 'clarified', JSON.stringify(amb));
 check('歧义带候选', Array.isArray(amb.ambiguous) && amb.ambiguous.length === 2, JSON.stringify(amb.ambiguous));
 check('歧义没有 run_id', amb.run_id === undefined || amb.run_id === null);
 check('歧义没有新增 run', svc.activeRun() === null);
+
+console.log('— 守卫拦下的命中：日志说明原因，不猜着执行');
+const logged = [];
+const execBefore = executed.length;
+const blocked = submitRunRequest(
+  { ...deps, log: (m, x) => logged.push({ m, x }) },
+  { prompt: '别过来' },
+);
+check('记了一条 router.blocked', logged.length === 1 && logged[0].m === 'router.blocked', JSON.stringify(logged));
+check('原因标成否定', logged[0]?.x?.blocked?.[0]?.reason === 'negation', JSON.stringify(logged[0]));
+check('没有下发任何能力', executed.length === execBefore, String(executed.length - execBefore));
+check('拦下的命中落成 harness，不是快速路由', blocked.route === 'harness', blocked.route);
+if (blocked.run_id) svc.cancelRun(blocked.run_id, '测试收尾');
 
 store.close();
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);

@@ -166,9 +166,11 @@ def test_approval_params_cover_speak_follow_and_calibration(spec):
         for op in item.values()
         if isinstance(op, dict) and op.get("operationId")
     }
-    assert "text" in declared["robot_speak"]
-    assert {"target", "target_track_id"} <= set(declared["robot_follow"])
-    assert {"steps_per_m", "wheelbase_mm"} <= set(declared["robot_calibration_set"])
+    # 精确匹配：多绑一个「怎么念 / 怎么存 / 开多快」的字段，就会让无关改动
+    # 也要求重新审批；少绑一个字段则会漏绑用户听见的内容。
+    assert declared["robot_speak"] == ["text"]
+    assert declared["robot_follow"] == ["target_track_id", "target"]
+    assert declared["robot_calibration_set"] == ["steps_per_m", "wheelbase_mm"]
 
 
 def test_approval_params_reference_real_request_body_fields(spec, tools):

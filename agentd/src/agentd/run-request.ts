@@ -44,6 +44,11 @@ export interface RunRequestDeps {
   executeFast: (runId: string, capability: string, args: Record<string, unknown>) => void;
   /** 测试可注入的规则表；生产使用 `FAST_RULES`。 */
   rules?: readonly FastRule[];
+  /**
+   * 结构化日志。装配层注入 `service.ts` 里同一个 `makeLogger` 实例，不另造日志设施；
+   * 省略时静默（单测不需要构造 logger）。
+   */
+  log?: (message: string, extra?: Record<string, unknown>) => void;
 }
 
 /** 与契约 `RunAccepted` 对齐：澄清响应没有 `run_id` / `status`。 */
@@ -71,6 +76,12 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
     },
     deps.rules ?? FAST_RULES,
   );
+
+  // 被守卫拦下的命中：留一条可解释的原因（否定 / 疑问 / 词边界）。
+  // 这三种都走 Harness，但排查时要能分开——判据是 `BlockedReason`，不回写规则表。
+  if (matched.kind === 'none' && matched.blocked && matched.blocked.length > 0) {
+    deps.log?.('router.blocked', { blocked: matched.blocked });
+  }
 
   // 澄清与歧义都没有执行意图：不建 run，不占活动名额。
   if (matched.kind === 'clarify' || matched.kind === 'ambiguous') {

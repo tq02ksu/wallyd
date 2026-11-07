@@ -135,7 +135,11 @@ export function canonicalApprovalArgs(args, approvalParams, rules = loadRules())
   }
   const keys = [...approvalParams].sort(compareCodePoints);
   if (new Set(keys).size !== keys.length) throw new Error('approvalParams 含重复字段');
-  const body = keys.map((key) => `${quoteString(key)}:${canonicalValue(args[key])}`).join(',');
+  // 只认自有属性：原型链上的同名键（如 toString）等同于「缺失」，按 null 参与。
+  // Python 侧 `Mapping.get()` 本来就是自有键语义，两端必须一致。
+  const body = keys
+    .map((key) => `${quoteString(key)}:${canonicalValue(Object.hasOwn(args, key) ? args[key] : null)}`)
+    .join(',');
   const canonical = `{${body}}`;
   // 规则文件负责编码；这里按规则声明的 UTF-8 编码，保证与 Python 侧同一字节串。
   Buffer.from(canonical, rules.encoding);

@@ -74,8 +74,7 @@
     },
     "approvalParams": [
       "steps_per_m",
-      "wheelbase_mm",
-      "persist"
+      "wheelbase_mm"
     ]
   },
   {
@@ -113,10 +112,7 @@
       "pathParams": []
     },
     "approvalParams": [
-      "text",
-      "voice",
-      "rate",
-      "interruptible"
+      "text"
     ]
   },
   {
@@ -243,10 +239,7 @@
     },
     "approvalParams": [
       "target_track_id",
-      "target",
-      "max_speed_mps",
-      "stop_width_ratio",
-      "max_seconds"
+      "target"
     ]
   },
   {

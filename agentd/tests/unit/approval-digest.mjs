@@ -48,6 +48,10 @@ check(
 );
 check('未声明字段被排除', approvalArgsDigest({ text: 'x', voice: 'y' }, ['text']) === approvalArgsDigest({ text: 'x' }, ['text']));
 check('缺失按 null 参与', approvalArgsDigest({}, ['text']) === approvalArgsDigest({ text: null }, ['text']));
+check(
+  '缺失字段与原型链同名时仍按 null',
+  approvalArgsDigest({}, ['toString']) === approvalArgsDigest({ toString: null }, ['toString']),
+);
 check('字符串不 trim', approvalArgsDigest({ text: ' x' }, ['text']) !== approvalArgsDigest({ text: 'x' }, ['text']));
 check('数字 2.0 输出 2', canonicalApprovalArgs({ n: 2.0 }, ['n']) === '{"n":2}');
 {

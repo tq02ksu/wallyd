@@ -1166,7 +1166,9 @@ export class RunService {
     actionLabel: string,
     argsSummary: string,
     state: string,
-    opts: { args?: Record<string, unknown>; requiresApproval?: boolean; toolCallId?: string } = {},
+    // `approvalParams` 是这次调用实际绑定的审批参数字段；`[]`（或缺省）表示没有绑定。
+    // 持久化列仍叫 `requires_approval`（布尔），语义是「本次调用是否绑定了审批参数」。
+    opts: { args?: Record<string, unknown>; approvalParams?: string[]; toolCallId?: string } = {},
   ): string {
     const cid = opts.toolCallId ?? newId('call');
     tx.run(
@@ -1181,7 +1183,7 @@ export class RunService {
       argsSummary,
       compactJson(opts.args ?? {}),
       state,
-      opts.requiresApproval ? 1 : 0,
+      opts.approvalParams && opts.approvalParams.length > 0 ? 1 : 0,
       null,
       null,
       null,

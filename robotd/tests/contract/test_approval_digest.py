@@ -128,6 +128,9 @@ CROSS_END_CASES = [
     {"args": {"n": 1e-7, "m": 1e21}, "approvalParams": ["n", "m"]},
     {"args": {"text": ' 引号"与\\反斜杠\n'}, "approvalParams": ["text"]},
     {"args": {"text": "😀 ~"}, "approvalParams": ["text"]},
+    # 原型链同名键：JS 侧不得读到继承来的函数，必须与 Python 一样按 null 处理。
+    {"args": {}, "approvalParams": ["toString"]},
+    {"args": {"toString": None}, "approvalParams": ["toString"]},
     {"args": {"meta": {"z": 2, "a": [3, "x", None, True]}}, "approvalParams": ["meta"]},
     {
         "args": {"target": "人", "target_track_id": "t-1", "max_speed_mps": 0.15},

@@ -12,7 +12,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const SOURCE = fs.readFileSync(path.join(ROOT, 'openapi.yaml'), 'utf8');
 const EVENTS = path.join(ROOT, 'events.json');
-const SPEAK_PARAMS = 'params: [text, voice, rate, interruptible]';
+// 锚定 robot_speak 端点自己的声明，避免命中文档描述里的示例（`params: [text]`）。
+const SPEAK_APPROVAL = /operationId: robot_speak\s*\n\s+x-requires-approval:\n\s+params: \[text\]/;
+const mutateSpeak = (replace) => SOURCE.replace(SPEAK_APPROVAL, (block) => block.replace(/params: \[text\]/, replace));
 
 function runGenerator(yamlText) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'approval-contract-test-'));
@@ -50,7 +52,7 @@ function check(name, fn) {
 
 console.log('— approvalParams 字段名必须真实存在于 requestBody schema');
 {
-  const mutated = SOURCE.replace(SPEAK_PARAMS, 'params: [txet]');
+  const mutated = mutateSpeak('params: [txet]');
   assert.notEqual(mutated, SOURCE, '测试夹具没改到目标行');
   const result = runGenerator(mutated);
   check('字段改名 → 生成失败', () => {
@@ -61,9 +63,8 @@ console.log('— approvalParams 字段名必须真实存在于 requestBody schem
 
 console.log('— 旧布尔写法的迁移护栏');
 {
-  const mutated = SOURCE.replace(
-    /x-requires-approval:\n\s+params: \[text, voice, rate, interruptible\]/,
-    'x-requires-approval: true',
+  const mutated = SOURCE.replace(SPEAK_APPROVAL, (block) =>
+    block.replace(/x-requires-approval:\n\s+params: \[text\]/, 'x-requires-approval: true'),
   );
   assert.notEqual(mutated, SOURCE, '测试夹具没改到目标行');
   const result = runGenerator(mutated);
@@ -78,7 +79,7 @@ console.log('— 旧布尔写法的迁移护栏');
 
 console.log('— 对象形态只允许 params 键');
 {
-  const mutated = SOURCE.replace(SPEAK_PARAMS, 'params: [text]\n        extra: true');
+  const mutated = mutateSpeak('params: [text]\n        extra: true');
   const result = runGenerator(mutated);
   check('未知键 → 生成失败', () => {
     assert.equal(result.status, 1);

@@ -111,23 +111,31 @@ def test_event_object_keeps_mono_ns_but_public_view_drops_it():
 
 
 # ---------------------------------------------------------------- 订阅与竞态
-def test_subscription_gets_snapshot_and_no_cursor_gap():
-    """核心断言：值回放 seq>cursor。用 seq==cursor 的事件边界防差一。"""
+def test_subscribe_does_not_replay_events_emitted_before_registration():
+    """验收：订阅前 emit 3 条 → 订阅 → ``push`` 收到 0 条。
+
+    订阅的语义是「注册之后才推送」。历史补发由 ``resume()`` 负责；
+    ``Handle`` 里不再有恒空的 ``backlog`` 或无人读取的 ``cursor``。
+    """
     k = make_kernel()
     for i in range(3):
         k.emit("device.changed", device="pump", state=f"s{i}")
     got: list = []
     handle = k.subscribe(["device.*"], got.append)
-    assert handle.snapshot["event_seq"] == 3
-    assert handle.cursor == 3
-    # 早先的 `backlog` 恒为空却自称「回放 seq > 游标」，属于假语义；
-    # 补发统一由 resume() 判定，subscribe() 只负责「快照即起点」。
+    assert handle.snapshot["event_seq"] == k.last_seq == 3
+    assert got == []
     assert not hasattr(handle, "backlog")
+    assert not hasattr(handle, "cursor")
+    # 注册之前的历史只能由 resume() 补发，subscribe() 不碰这段窗口：
+    # 两条路径各司其职，同一条事件不会被投递两次。
+    verdict, replay = k.resume("inst-test", 0)
+    assert verdict == "ok"
+    assert [e.seq for e in replay] == [1, 2, 3]
     for i in range(2):
         k.emit("device.changed", device="pump", state=f"late{i}")
     handle.close()
     assert [e.seq for e in got] == [4, 5]
-    # 快照游标之后的事件全收到了 → 没有洞
+    # 快照 event_seq 之后的事件全收到了 → 没有洞
     assert got[0].seq == handle.snapshot["event_seq"] + 1
 
 

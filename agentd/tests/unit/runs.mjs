@@ -119,7 +119,7 @@ svc.transition(r4.run_id, 'executing');
 store.transaction((tx) => {
   svc.recordToolCall(tx, r3.run_id, 'robot_lift', '举起', '{"height_mm":100}', 'running', {
     args: { height_mm: 100 },
-    requiresApproval: true,
+    approvalParams: ['height_mm'],
   });
 });
 // GH-27：升级前遗留的 clarified run 停在 accepted，重启时不得被报成 interrupted。
