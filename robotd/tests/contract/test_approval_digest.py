@@ -85,7 +85,9 @@ def test_rule_4_missing_fields_participate_as_null():
 
 
 def test_rule_5_strings_are_not_normalized():
-    assert approval_args_digest({"text": " 前进 "}, ["text"]) != approval_args_digest({"text": "前进"}, ["text"])
+    assert approval_args_digest({"text": " 前进 "}, ["text"]) != approval_args_digest(
+        {"text": "前进"}, ["text"]
+    )
     assert approval_args_digest({"text": "Hello"}, ["text"]) != approval_args_digest(
         {"text": "hello"}, ["text"]
     )

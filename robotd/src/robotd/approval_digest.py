@@ -76,9 +76,7 @@ def _validate_rules(rules: Mapping[str, Any]) -> None:
     for key, allowed in _SUPPORTED.items():
         value = rules.get(key)
         if value not in allowed:
-            raise ValueError(
-                f"approval-digest 规则 {key}={value!r} 不受支持（允许：{', '.join(allowed)}）"
-            )
+            raise ValueError(f"approval-digest 规则 {key}={value!r} 不受支持（允许：{', '.join(allowed)}）")
 
 
 _ESCAPES = {
