@@ -8,12 +8,26 @@
 #      改用固定 WAV（work/verify/aec_probe.wav），经同一 playerNode 播放。
 #   4. 旧版 500ms 采样：一轮只有 17 点。改 100ms，约 50 点/轮。
 #
-# 用法：sh work/verify/aec_ab2.sh [轮数，默认 3]
+# 用法：sh eval/aec3/aec_ab2.sh [轮数，默认 3] [vpio|aec3]
+#
+#   vpio（默认）：--aec（VPIO）对 --no-aec
+#   aec3：--aec3（软件分叉参考）对 --no-aec；桥必须在 bridge_ready 里确认
+#         `"aec_mode": "aec3"`，否则实验作废（忽略未知 flag 会把 VPIO 数据伪装成 AEC3）
 cd "$(dirname "$0")/../.." || exit 1
 APP="$(pwd)/work/bin/AudioBridge.app"
 WAV="$(pwd)/work/verify/aec_probe.wav"
 ROUNDS="${1:-3}"
+MODE="${2:-vpio}"
 OUT="work/verify/ab2"
+
+case "$MODE" in
+  vpio) AEC_TAG=aec;  AEC_FLAGS="--aec" ;;
+  aec3) AEC_TAG=aec3; AEC_FLAGS="--aec3" ;;
+  *)
+    echo "未知模式 '$MODE'（只支持 vpio|aec3）" >&2
+    exit 2
+    ;;
+esac
 
 [ -f "$WAV" ] || { echo "缺测试音：先跑 python3 work/verify/make_probe.py"; exit 1; }
 mkdir -p "$OUT"
@@ -34,6 +48,14 @@ run_one() {
   i=0
   while [ $i -lt 80 ]; do grep -q vad_calibrated "$base.out" 2>/dev/null && break; sleep 0.5; i=$((i+1)); done
   grep -q vad_calibrated "$base.out" || { echo "[$round-$tag] 校准超时"; kill $holder 2>/dev/null; pkill -f "AudioBridge serve"; return 1; }
+
+  # 证伪：桥必须真的进入请求的 AEC 模式，而不是静默忽略未知 flag。
+  if [ "$tag" = "aec3" ] && ! grep -q '"aec_mode": "aec3"' "$base.out" 2>/dev/null; then
+    echo "[$round-$tag] FAIL 桥未确认 aec_mode=aec3（--aec3 未实现或被忽略）"
+    kill $holder 2>/dev/null || true
+    pkill -f "AudioBridge serve" 2>/dev/null || true
+    return 1
+  fi
 
   sleep 1
   # --- 播报前本底：3 秒静默采样 ---
@@ -62,7 +84,7 @@ run_one() {
 for r in 1 2 3; do
   [ "$r" -gt "$ROUNDS" ] && break
   echo "=== 第 $r 轮 ==="
-  run_one aec "$r" --aec
+  run_one "$AEC_TAG" "$r" $AEC_FLAGS
   run_one noaec "$r" --no-aec
 done
 echo "OK"

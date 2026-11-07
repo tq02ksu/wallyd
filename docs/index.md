@@ -35,6 +35,7 @@
 - [语音输入输出改造方案（流式优先）](voice-architecture.md) - 语音从 request/response 改为流式管线；方案已部分落地
 - [GH-4 语音桥双管道设计](design/GH-4.md) - 拾音（采集→VAD→ASR）与出话（分句→合成→有界队列→渲染）拆分及可替换 engine 边界
 - [GH-5 播报期 VAD 门控](design/GH-5.md) - 桥只报事实、AudioRuntime 单点判 barge-in，产出 `speech.gate`
+- [GH-6 实时 AEC3 / speech_abort](design/GH-6.md) - 停止播报端点、打断计数对账、AEC3 离线证据驱动的门限取值与实时接入方案
 - [模型选型](model-selection.md) - LLM / TTS / ASR 选型（苹果生态优先，2026-09-17 口径）
 - [产品定位与套件化约束](product-positioning.md) - 平台而非成品、套件化销售的口述决策
 - [可行性评估与技术风险清单](risk-assessment.md) - R1–R7 风险项与验证顺序

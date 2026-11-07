@@ -452,6 +452,7 @@
         "task_id",
         "reason",
         "played",
+        "dropped",
         "approval_id",
         "kind"
       ],

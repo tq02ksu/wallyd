@@ -445,6 +445,37 @@ def _h_audio_state(ctx: RouteContext) -> dict[str, Any]:
     return _call_capability(ctx.app, "audio.state", lambda _cap: ctx.app.audio_state())
 
 
+def _h_speech_abort(ctx: RouteContext) -> dict[str, Any]:
+    """``speech_abort``。契约：``{response_id?}`` → ``TaskAccepted``。
+
+    **这是「停止播报」，不是「取消任务」**：barge-in 是正常结束，不能标失败。
+    无活动播报时也返回 200（幂等）——语音场景下用户可能连说两次「停」。
+    真正的中止事实以 ``speech.tts_cancelled{reason:"user_cancel", played, dropped}`` 为准。
+    """
+    body = ctx.body
+    _reject_unknown(body, {"response_id"})
+    response_id = body.get("response_id")
+    if response_id is not None:
+        if not isinstance(response_id, str) or not response_id.strip():
+            raise RobotdError(ErrorCode.VALIDATION, "字段 response_id 必须是非空字符串")
+        response_id = response_id.strip()
+        if len(response_id) > 64:
+            raise RobotdError(ErrorCode.VALIDATION, "字段 response_id 超过 64 字符上限")
+
+    def run(_cap: Any) -> dict[str, Any]:
+        task = ctx.app.kernel.new_task("speech.abort", Exclusivity.SOFT)
+        ctx.app.kernel.mark_running(task.task_id)
+        aborted = ctx.app.audio.abort_speaking(response_id=response_id, reason="user_cancel")
+        ctx.app.kernel.finish(
+            task.task_id,
+            TaskState.COMPLETED,
+            reason="aborted" if aborted else "no_active_playback",
+        )
+        return {"task_id": task.task_id, "status": "accepted"}
+
+    return _call_capability(ctx.app, "speech.abort", run)
+
+
 def _h_audio_mute(ctx: RouteContext) -> dict[str, Any]:
     return _call_capability(ctx.app, "audio.mute", lambda _cap: ctx.app.set_audio_muted(True))
 
@@ -524,6 +555,7 @@ def build_routes(*, debug: bool) -> list[Route]:
             operation_id="robot_announce",
         ),
         Route("POST", "/v1/speech/listen", _h_listen, operation_id="speech_listen"),
+        Route("POST", "/v1/speech/abort", _h_speech_abort, operation_id="speech_abort"),
         Route("GET", "/v1/audio/state", _h_audio_state, operation_id="audio_state"),
         Route("POST", "/v1/audio/mute", _h_audio_mute, operation_id="audio_mute"),
         Route("POST", "/v1/audio/unmute", _h_audio_unmute, operation_id="audio_unmute"),

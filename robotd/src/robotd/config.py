@@ -85,7 +85,9 @@ class Config:
     #: 打断门限 `max(ambient_db + 本值, speech_db)` 里的余量（dB）：
     #: AEC 回声残余相对本底的最大值 + 安全余量。默认 30 取自 VPIO 实测最坏
     #: +26.9 dB（eval/r14-voice-bringup-2026-10-24.md §5.6）；V03 换 AEC3 后收窄。
-    barge_in_erle_margin_db: float = 30.0
+    # V03：AEC3 离线 P10 证据支持的暂定值；真机 30 分钟 0 误触发未验证。
+    # 推导与回退条件见 docs/design/GH-6.md §4。
+    barge_in_erle_margin_db: float = 15.0
 
     # --- 工作区 ---
     #: 运行产物目录（日志、抓帧）。默认相对项目根的 work/，可覆盖。
