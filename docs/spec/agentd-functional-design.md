@@ -176,6 +176,26 @@ agentd 保持 TypeScript，robotd 的 Python 迁移不影响这个分工。
 **同步补的契约字段**：`RunSummary.fast_rule`（此前只有 `RunAccepted` 有，详情接口拿不到，
 违反「可追溯」要求）。
 
+#### 3.1.2 实现记录（2026-11-06：澄清不建 run）
+
+GH-27：路由返回 `clarify` / `ambiguous` 时，`service.ts` 原先仍调用 `submitRun`，
+且没带 `status`，落成非终态的 `accepted`；`activeRun()` 因此把它当成活动任务，
+而 `executeFastRun` 只在 `matched` 时调用——这条 run 永远不会推进。结果是说一句需要澄清的
+话，机器人就一直「忙」，连「停」都被 `E_BUSY` 挡在 `matchRoute` 之前。
+
+现在（方案 B，详见 `docs/design/GH-27.md`）：
+
+- **澄清/歧义不建 run**：只写 `route.clarify` 事件（已登记的类型，无需扩张事件面）；
+  有会话时用户那句话仍进会话消息（`run_id` 为空）。`/api/run` 的 `RunAccepted` 里
+  `run_id` / `status` 因此可空，前端把 `clarify.question` 显示在输入卡上。
+- **停止是安全旁路**：受保护规则（`stop_robot`）在 `activeRun()` 命中时仍允许提交并执行；
+  其余请求照旧 409。`routeCtx.busy` 传真实值，不再写死 `false`。
+- **启动对账**：升级前遗留的 `route='clarified'` 非终态 run 标为 `cancelled`
+  （从未执行），不再报成 `interrupted`。
+
+决策入口收敛到 `agentd/src/agentd/run-request.ts`；单测
+`agentd/tests/unit/run-request.mjs` 用注入的规则表复现「过来缺目标」而不改 `matchRoute`。
+
 ### 3.2 任务生命周期与中断
 
 候选 run 状态：

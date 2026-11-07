@@ -58,7 +58,24 @@ npm run test:robotd
 (cd agentd && npm ci && npm test)
 ```
 
-Run `bash scripts/ci/run-gates.sh` for the complete offline gate.
+Run `bash scripts/ci/run-gates.sh` (or `npm run gates`) for the complete
+offline gate. CI runs the same checks in parallel `static-checks`, `robotd`,
+`agentd`, and `integration` lanes, then reports a single `quality` status. The
+integration lane starts `robotd --sim` on port 8799 and exercises the agentd
+client against it; no hardware is touched. The static lane runs `npm run lint`
+(tracked Node, shell, Python, JSON, and YAML syntax) and
+`scripts/ci/ci-config.test.mjs`, which regression-tests the source lint gate and
+asserts the workflow keeps every lane wired to the required `quality` status and
+that `run-gates.sh` invokes the same lane scripts as CI. It also pins the
+`quality` check's display name (what branch protection matches), rejects
+`pull_request_target`, branch-pinned actions, job-level permission widening and
+conditional lane skips, and pins each lane script to `set -euo pipefail` and its
+core command, so a lane cannot lose strict mode, be disabled by a stray `if:`,
+or be gutted into a silent pass.
+
+A workflow cannot configure repository settings, so a human still has to mark
+the `quality` check as required in the branch protection rules; otherwise it
+reports but does not block a merge.
 
 ## Current architecture
 

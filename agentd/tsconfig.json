@@ -21,6 +21,7 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.mjs", "contracts/generated/**/*.ts"],
+  "//tests": "tests/**/*.mjs is not type-checked without allowJs, so only the .ts tests are included here.",
+  "include": ["src/**/*.ts", "tests/**/*.ts", "contracts/generated/**/*.ts"],
   "exclude": ["node_modules", "ui"]
 }

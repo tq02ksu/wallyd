@@ -468,7 +468,9 @@ def handle_json(msg):
         return ok(mid, {"pump": pump_state})
 
     if op == "led":                      # 调试旁路：直接点灯，用来验证 WS2812 与"收到指令"
-        r = int(args.get("r", 0)); g = int(args.get("g", 0)); b = int(args.get("b", 0))
+        r = int(args.get("r", 0))
+        g = int(args.get("g", 0))
+        b = int(args.get("b", 0))
         led(r, g, b)
         return ok(mid, {"led": [r, g, b]})
 

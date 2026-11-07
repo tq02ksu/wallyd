@@ -244,6 +244,17 @@ export interface SubmitRunResult {
   duplicate: boolean;
 }
 
+export interface RecordClarificationInput {
+  prompt: string;
+  session_id?: string;
+  source?: 'text' | 'asr';
+  /** 面向用户的追问（事件摘要直接用它）。 */
+  question: string;
+  /** 缺失项，如 `capability:robot_stop` / `precondition`。 */
+  missing?: string[];
+  fast_rule?: string | null;
+}
+
 export class RunService {
   private store: Store;
   private events: EventLog;
@@ -472,6 +483,35 @@ export class RunService {
     return this.store.one<RunRow>('SELECT * FROM runs WHERE run_id = ?', runId);
   }
 
+  /**
+   * 记录一次「需要澄清」的输入。
+   *
+   * 澄清没有执行意图，**不建 run**（GH-27）：建了也永远不会推进，只会被
+   * `activeRun()` 当成活动任务，把下一条「停」挡在 `E_BUSY` 外。
+   * 有会话时用户这句话仍然落进会话历史（`run_id` 为空），并写一条 `route.clarify`
+   * 事件；消息与事件在同一事务里提交。返回事件时间戳，供响应里的 `created_at`。
+   */
+  recordClarification(input: RecordClarificationInput): string {
+    this.store.requireWritable();
+    const ts = nowIso();
+    const seq = this.store.transaction((tx) => {
+      if (input.session_id) {
+        this.appendMessage(tx, input.session_id, 'user', input.prompt, input.source ?? 'text', null);
+      }
+      const missing = input.missing ?? [];
+      return this.events.emit(tx, {
+        type: 'route.clarify',
+        session_id: input.session_id ?? null,
+        // advice 是登记表模板 `{advice}` 的必填参数：给一句稳定的用户话术。
+        // 缺失项（capability:... / precondition）是给诊断看的标识符，放 data，不塞进摘要。
+        params: { reason: input.question, advice: CLARIFY_ADVICE },
+        data: { missing, fast_rule: input.fast_rule ?? null },
+      }).seq;
+    });
+    this.notify(seq);
+    return ts;
+  }
+
   listRuns(statusFilter: string | null, cursor: string | null, limit: number): Record<string, unknown> {
     const where: string[] = [];
     const params: unknown[] = [];
@@ -697,7 +737,33 @@ export class RunService {
 
     const ts = nowIso();
     const details: string[] = [];
+    let interrupted = 0;
     for (const run of stuck) {
+      // GH-27 之前的遗留：`clarified` 的 run 停在非终态，但它从未执行、也没有任何步骤可推进。
+      // 把它报成 `interrupted` 等于每次重启都制造一条假故障，所以直接关闭（cancelled）。
+      if (run.route === 'clarified') {
+        this.store.transaction((tx) => {
+          tx.run(
+            `UPDATE runs SET status = 'cancelled', finished_at = ?, updated_at = ?, blocking_reason = ?
+             WHERE run_id = ?`,
+            ts,
+            ts,
+            '澄清请求没有执行意图，不占用活动任务名额；升级后不再创建 run',
+            run.run_id,
+          );
+          this.events.emit(tx, {
+            type: 'run.finished',
+            run_id: run.run_id,
+            session_id: run.session_id,
+            severity: 'info',
+            params: {
+              outcome: 'cancelled',
+              detail: '澄清请求没有执行，升级后不再为澄清创建任务。',
+            },
+          });
+        });
+        continue;
+      }
       // 有已发出的工具调用 → 结局未知，不能重试
       const liveCalls = this.store.all<ToolCallRow>(
         `SELECT * FROM tool_calls WHERE run_id = ? AND state IN ('requested','running')`,
@@ -738,9 +804,10 @@ export class RunService {
         });
       });
       details.push(`${run.run_id}: ${run.status} → ${nextStatus}`);
+      interrupted += 1;
     }
-    this.log('startup reconciliation', { interrupted: stuck.length, details });
-    return { interrupted: stuck.length, details };
+    this.log('startup reconciliation', { interrupted, details });
+    return { interrupted, details };
   }
 
   // ---------------------------------------------------------------- 步骤与工具调用
@@ -796,6 +863,9 @@ export class RunService {
     return cid;
   }
 }
+
+/** 澄清事件的固定建议：不猜着执行。 */
+const CLARIFY_ADVICE = '补充后我会继续，不会先猜着执行。';
 
 function outcomeOf(status: string): string {
   switch (status) {
