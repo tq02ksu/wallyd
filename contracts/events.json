@@ -187,9 +187,27 @@
         "aec_erle_db": {
           "type": "number",
           "required": false,
-          "notes": "桥在最近 1 秒内上报的 AEC 回声抑制量（render_db - mic_db）。只是事实，不是判定；是否回声由 agentd 决定。"
+          "notes": "桥在最近 1 秒内上报的 AEC 回声抑制量（render_db - mic_db）。只是事实：是否回声（审批 settle 的证据）由 agentd 判，是否打断由 robotd 的 AudioRuntime 判。"
         }
       }
+    },
+    {
+      "type": "speech.gate",
+      "category": "speech",
+      "no_state": true,
+      "payload": {
+        "utterance_id": {"type": "string", "required": true},
+        "decision": {"type": "string", "required": true, "enum": ["pass", "suppressed"]},
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": ["barge_in", "echo", "no_erle", "no_db", "not_speaking", "no_threshold"]
+        },
+        "db": {"type": "number", "required": false},
+        "aec_erle_db": {"type": "number", "required": false},
+        "threshold_db": {"type": "number", "required": false}
+      },
+      "notes": "robotd 的 AudioRuntime 在每次 VAD 上升时发一条：decision=pass 表示放行打断，suppressed 表示不打断。pass 与 suppressed 都必须发，否则「被压掉的声音」在时间线上没有分母。判定权只在这里（桥只报事实，agentd 不重算）。"
     },
     {
       "type": "speech.speech_ended",

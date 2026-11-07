@@ -33,6 +33,23 @@ from ..core.types import DeviceStatus, now_ms
 
 log = logging.getLogger("robotd.audio")
 
+#: 判定「AEC 真的在压回声」的 ERLE 底线（dB）。
+#:
+#: 与 agentd 审批 settle 的 ``ECHO_ERLE_MAX_DB`` 共用同一物理量（``aec_erle_db``）与同一
+#: 数值 6 dB，属已知重复门限：agentd 用它判「这句话是不是回声」，robotd 用它判
+#: 「能不能拿这条 ERLE 当打断判据」。收敛需要同时改 V08 的 settle 用例，另开 issue
+#: （见 ``docs/design/GH-5.md`` §7）。
+BARGE_IN_ERLE_FLOOR_DB = 6.0
+
+#: ``aec_echo_probe`` 的 ERLE 事实最多可用多久（ms）。更早的探测属于上一轮播报，
+#: 拿来判本轮的打断会误伤。
+BARGE_IN_ERLE_MAX_AGE_MS = 1000
+
+#: 默认 ``erle_margin``（dB）：AEC 回声残余相对本底的最大值 + 安全余量。
+#: 取自 ``eval/r14-voice-bringup-2026-10-24.md`` §5.6 的 VPIO 实测（最坏 +26.9 dB）
+#: 再加约 3 dB。V03 换成 AEC3 后应把它收窄（见 ``docs/design/GH-5.md`` §4.1）。
+DEFAULT_BARGE_IN_ERLE_MARGIN_DB = 30.0
+
 
 @dataclass
 class Utterance:
@@ -72,7 +89,12 @@ class Response:
 class AudioRuntime:
     """持有桥句柄与语音状态；所有状态写入经 ``emit``（内核 emit 的薄包装）。"""
 
-    def __init__(self, *, emit: Callable[[str, dict[str, Any]], None]) -> None:
+    def __init__(
+        self,
+        *,
+        emit: Callable[[str, dict[str, Any]], None],
+        barge_in_erle_margin_db: float = DEFAULT_BARGE_IN_ERLE_MARGIN_DB,
+    ) -> None:
         self._emit = emit
         self._lock = threading.RLock()
         self.bridge: Any | None = None
@@ -89,6 +111,10 @@ class AudioRuntime:
         #: 桥最近一次 aec_echo_probe 的 ERLE 估计（事实，不是判定）。
         self.last_erle_db: float | None = None
         self.last_erle_ms: int = 0
+        #: 同一次 probe 的渲染电平（ERLE 的参考侧事实）。
+        self.last_render_db: float | None = None
+        #: 打断门限里「回声残余相对本底 + 安全余量」的可调项（dB）。
+        self.barge_in_erle_margin_db = float(barge_in_erle_margin_db)
         #: 最近一次 utterance 的终态回调（由 app 注入，用于把任务表收尾）
         self.on_utterance_done: Callable[[Utterance, str, str | None], None] | None = None
         self.on_response_done: Callable[[Response, str], None] | None = None
@@ -315,32 +341,24 @@ class AudioRuntime:
             self.emit_state()
             return
         if name == "aec_echo_probe":
-            # 只记事实：ERLE 的判定（这一轮是不是回声）归 agentd，robotd 不猜。
+            # 只记事实。两件事分属两层，别混成一句：
+            #   - 「这一轮是不是回声」（审批 settle 的证据）归 agentd；
+            #   - 「要不要因此打断播报」归 robotd 的 AudioRuntime（本文件），由
+            #     `_on_vad_speech()` 用下面的 ERLE 事实与可调门限判定。
             erle = _num(ev.get("aec_erle_db"))
             if erle is not None:
                 with self._lock:
                     self.last_erle_db = erle
                     self.last_erle_ms = now_ms()
+                    render = _num(ev.get("render_db"))
+                    if render is not None:
+                        self.last_render_db = render
             return
         if name == "speech_state":
-            # 桥的 VAD 判出「开始说了」
+            # 桥的 VAD 判出「开始说了」。播报期间也会到这里（桥不再一刀切），
+            # 是否真的打断由本模块的 `_on_vad_speech()` 决定。
             if str(ev.get("state")) == "speech":
-                with self._lock:
-                    utt = self._utterance_for(ev)
-                    if utt is not None and not utt.saw_speech:
-                        utt.saw_speech = True
-                        payload: dict[str, Any] = {
-                            "utterance_id": utt.utterance_id,
-                            "task_id": utt.task_id,
-                            "rms_db": _num(ev.get("rms_db")),
-                        }
-                        # 只带 1 秒内的 ERLE：更早的探测属于上一轮播报，拿来判本轮回声会误伤。
-                        if self.last_erle_db is not None and now_ms() - self.last_erle_ms <= 1000:
-                            payload["aec_erle_db"] = round(self.last_erle_db, 1)
-                        self._emit("speech.started", payload)
-                        # barge-in：用户开口 → 停掉正在播的话
-                        if self.response is not None:
-                            self.cancel_speaking("barge_in")
+                self._on_vad_speech(ev)
             return
         if name == "partial":
             with self._lock:
@@ -413,22 +431,26 @@ class AudioRuntime:
         log.debug("忽略 %s 的迟到事件：当前轮是 %s", event_id, utt.utterance_id)
         return None
 
-    def _adopt_auto_utterance(self, ev: dict[str, Any]) -> None:
+    def _adopt_auto_utterance(self, ev: dict[str, Any]) -> Utterance | None:
         """把桥用 VAD 自动开的一轮认领到运行时。
 
         没有这一步，``utt-auto-*`` 的 partial/final 会因为运行时没有当前轮而被丢掉——
         「一直在听」就只剩桥自己在听。
+
+        播报期间 probe VAD 的 ``speech_state`` 会先于 ``ready`` 到达；这条路径也用它认领，
+        否则「播报中有人开口」的第一个事实会被丢掉，打断永远不可能发生。
         """
         utterance_id = str(ev.get("utterance_id") or "")
         if not utterance_id:
-            return
+            return None
         with self._lock:
             if self.muted:
-                return
+                return None
             current = self.utt
             if current is not None:
                 # 显式 listen 会先创建同 id 的轮，再收到桥的 ready；自动轮则直接认领。
-                return
+                # 已经认领过的轮次（probe 事实先到）也在这里返回，不重复发 speech.ready。
+                return current if current.utterance_id == utterance_id else None
             utt = Utterance(utterance_id=utterance_id, task_id=None, auto=True)
             self.utt = utt
         self._emit(
@@ -440,6 +462,117 @@ class AudioRuntime:
                 "auto_endpoint": bool(ev.get("auto_endpoint", True)),
             },
         )
+        return utt
+
+    # ------------------------------------------------------------ 打断门控（GH-5 / V02）
+    @property
+    def speech_db_barge_in(self) -> float | None:
+        """打断门限 ``T = max(ambient_db + erle_margin, speech_db)``（dBFS）。
+
+        **唯一的门限算式**：其它模块不得再算一份（``test_barge_in_gate_location.py`` 门禁）。
+        未标定（两个电平都缺）时返回 ``None``——宁可保守不打断，也不编一个门限。
+        """
+        with self._lock:
+            ambient = self.ambient_db
+            speech = self.speech_db
+            margin = self.barge_in_erle_margin_db
+        floors: list[float] = []
+        if ambient is not None:
+            floors.append(ambient + margin)
+        if speech is not None:
+            floors.append(speech)
+        return max(floors) if floors else None
+
+    def _fresh_erle(self) -> tuple[float | None, float | None, float | None]:
+        """返回 ``(原始事实, 1 秒内的值, 可用于判定的值)``。
+
+        「可用于判定」= 有值、1 秒内、且不低于 6 dB 的底线。缺失、过期、明确为 0 都落在
+        ``None``：缺证据 ≠ 有证据（B4）。原始值仍然原样回传，供 ``speech.gate`` 如实记录。
+        ``speech.started`` 只带 1 秒内的值（更早的探测属于上一轮播报，agentd 拿来判本轮回声会误伤）。
+        """
+        with self._lock:
+            raw = self.last_erle_db
+            fresh = raw is not None and now_ms() - self.last_erle_ms <= BARGE_IN_ERLE_MAX_AGE_MS
+            fresh_value = raw if fresh else None
+            usable = (
+                fresh_value if fresh_value is not None and fresh_value >= BARGE_IN_ERLE_FLOOR_DB else None
+            )
+        return raw, fresh_value, usable
+
+    def _barge_in_verdict(
+        self,
+        *,
+        db: float | None,
+        erle: float | None,
+        threshold: float | None,
+        speaking: bool,
+    ) -> tuple[str, str]:
+        """判定这次 VAD 上升要不要放行打断。**唯一判定点。**"""
+        if not speaking:
+            return "pass", "not_speaking"
+        if threshold is None:
+            return "suppressed", "no_threshold"
+        if erle is None:
+            return "suppressed", "no_erle"
+        if db is None:
+            return "suppressed", "no_db"
+        if db >= threshold:
+            return "pass", "barge_in"
+        # 电平在门限之下：仍在播报时，最可能是自己的声音 / 回声残余。
+        return "suppressed", "echo"
+
+    def _on_vad_speech(self, ev: dict[str, Any]) -> None:
+        """VAD 上升 → 产 ``speech.gate`` → 发 ``speech.started`` → pass 才执行打断。"""
+        with self._lock:
+            utt = self._utterance_for(ev)
+            current = self.utt
+        if utt is None:
+            if current is not None:
+                return
+            utt = self._adopt_auto_utterance(ev)
+        if utt is None:
+            return
+
+        with self._lock:
+            if utt.saw_speech:
+                # B5：probe VAD 与随后 utterance VAD 是同一轮的两次上升，只判一次。
+                return
+            utt.saw_speech = True
+            db = _num(ev.get("db"))
+            if db is None:
+                db = _num(ev.get("rms_db"))
+            raw_erle, fresh_erle, usable_erle = self._fresh_erle()
+            threshold = self.speech_db_barge_in
+            speaking = self.response is not None
+            decision, reason = self._barge_in_verdict(
+                db=db, erle=usable_erle, threshold=threshold, speaking=speaking
+            )
+            gate: dict[str, Any] = {
+                "utterance_id": utt.utterance_id,
+                "decision": decision,
+                "reason": reason,
+            }
+            if db is not None:
+                gate["db"] = round(db, 1)
+            if raw_erle is not None:
+                gate["aec_erle_db"] = round(raw_erle, 1)
+            if threshold is not None:
+                gate["threshold_db"] = round(threshold, 1)
+            started: dict[str, Any] = {
+                "utterance_id": utt.utterance_id,
+                "task_id": utt.task_id,
+                "rms_db": None if db is None else round(db, 1),
+            }
+            if fresh_erle is not None:
+                started["aec_erle_db"] = round(fresh_erle, 1)
+
+        # gate 记的是判定结果；started 记的是桥确实开了这一轮。两者都发：
+        # suppressed 不发 started 就等于把判定又搬回了桥。
+        self._emit("speech.gate", gate)
+        self._emit("speech.started", started)
+        if decision == "pass" and speaking:
+            # 打断是仲裁动作：本地立即中止并清桥的未播队列，不等桥回报。
+            self.abort_response("barge_in")
 
     # ------------------------------------------------------------ 各事件细节
     def _finish_utterance(self, ev: dict[str, Any]) -> None:

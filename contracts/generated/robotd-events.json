@@ -286,6 +286,25 @@
       ]
     },
     {
+      "type": "speech.gate",
+      "category": "speech",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "utterance_id",
+        "decision",
+        "reason",
+        "db",
+        "aec_erle_db",
+        "threshold_db"
+      ],
+      "required_fields": [
+        "utterance_id",
+        "decision",
+        "reason"
+      ]
+    },
+    {
       "type": "speech.speech_ended",
       "category": "speech",
       "no_state": true,

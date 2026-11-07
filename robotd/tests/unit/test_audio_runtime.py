@@ -238,3 +238,249 @@ def test_engine_unavailable_is_a_failure_not_no_speech():
     assert final["no_speech"] is False
     assert final["stop_reason"] == "engine_unavailable"
     assert done == [("failed", "engine_unavailable")]
+
+
+# ---------------------------------------------------------------- 播报期 VAD 门控（GH-5 / V02）
+#: 测试用的标定值：本底 -40 dB、说话门限 -32 dB。默认 erle_margin=30 时
+#: ``speech_db_barge_in = max(-40+30, -32) = -10 dB``。
+AMBIENT_DB = -40.0
+SPEECH_DB = -32.0
+BARGE_IN_THRESHOLD_DB = AMBIENT_DB + 30.0
+
+
+def calibrate(rt: AudioRuntime, *, ambient: float = AMBIENT_DB, speech: float = SPEECH_DB) -> None:
+    rt.handle_bridge_event(
+        {"ev": "vad_calibrated", "ambient_db": ambient, "speech_db": speech, "silence_db": -38.0}
+    )
+
+
+def probe_erle(rt: AudioRuntime, *, erle: float = 12.0, render: float = -10.0) -> None:
+    rt.handle_bridge_event({"ev": "aec_echo_probe", "aec_erle_db": erle, "render_db": render})
+
+
+def start_speaking(rt: AudioRuntime, *, approval_id: str | None = None, kind: str | None = None):
+    resp = rt.new_response(task_id="t-barge", approval_id=approval_id, kind=kind)
+    rt.handle_bridge_event({"ev": "tts_started", "chunks": 2, "voice": "v"})
+    return resp
+
+
+def vad_rise(rt: AudioRuntime, *, utterance_id: str = "utt-auto-1", db: float = -5.0) -> None:
+    """桥的 probe VAD 上升事实。可能先于 ``ready`` 到达——这正是播报期的形态。"""
+    rt.handle_bridge_event(
+        {"ev": "speech_state", "state": "speech", "utterance_id": utterance_id, "rms_db": db}
+    )
+
+
+def gates(emitted: list[tuple[str, dict]]) -> list[dict]:
+    return [p for t, p in emitted if t == "speech.gate"]
+
+
+def test_barge_in_passes_when_user_speech_exceeds_threshold():
+    """A1：播报中用户开口（门限以上、ERLE 新鲜）→ gate pass + 立即停播。"""
+    rt, emitted = make_runtime()
+    done: list[str] = []
+    rt.on_response_done = lambda _resp, outcome: done.append(outcome)
+    calibrate(rt)
+    start_speaking(rt)
+    probe_erle(rt, erle=12.0, render=-10.0)
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "pass"
+    assert gate["reason"] == "barge_in"
+    assert gate["db"] == -5.0
+    assert gate["aec_erle_db"] == 12.0
+    assert gate["threshold_db"] == BARGE_IN_THRESHOLD_DB
+
+    # 事实先到、ready 后到：运行时必须认领这一轮，而不是把它丢掉
+    assert rt.utt is not None and rt.utt.utterance_id == "utt-auto-1"
+    ready = [p for t, p in emitted if t == "speech.ready"]
+    assert len(ready) == 1 and ready[0]["utterance_id"] == "utt-auto-1"
+    # 桥的 ready 随后到达时不得重复发 ready / started
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-1", "source": "vad"})
+    assert len([p for t, p in emitted if t == "speech.ready"]) == 1
+    started = [p for t, p in emitted if t == "speech.started"]
+    assert len(started) == 1
+    assert started[0]["utterance_id"] == "utt-auto-1"
+
+    cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"]
+    assert len(cancelled) == 1
+    assert cancelled[0]["reason"] == "barge_in"
+    assert rt.response is None
+    assert done == ["cancelled"]
+    assert [c for c in rt.bridge.sent if c.get("cmd") == "stop_speak"]
+
+
+def test_barge_in_suppressed_for_self_echo():
+    """B1：播报中的自听回声不进人声门限 → gate suppressed/echo，不打断。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    started_resp = start_speaking(rt)
+    probe_erle(rt, erle=12.0, render=-10.0)
+
+    # 回声残余（本底 +19.2 dB ≈ -20.8）落在门限之下
+    vad_rise(rt, db=-22.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "suppressed"
+    assert gate["reason"] == "echo"
+    assert rt.response is started_resp
+    assert not [p for t, p in emitted if t == "speech.tts_cancelled"]
+    assert not [c for c in rt.bridge.sent if c.get("cmd") == "stop_speak"]
+    # 桥确实开了这一轮：robotd 只是不打断，仍然如实发 started
+    assert [p for t, p in emitted if t == "speech.started"]
+
+
+def test_barge_in_right_after_tts_started():
+    """A3：刚开始播就有人说话也要打断，不能因为「刚开播」忽略。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    start_speaking(rt)
+    probe_erle(rt)
+
+    vad_rise(rt, db=-4.0)
+
+    assert gates(emitted)[-1]["decision"] == "pass"
+    assert [p for t, p in emitted if t == "speech.tts_cancelled"][-1]["reason"] == "barge_in"
+
+
+def test_gate_passes_without_playback():
+    """B2：没在播报就没有打断对象；gate 记 pass/not_speaking，started 照发。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "pass"
+    assert gate["reason"] == "not_speaking"
+    assert [p for t, p in emitted if t == "speech.started"]
+    assert not [p for t, p in emitted if t == "speech.tts_cancelled"]
+
+
+def test_gate_passes_after_tts_finished():
+    """B3：播报结束的尾巴不打断（没有播放对象）。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    start_speaking(rt)
+    rt.handle_bridge_event({"ev": "tts_finished", "chunks": 2, "played": 2})
+    probe_erle(rt)
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "pass"
+    assert gate["reason"] == "not_speaking"
+    assert not [p for t, p in emitted if t == "speech.tts_cancelled"]
+
+
+def test_gate_suppressed_without_erle_fact():
+    """B4：没有 ERLE 事实 → 缺证据 ≠ 有证据，落在 suppressed/no_erle。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    start_speaking(rt)
+
+    vad_rise(rt, db=-5.0)  # 电平在门限之上也不能放行
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "suppressed"
+    assert gate["reason"] == "no_erle"
+    assert "aec_erle_db" not in gate
+    assert rt.response is not None
+    assert not [c for c in rt.bridge.sent if c.get("cmd") == "stop_speak"]
+
+
+def test_gate_suppressed_when_erle_probe_is_stale():
+    """B4：上次探测超过 1000ms → 同样 no_erle。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    start_speaking(rt)
+    rt.last_erle_db = 12.0
+    rt.last_erle_ms = 0  # 1970：一定过期
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "suppressed"
+    assert gate["reason"] == "no_erle"
+    assert rt.response is not None
+
+
+def test_explicit_zero_erle_follows_the_same_no_evidence_path():
+    """判据 3：ERLE 缺失与「明确为 0」走同一条路——都不能被当成「AEC 压住了」。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    start_speaking(rt)
+    probe_erle(rt, erle=0.0, render=-10.0)
+    # 0 是真实值，不能被 `or None` 吞掉
+    assert rt.last_erle_db == 0.0
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "suppressed"
+    assert gate["reason"] == "no_erle"
+    assert gate["aec_erle_db"] == 0.0
+    assert rt.response is not None
+
+
+def test_gate_suppressed_when_not_calibrated():
+    """没标定就没有门限：仍要产 gate，但不能放行。"""
+    rt, emitted = make_runtime()
+    start_speaking(rt)
+    probe_erle(rt)
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "suppressed"
+    assert gate["reason"] == "no_threshold"
+    assert "threshold_db" not in gate
+    assert rt.response is not None
+
+
+def test_repeated_vad_rise_emits_one_gate_per_utterance():
+    """B5：同一 utterance 内重复 speech（probe 与 utterance VAD）只判一次。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    start_speaking(rt)
+    probe_erle(rt)
+
+    vad_rise(rt, db=-5.0)
+    vad_rise(rt, db=-5.0)
+
+    assert len(gates(emitted)) == 1
+    assert len([p for t, p in emitted if t == "speech.started"]) == 1
+    assert len([p for t, p in emitted if t == "speech.tts_cancelled"]) == 1
+
+
+def test_every_vad_rise_emits_a_gate():
+    """判据 5：pass 与 suppressed 都要有 gate，压掉的才在时间线上有分母。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    start_speaking(rt)
+    probe_erle(rt)
+    vad_rise(rt, utterance_id="utt-auto-1", db=-22.0)  # echo → suppressed
+    rt.handle_bridge_event({"ev": "final", "utterance_id": "utt-auto-1", "text": "", "no_speech": True})
+    vad_rise(rt, utterance_id="utt-auto-2", db=-5.0)  # user → pass
+
+    decisions = [g["decision"] for g in gates(emitted)]
+    assert decisions == ["suppressed", "pass"]
+
+
+def test_approval_repeat_barge_in_cancels_without_tts_finished():
+    """A2：审批复述被打断时只发 tts_cancelled（played 未增加），不冒充播完。"""
+    rt, emitted = make_runtime()
+    calibrate(rt)
+    start_speaking(rt, approval_id="appr-1", kind="approval_repeat")
+    probe_erle(rt)
+
+    vad_rise(rt, db=-5.0)
+
+    cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"]
+    assert len(cancelled) == 1
+    assert cancelled[0]["reason"] == "barge_in"
+    assert cancelled[0]["approval_id"] == "appr-1"
+    assert cancelled[0]["kind"] == "approval_repeat"
+    assert not [p for t, p in emitted if t == "speech.tts_finished"]

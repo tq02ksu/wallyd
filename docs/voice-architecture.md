@@ -271,6 +271,7 @@ speech.tts_started / speech.tts_chunk / speech.tts_finished 事件
 | --- | --- | --- | --- |
 | `speech.ready` | `locale, source, auto_endpoint` | 会话就绪 | ✅ 已落地（与 `speech.started` 拆开） |
 | `speech.started` / `speech.speech_ended` | `utterance_id, rms_db, audio_ms` | VAD 判「开始说 / 说完了」 | ✅ 已落地（能量 VAD） |
+| `speech.gate` | `utterance_id, decision, reason, db, aec_erle_db, threshold_db` | 播报期间 VAD 上升是否放行打断（robotd 的 AudioRuntime 单点判定；pass 与 suppressed 都发） | ✅ 已落地（GH-5 / V02） |
 | `speech.partial` | `task_id, utterance_id, revision, text, audio_start_ms/end_ms` | 增量文本（可修订） | ✅ 已落地 |
 | `speech.final` | `task_id, utterance_id, text, stop_reason` | 最终文本（默认冻结） | ✅ 已落地 |
 | `speech.speaker_segment` / `speech.speaker_resolved` | `segment_id, utterance_id, speaker_id, start_ms, end_ms, confidence` | 说话人分段 / 身份后置解析 | 待新增（或走 `people.*`） |
@@ -381,7 +382,7 @@ speech.tts_started / speech.tts_chunk / speech.tts_finished 事件
 | **端点检测** | 说完自动收尾，误切/漏切率低 | 短句/长句/停顿/口头语各 20–30 条 |
 | TTS 首包 | P95 ≤ 800ms | 提交文本 → 播放首帧（分句生效后与回答总长无关） |
 | **打断响应（barge-in）** | P95 ≤ 300ms | 播放中开口 → 停止播放的时延 |
-| 自听误触发率 | 播放期几乎不把自身声音当用户 | 机器人播放时静默计数 |
+| 自听误触发率 | 连续播放 30 分钟，`speech.gate{decision:"pass"}` = 0 | 统计 `speech.gate` 的 pass/suppressed（B1 即其测试载体） |
 | 说话人归属 | 两人轮流 ≥ 95% | 人工标注片段；单独统计 unknown（防刷分） |
 | 人物跟踪 | 30 分钟无严重 ID 抖动 | 人工标注轨迹、统计 ID switch |
 | 运动安全 | 通信丢失后按超时停机 | 已有看门狗，改造不应回归 |
@@ -553,11 +554,15 @@ macOS 按**责任进程**（responsible process）而不是「谁 spawn 了它�
 
 ### 14.5 已知限制（明确留白）
 
-- **barge-in 当前不可用**，但根因已查清、路线已定（详见 §14.6）：
+- **barge-in 的判定侧已落地（GH-5 / V02）**，整机可用性仍受 AEC 限制（详见 §14.6 与
+  [`design/GH-5.md`](design/GH-5.md)）：
   - 已修：播报改走本 engine 的 `AVAudioPlayerNode`（§14.4），不再依赖 `synth.speak()`。
-  - 仍不够：VPIO 实测只有 **12–14 dB** 抑制，回声残留相对本底 **+19.2 dB（中位）/ +26.9 dB（最坏）**，
-    远高于人声门限，会误触发 VAD。
-  - 所以播报期间仍 `suppressAuto=true`：**用户无法在播报中打断**；契约也还没有「停止播报」端点。
+  - 已改：桥删除 `suppressAuto`，播报期间**照常跑 VAD** 并如实上报 `rms_db` / `render_db` /
+    `aec_erle_db`；判定收口到 robotd 的 `AudioRuntime`，每次 VAD 上升都产 `speech.gate`。
+  - 仍不够：VPIO 实测只有 **12–14 dB** 抑制，回声残留相对本底 **+19.2 dB（中位）/ +26.9 dB（最坏）**。
+    因此默认 `erle_margin = 30 dB` 的门限在真机上仍高于常人声——**A1 的真实打断要等 V03
+    把参考信号换成 AEC3、收窄门限后再验**；当前单元测试证明的是判定逻辑与事件面。
+  - 契约已有「停止播报」路径（`stop_speak`）；打断由 `AudioRuntime` 在 gate pass 时立即执行。
   - 实测数据见 [`eval/r14-voice-bringup-2026-10-24.md`](../eval/r14-voice-bringup-2026-10-24.md) §5.6。
 - **说话人分段 / 声纹**（§7）未实现。
 - 事件库只落**节点性**事件：`speech.partial`、`audio.state` 每秒十几条，故意不入库，
@@ -627,7 +632,7 @@ WebRTC 官方集成文档的表述与此一致：
 | --- | --- | --- |
 | 1 | AEC3 静态库（已完成）+ Swift 包装层 | 喂固定 PCM，输出与离线逐样本一致 |
 | 2 | 桥加 `--aec3` 模式，playerNode PCM 作 render | 跑同一 ABAB 实验，与 VPIO 对照 |
-| 3 | 解开 `suppressAuto`，改用 AEC3 残留水平动态门限 | 实测：播报中说话能否打断 |
+| 3 | `suppressAuto` 已在 GH-5 删除；本步按 AEC3 残留水平收窄 `erle_margin`（`speech_db_barge_in`） | 实测：播报中说话能否打断、`speech.gate` 的 pass/suppressed 比例 |
 
 #### 依赖与构建
 

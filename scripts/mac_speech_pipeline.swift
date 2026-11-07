@@ -586,9 +586,8 @@ final class ServeBridgeV2: @unchecked Sendable {
     var response: TTSResponseState?
     var synth: AVSpeechSynthesizer?
 
-    // Mute / auto gate.
+    // Mute.
     var muted = false
-    var suppressAuto = false
 
     var dumpFile: AVAudioFile?
     var dumpPath: String?
@@ -913,7 +912,6 @@ final class ServeBridgeV2: @unchecked Sendable {
         lock.lock(); vadFrames += 1; lock.unlock()
         lock.lock()
         let m = muted
-        let s = suppressAuto
         let activeId = active?.id
         let autoEndpoint = active?.autoEndpoint ?? false
         let speaking = response != nil
@@ -921,8 +919,9 @@ final class ServeBridgeV2: @unchecked Sendable {
         let busy = engineFailed || autoStarting
         lock.unlock()
 
-        // AEC diagnostic: still 100ms cadence; fed_frames makes frame loss auditable.
-        if s || speaking {
+        // AEC diagnostic: 100ms cadence while there is a render reference; fed_frames makes
+        // frame loss auditable. This is a fact, not a decision.
+        if speaking {
             let now = ms()
             if now - lastEchoProbeMs >= 100 {
                 lastEchoProbeMs = now
@@ -956,7 +955,7 @@ final class ServeBridgeV2: @unchecked Sendable {
             return
         }
 
-        if activeId == nil && !m && !s && !busy {
+        if activeId == nil && !m && !busy {
             runProbeVAD(frame)
         } else if activeId == nil {
             pushPreroll(frame)
@@ -1001,13 +1000,19 @@ final class ServeBridgeV2: @unchecked Sendable {
         var i = 0
         let n = Int(frame.buffer.frameLength)
         var started = false
+        var startDb: Double = -120
+        var startSec: Double = 0
         while i < n && !started {
             let len = min(sub, n - i)
             let db = bufferDb(frame.buffer, offset: i, count: len)
             let tSec = Double(frame.startFrame + i) / asrFormat.sampleRate
             probeVad.speechDb = speechDb
             probeVad.silenceDb = silenceDb
-            if case .started = probeVad.push(db: db, tSec: tSec) { started = true }
+            if case .started = probeVad.push(db: db, tSec: tSec) {
+                started = true
+                startDb = db
+                startSec = tSec
+            }
             i += len
         }
         if started {
@@ -1017,6 +1022,22 @@ final class ServeBridgeV2: @unchecked Sendable {
                                  minSpeechSec: 0.3, endpointSilenceSec: 0.7)
             autoSeq += 1
             let id = "utt-auto-\(autoSeq)"
+            // Report the raw VAD fact before opening the round. During playback this is the
+            // frame that lets robotd's AudioRuntime decide barge-in vs. echo; the bridge must
+            // not decide whether the frame is "allowed".
+            lock.lock(); let renderDb = lastRenderDb; lock.unlock()
+            var fact: [String: Any] = [
+                "ev": "speech_state", "state": "speech", "utterance_id": id,
+                "rms_db": (startDb * 10).rounded() / 10,
+                "db": (startDb * 10).rounded() / 10,
+                "audio_ms": Int(startSec * 1000), "fed_frames": frame.endFrame,
+                "ts_mono_ns": monoNs(), "t_ms": ms(),
+            ]
+            if renderDb > -100 {
+                fact["render_db"] = (renderDb * 10).rounded() / 10
+                fact["aec_erle_db"] = ((renderDb - startDb) * 10).rounded() / 10
+            }
+            emitLine(fact)
             lock.lock(); autoStarting = true; lock.unlock()
             work.async { [weak self] in
                 Task { await self?.beginUtt(id: id, auto: true, autoEndpoint: true,
@@ -1272,7 +1293,7 @@ final class ServeBridgeV2: @unchecked Sendable {
         }
         let state = TTSResponseState(id: responseId, chunks: chunks.count, voice: voiceID,
                                      rate: rate, dryRun: dryRun)
-        lock.lock(); response = state; suppressAuto = true; lock.unlock()
+        lock.lock(); response = state; lock.unlock()
         emitLine(["ev": "tts_started", "response_id": responseId,
                   "voice": voiceID ?? (AVSpeechSynthesisVoice(language: "zh-CN")?.identifier ?? "-"),
                   "chars": text.count, "chunks": chunks.count, "dry_run": dryRun,
@@ -1474,7 +1495,6 @@ final class ServeBridgeV2: @unchecked Sendable {
         state.finished = true
         state.cancelled = state.cancelled || cancelled
         response = nil
-        suppressAuto = false
         let played = state.played, dropped = state.dropped, chunks = state.chunks
         let synth = self.synth
         self.synth = nil

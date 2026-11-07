@@ -81,6 +81,12 @@ class Config:
     #: 状态快照向外推送的最大频率（契约 §2.2 1Hz）
     state_push_hz: float = 1.0
 
+    # --- 语音打断门限（GH-5 / V02）---
+    #: 打断门限 `max(ambient_db + 本值, speech_db)` 里的余量（dB）：
+    #: AEC 回声残余相对本底的最大值 + 安全余量。默认 30 取自 VPIO 实测最坏
+    #: +26.9 dB（eval/r14-voice-bringup-2026-10-24.md §5.6）；V03 换 AEC3 后收窄。
+    barge_in_erle_margin_db: float = 30.0
+
     # --- 工作区 ---
     #: 运行产物目录（日志、抓帧）。默认相对项目根的 work/，可覆盖。
     work_dir: str = ""
@@ -115,6 +121,8 @@ class Config:
             raise ConfigError("event_log_max", f"{self.event_log_max} 太小，补发窗口会失去意义")
         if not (0.1 <= self.state_push_hz <= 10.0):
             raise ConfigError("state_push_hz", f"{self.state_push_hz} 超出 [0.1, 10]")
+        if not (0.0 <= self.barge_in_erle_margin_db <= 120.0):
+            raise ConfigError("barge_in_erle_margin_db", f"{self.barge_in_erle_margin_db} 超出 [0, 120] dB")
         if not self.modeld_url.startswith(("http://", "https://")):
             raise ConfigError("modeld_url", "必须是 http(s) URL")
         if not self.sim and not self.serial_port:
@@ -144,6 +152,7 @@ _ENV_MAP = {
     "ROBOTD_MODEL": ("model_id", "str"),
     "ROBOTD_WORK_DIR": ("work_dir", "str"),
     "ROBOTD_LOG_JSON": ("log_json", "bool"),
+    "ROBOTD_BARGE_IN_ERLE_MARGIN_DB": ("barge_in_erle_margin_db", "float"),
 }
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -155,6 +164,8 @@ def _coerce(raw: str, kind: str, field_name: str) -> Any:
             return raw.strip().lower() in _TRUE
         if kind == "int":
             return int(raw)
+        if kind == "float":
+            return float(raw)
         return raw
     except (TypeError, ValueError) as exc:
         raise ConfigError(field_name, f"环境变量值 {raw!r} 无法解析为 {kind}") from exc

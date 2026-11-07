@@ -89,3 +89,29 @@ def test_command_surface_is_four_plus_lifecycle_commands():
     assert commands == {"listen", "stop", "speak", "stop_speak", "mute", "unmute", "status", "quit"}
     assert 'case "play"' not in switch
     assert 'case "record"' not in switch
+
+
+def test_bridge_does_not_suppress_vad_during_playback():
+    """GH-5 判据 6：suppressAuto 必须真删，且不得换成「被压掉就不发事实」的短路。
+
+    桥是适配层，只报事实；打断判定在 robotd 的 AudioRuntime。这里用源码断言把边界钉住，
+    因为 Swift 桥在 Linux CI 上不能编译，无法用运行时测试代替。
+    """
+    text = source()
+    assert "suppressAuto" not in text
+    # VAD worker 的分支不再看「是否在播报」
+    assert "if activeId == nil && !m && !busy {" in text
+    handle = text.split("private func handleVadFrame", 1)[1].split("private func calibrate", 1)[0]
+    assert "!s" not in handle
+    assert "runProbeVAD(frame)" in handle
+
+    # probe VAD 上升时必须如实发 speech_state 事实（后续 robotd 才可能产 speech.gate）
+    probe = text.split("private func runProbeVAD", 1)[1].split("private func runUtteranceVAD", 1)[0]
+    assert '"ev": "speech_state", "state": "speech"' in probe
+    # 桥侧不得因为「正在播报」而跳过开轮或跳过事实上报（那只是把 suppressAuto 换个名字）
+    assert "speaking" not in probe
+    assert "response" not in probe
+    # 桥侧不得出现契约名 speech.gate，也不得按「回声」决定发不发事实
+    assert "speech.gate" not in text
+    assert "suppress" not in probe.lower()
+    assert not re.search(r"if[^\n]*(speaking|response)[^\n]*\{\s*return", handle)
