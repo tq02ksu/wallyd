@@ -50,6 +50,16 @@ def test_env_bad_value_gives_actionable_error():
     assert ei.value.field == "http_port"
 
 
+def test_barge_in_margin_is_tunable_and_validated():
+    """GH-5：打断门限的余量只有一份，可由环境变量调整，越界直接拒绝。"""
+    assert Config().barge_in_erle_margin_db == 30.0
+    cfg = from_env(Config(), env={"ROBOTD_BARGE_IN_ERLE_MARGIN_DB": "12.5"})
+    assert cfg.barge_in_erle_margin_db == 12.5
+    with pytest.raises(ConfigError) as ei:
+        Config(barge_in_erle_margin_db=-1.0).validate()
+    assert ei.value.field == "barge_in_erle_margin_db"
+
+
 def test_frozen_config_cannot_be_mutated():
     cfg = Config()
     with pytest.raises(Exception):

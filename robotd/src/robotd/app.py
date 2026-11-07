@@ -120,7 +120,10 @@ class App:
         self.transport: Any | None = None
 
         # 音频运行时（R14）：桥是可选的，没桥时语音能力如实报 unavailable
-        self.audio = AudioRuntime(emit=self._audio_emit)
+        self.audio = AudioRuntime(
+            emit=self._audio_emit,
+            barge_in_erle_margin_db=config.barge_in_erle_margin_db,
+        )
         self.audio.on_utterance_done = self._on_utterance_done
         self.audio.on_response_done = self._on_response_done
 

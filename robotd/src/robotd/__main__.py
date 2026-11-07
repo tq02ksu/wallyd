@@ -58,8 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "开启输入侧语音处理（AEC/NS）。注意实测（eval/r14-voice-bringup-2026-10-24.md §5.2）："
-            "它能压掉约 30dB 回声但只在前 1.5 秒有效，之后残留仍高于说话门限——"
-            "目前**不足以支撑 barge-in**，播报期间仍会屏蔽自动识别。默认关闭。"
+            "VPIO 只能压 12–14dB，回声残余仍高于常人声；播报期间不再屏蔽 VAD，"
+            "但 AudioRuntime 的打断门限会据此保守判 suppressed（见 docs/design/GH-5.md）。默认关闭。"
         ),
     )
 

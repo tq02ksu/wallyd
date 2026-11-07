@@ -34,8 +34,11 @@ export const EXCERPT_MAX = 80;
 
 /**
  * 回声判定门限（dB）：`aec_erle_db` 是「参考电平 − 麦克风电平」的回声抑制量。
- * 小于该值说明麦克风几乎还是喇叭的声音。**门限只在这里出现一次**；
- * V02 落地 `speech.gate.verdict` 后改为消费 verdict，不再读 ERLE。
+ * 小于该值说明麦克风几乎还是喇叭的声音。
+ *
+ * 这里判的是**「这句话是不是回声」**（审批 settle 的证据：echo=true 的 utterance 不能确认
+ * 审批），不是「要不要停播」——后者由 robotd 的 `AudioRuntime` 用 `speech.gate` 单点判定。
+ * 两处共用 `aec_erle_db` 与 6 dB 属已知重复门限，收敛需一并改 V08 的 settle 用例，另开 issue。
  */
 export const ECHO_ERLE_MAX_DB = 6;
 
