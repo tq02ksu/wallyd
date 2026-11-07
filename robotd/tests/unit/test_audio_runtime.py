@@ -131,6 +131,7 @@ def test_abort_response_emits_cancelled_immediately_and_clears_active_response()
     assert cancelled[0]["approval_id"] == "appr-2"
     assert cancelled[0]["reason"] == "stop"
 
+
 # ---------------------------------------------------------------- 桥不可用
 def test_no_bridge_refuses_utterance():
     rt, _ = make_runtime()

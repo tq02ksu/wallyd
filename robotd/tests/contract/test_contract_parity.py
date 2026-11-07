@@ -144,9 +144,7 @@ def test_approval_flags_in_contract_are_reflected_in_routes(spec):
     routed = {r.operation_id: r.requires_approval for r in build_routes(debug=False)}
     assert routed.keys() == (declared.keys() - {"events_subscribe"})
     mismatched = {
-        op: (routed[op], flag)
-        for op, flag in declared.items()
-        if op in routed and routed[op] is not flag
+        op: (routed[op], flag) for op, flag in declared.items() if op in routed and routed[op] is not flag
     }
     assert not mismatched, f"路由的 requires_approval 与契约不一致：{mismatched}"
 
