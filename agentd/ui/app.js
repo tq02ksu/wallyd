@@ -568,9 +568,18 @@ function renderInputCard() {
         prompt: text,
         idempotency_key: `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       });
-      input.value = '';
-      status.textContent = '';
-      navigate('runs', res.run_id);
+      if (res.run_id) {
+        input.value = '';
+        status.textContent = '';
+        navigate('runs', res.run_id);
+      } else if (res.clarify?.question) {
+        // 澄清不建 run（没有任务可跳），把追问留在输入卡上，让用户补一句
+        status.textContent = res.clarify.question;
+      } else if (Array.isArray(res.ambiguous) && res.ambiguous.length > 0) {
+        status.textContent = `有多条规则同时命中（${res.ambiguous.join(' / ')}），请说得更具体一些。`;
+      } else {
+        status.textContent = '已受理。';
+      }
     } catch (e) {
       if (e.code === 'E_BUSY') {
         status.replaceChildren(
