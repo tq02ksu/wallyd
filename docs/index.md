@@ -80,9 +80,11 @@
 
 ## 7. 设计记录（按 issue）
 
+- [GH-4 语音桥双管道设计](design/GH-4.md) - 拾音（采集→VAD→ASR）与出话（分句→合成→有界队列→渲染）拆分及可替换 engine 边界
+- [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
 - [GH-19：审批复述的系统播报路径](design/GH-19.md) - `robot_announce` 的契约、事件与确认窗口时序
 
-## 7. 实测与评测（有时效）
+## 8. 实测与评测（有时效）
 
 - [视觉延迟实测（2026-10-06）](../eval/vision-latency.md) - VLM 0.84s/帧 vs 系统检测器 4–20ms
 - [视觉评测脚本使用说明](../eval/README.md) - 上面那份实测怎么复跑
@@ -91,7 +93,7 @@
 - [本地大脑全链路验证（2026-10-25）](../eval/brain-qwen3-toolcalling-2026-10-25.md) - Codex→moon-bridge→mlx_lm→Qwen3-4B 端到端与工具调用通过率
 - [Codex app-server 接入取证（A01）](../eval/codex-harness-probe.md) - SDK 分发、进程边界与 `CODEX_HOME` 隔离的实证
 
-## 8. 历史归档（不代表现状）
+## 9. 历史归档（不代表现状）
 
 - [历史文档归档说明](archive/README.md) - 归档范围与「以现行文档为准」的声明
 - [POC 使用说明](archive/poc-readme.md) - 已删除的 POC 的启动与排错记录
