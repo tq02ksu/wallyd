@@ -130,6 +130,7 @@ def test_every_public_operation_has_a_capability_entry():
         "robot_speak",
         "robot_announce",
         "speech_listen",
+        "speech_abort",
         "audio_state",
         "audio_mute",
         "audio_unmute",

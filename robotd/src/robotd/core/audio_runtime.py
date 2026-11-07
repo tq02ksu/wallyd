@@ -35,20 +35,29 @@ log = logging.getLogger("robotd.audio")
 
 #: 判定「AEC 真的在压回声」的 ERLE 底线（dB）。
 #:
-#: 与 agentd 审批 settle 的 ``ECHO_ERLE_MAX_DB`` 共用同一物理量（``aec_erle_db``）与同一
-#: 数值 6 dB，属已知重复门限：agentd 用它判「这句话是不是回声」，robotd 用它判
-#: 「能不能拿这条 ERLE 当打断判据」。收敛需要同时改 V08 的 settle 用例，另开 issue
-#: （见 ``docs/design/GH-5.md`` §7）。
-BARGE_IN_ERLE_FLOOR_DB = 6.0
+#: V03 由 6.0 → 20.0（见 ``docs/design/GH-6.md`` §4）：AEC3 两次真实录音的 P10 是
+#: +31.2 / +32.0 dB。20 dB 比 P10 低约 11 dB，仍能接纳实时抖动的较差帧；而 6 dB 会把
+#: 「几乎没压」的样本当成可用判据，在换 AEC3 后放进假收敛帧。**方向仍是保守**：
+#: 低于底线 → ``no_erle`` → 不打断。
+#:
+#: 注意：agentd 审批 settle 的 ``ECHO_ERLE_MAX_DB`` 仍是 6 dB，语义不同（那句话是不是
+#: 回声），不随本常量变化。
+BARGE_IN_ERLE_FLOOR_DB = 20.0
 
 #: ``aec_echo_probe`` 的 ERLE 事实最多可用多久（ms）。更早的探测属于上一轮播报，
 #: 拿来判本轮的打断会误伤。
 BARGE_IN_ERLE_MAX_AGE_MS = 1000
 
 #: 默认 ``erle_margin``（dB）：AEC 回声残余相对本底的最大值 + 安全余量。
-#: 取自 ``eval/r14-voice-bringup-2026-10-24.md`` §5.6 的 VPIO 实测（最坏 +26.9 dB）
-#: 再加约 3 dB。V03 换成 AEC3 后应把它收窄（见 ``docs/design/GH-5.md`` §4.1）。
-DEFAULT_BARGE_IN_ERLE_MARGIN_DB = 30.0
+#:
+#: V03 由 30.0 → 15.0（推导见 ``docs/design/GH-6.md`` §4）：无 AEC 回声的 P90 是
+#: +38.5 dB 相对本底，AEC3 的 P10 ERLE 是 +31.2 dB，两者相减得到差侧回声残余约
+#: +7.3 dB，再加约 8 dB 安全余量。旧值 30 来自 VPIO 最坏 +26.9 dB + 3 dB。
+#:
+#: **这是离线证据支持的暂定值**：r2 的最坏单窗只有 +9.7 dB ERLE，说明个别窗仍可能
+#: 需要 30 dB。真机 30 分钟 0 误触发（GH-6 判据 3）未验证；若出现自听误触发，
+#: 按设计文档回退到 30 dB，而不是继续压门限。
+DEFAULT_BARGE_IN_ERLE_MARGIN_DB = 15.0
 
 
 @dataclass
@@ -83,6 +92,10 @@ class Response:
     chunks: int = 0
     played: int = 0
     started_chunks: set[int] = field(default_factory=set)
+    #: 收到 ``tts_chunk_finished`` 的块数。打断对账的 ``finished_n`` 就是它。
+    finished_chunks: int = 0
+    #: 有界队列因满或取消而未播出的块数（桥上报，可选）。
+    dropped: int = 0
     cancelled: bool = False
 
 
@@ -293,6 +306,25 @@ class AudioRuntime:
         if bridge is not None and bridge.ready():
             bridge.send({"cmd": "stop_speak", "reason": reason}, best_effort=True)
 
+    def abort_speaking(self, *, response_id: str | None = None, reason: str = "user_cancel") -> bool:
+        """``POST /v1/speech/abort`` 的落点：中止播报，**无活动播报时幂等**。
+
+        返回是否真的中止了一轮。与 :meth:`abort_response` 的区别只在语义：
+        本方法是用户显式的「停止播报」（``user_cancel``），而 ``abort_response`` 还被
+        ``robot_stop`` / barge-in 复用。``response_id`` 给了就只停对应那一轮，
+        不匹配时不误伤别的播报。无活动播报时仍尽力通知桥清队列，但不算中止。
+        """
+        with self._lock:
+            resp = self.response
+        if resp is None:
+            if response_id is None:
+                self.cancel_speaking(reason)
+            return False
+        if response_id is not None and response_id != resp.response_id:
+            return False
+        self.abort_response(reason)
+        return True
+
     def abort_response(self, reason: str = "stop") -> None:
         """**本地立即中止**当前播报，并发出 ``speech.tts_cancelled``。
 
@@ -309,7 +341,12 @@ class AudioRuntime:
             return
         self._emit(
             "speech.tts_cancelled",
-            self._response_payload(resp, reason=reason, played=resp.played),
+            self._response_payload(
+                resp,
+                reason=reason,
+                played=self._bounded_played(resp, resp.played),
+                **({"dropped": resp.dropped} if resp.dropped else {}),
+            ),
         )
         if self.on_response_done is not None:
             self.on_response_done(resp, "cancelled")
@@ -404,6 +441,14 @@ class AudioRuntime:
             return
         if name == "tts_chunk_finished":
             self._tts_chunk(ev, started=False)
+            return
+        if name == "tts_chunk_dropped":
+            # 桥的有界队列丢弃事实。契约不新增事件类型，只在 ``speech.tts_cancelled``
+            # / ``tts_finished`` 里带 ``dropped``；这里只累计，不伪造播报事件。
+            with self._lock:
+                resp = self.response
+                if resp is not None:
+                    resp.dropped += 1
             return
         if name in {"tts_finished", "tts_cancelled"}:
             self._tts_done(ev, cancelled=(name == "tts_cancelled"))
@@ -624,7 +669,8 @@ class AudioRuntime:
         if started:
             resp.started_chunks.add(index)
         else:
-            resp.played += 1
+            resp.finished_chunks += 1
+            resp.played = self._bounded_played(resp, resp.finished_chunks)
         self._emit(
             "speech.tts_chunk_started" if started else "speech.tts_chunk_finished",
             {"response_id": resp.response_id, "index": index},
@@ -639,15 +685,25 @@ class AudioRuntime:
         # 桥会自报 chunks/played；以桥为准（它才是数了句数的那一方）。
         chunks = int(ev.get("chunks") or resp.chunks)
         played = int(ev.get("played") if ev.get("played") is not None else resp.played)
+        dropped = int(ev.get("dropped") or resp.dropped or 0)
+        resp.chunks = chunks or resp.chunks
+        resp.dropped = dropped
+        played = self._bounded_played(resp, played)
+        extra: dict[str, Any] = {"dropped": dropped} if dropped else {}
         if cancelled:
             self._emit(
                 "speech.tts_cancelled",
-                self._response_payload(resp, reason=str(ev.get("reason") or "interrupted"), played=played),
+                self._response_payload(
+                    resp,
+                    reason=str(ev.get("reason") or "interrupted"),
+                    played=played,
+                    **extra,
+                ),
             )
         else:
             self._emit(
                 "speech.tts_finished",
-                self._response_payload(resp, chunks=chunks, played=played),
+                self._response_payload(resp, chunks=chunks, played=played, **extra),
             )
         if self.on_response_done is not None:
             self.on_response_done(resp, "cancelled" if cancelled else "completed")
@@ -673,7 +729,12 @@ class AudioRuntime:
         if resp is not None:
             self._emit(
                 "speech.tts_cancelled",
-                self._response_payload(resp, reason="bridge_exit", played=resp.played),
+                self._response_payload(
+                    resp,
+                    reason="bridge_exit",
+                    played=self._bounded_played(resp, resp.played),
+                    **({"dropped": resp.dropped} if resp.dropped else {}),
+                ),
             )
             if self.on_response_done is not None:
                 self.on_response_done(resp, "failed")
@@ -694,6 +755,19 @@ class AudioRuntime:
         if resp.kind:
             payload["kind"] = resp.kind
         return payload
+
+    @staticmethod
+    def _bounded_played(resp: Response, played: int) -> int:
+        """``played ≤ chunks``：播出去的不可能多于计划的。
+
+        ``chunks`` 未知（桥没报）时只保证非负；已知时截到计划句数。这不是掩盖桥的
+         bug——超出的部分会在 ``finished_chunks > chunks`` 时暴露给测试与 eval，
+        事件里则不伪造「多播了一句」。
+        """
+        value = max(0, int(played))
+        if resp.chunks > 0:
+            return min(value, resp.chunks)
+        return value
 
     def _last_error(self) -> str:
         bridge = self.bridge

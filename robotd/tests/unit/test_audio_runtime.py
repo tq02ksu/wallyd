@@ -241,11 +241,11 @@ def test_engine_unavailable_is_a_failure_not_no_speech():
 
 
 # ---------------------------------------------------------------- 播报期 VAD 门控（GH-5 / V02）
-#: 测试用的标定值：本底 -40 dB、说话门限 -32 dB。默认 erle_margin=30 时
-#: ``speech_db_barge_in = max(-40+30, -32) = -10 dB``。
+#: 测试用的标定值：本底 -40 dB、说话门限 -32 dB。默认 erle_margin=15 时
+#: ``speech_db_barge_in = max(-40+15, -32) = -25 dB``。
 AMBIENT_DB = -40.0
 SPEECH_DB = -32.0
-BARGE_IN_THRESHOLD_DB = AMBIENT_DB + 30.0
+BARGE_IN_THRESHOLD_DB = AMBIENT_DB + 15.0
 
 
 def calibrate(rt: AudioRuntime, *, ambient: float = AMBIENT_DB, speech: float = SPEECH_DB) -> None:
@@ -254,7 +254,7 @@ def calibrate(rt: AudioRuntime, *, ambient: float = AMBIENT_DB, speech: float = 
     )
 
 
-def probe_erle(rt: AudioRuntime, *, erle: float = 12.0, render: float = -10.0) -> None:
+def probe_erle(rt: AudioRuntime, *, erle: float = 32.0, render: float = -10.0) -> None:
     rt.handle_bridge_event({"ev": "aec_echo_probe", "aec_erle_db": erle, "render_db": render})
 
 
@@ -282,7 +282,7 @@ def test_barge_in_passes_when_user_speech_exceeds_threshold():
     rt.on_response_done = lambda _resp, outcome: done.append(outcome)
     calibrate(rt)
     start_speaking(rt)
-    probe_erle(rt, erle=12.0, render=-10.0)
+    probe_erle(rt, erle=32.0, render=-10.0)
 
     vad_rise(rt, db=-5.0)
 
@@ -290,7 +290,7 @@ def test_barge_in_passes_when_user_speech_exceeds_threshold():
     assert gate["decision"] == "pass"
     assert gate["reason"] == "barge_in"
     assert gate["db"] == -5.0
-    assert gate["aec_erle_db"] == 12.0
+    assert gate["aec_erle_db"] == 32.0
     assert gate["threshold_db"] == BARGE_IN_THRESHOLD_DB
 
     # 事实先到、ready 后到：运行时必须认领这一轮，而不是把它丢掉
@@ -317,10 +317,10 @@ def test_barge_in_suppressed_for_self_echo():
     rt, emitted = make_runtime()
     calibrate(rt)
     started_resp = start_speaking(rt)
-    probe_erle(rt, erle=12.0, render=-10.0)
+    probe_erle(rt, erle=32.0, render=-10.0)
 
-    # 回声残余（本底 +19.2 dB ≈ -20.8）落在门限之下
-    vad_rise(rt, db=-22.0)
+    # 回声残余（本底 +19.2 dB ≈ -20.8，加余量后仍在 -25 门限之上）
+    vad_rise(rt, db=-30.0)
 
     gate = gates(emitted)[-1]
     assert gate["decision"] == "suppressed"
@@ -461,7 +461,7 @@ def test_every_vad_rise_emits_a_gate():
     calibrate(rt)
     start_speaking(rt)
     probe_erle(rt)
-    vad_rise(rt, utterance_id="utt-auto-1", db=-22.0)  # echo → suppressed
+    vad_rise(rt, utterance_id="utt-auto-1", db=-30.0)  # echo → suppressed
     rt.handle_bridge_event({"ev": "final", "utterance_id": "utt-auto-1", "text": "", "no_speech": True})
     vad_rise(rt, utterance_id="utt-auto-2", db=-5.0)  # user → pass
 
@@ -484,3 +484,75 @@ def test_approval_repeat_barge_in_cancels_without_tts_finished():
     assert cancelled[0]["approval_id"] == "appr-1"
     assert cancelled[0]["kind"] == "approval_repeat"
     assert not [p for t, p in emitted if t == "speech.tts_finished"]
+
+
+# ---------------------------------------------------------------- 显式停止播报（GH-6）
+def test_speech_abort_without_active_playback_is_idempotent():
+    """判据 5：无活动播报时也返回「已受理」，连说两次「停」不会 404。"""
+    rt, emitted = make_runtime()
+
+    assert rt.abort_speaking(reason="user_cancel") is False
+    assert rt.abort_speaking(reason="user_cancel") is False
+
+    # 没有播报对象就没有 tts_cancelled：不伪造一轮从来没开始的播报。
+    assert not [p for t, p in emitted if t == "speech.tts_cancelled"]
+
+
+def test_speech_abort_stops_only_the_matching_response_id():
+    rt, emitted = make_runtime()
+    resp = start_speaking(rt, approval_id="appr-1", kind="approval_repeat")
+
+    assert rt.abort_speaking(response_id="tts-other", reason="user_cancel") is False
+    assert rt.response is resp
+    assert not [p for t, p in emitted if t == "speech.tts_cancelled"]
+
+    assert rt.abort_speaking(response_id=resp.response_id, reason="user_cancel") is True
+    cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"]
+    assert len(cancelled) == 1
+    # 判据：barge_in 与 user_cancel 必须能区分（同一事件、不同 reason）。
+    assert cancelled[0]["reason"] == "user_cancel"
+    assert rt.response is None
+
+
+def test_barge_in_counting_is_self_consistent():
+    """判据 2：played ≤ chunks，finished_n ≤ started_n ≤ chunks，且 played ≤ finished_n。"""
+    rt, emitted = make_runtime()
+    resp = start_speaking(rt)
+    assert resp.chunks == 2
+
+    # 第 0 块完成合成并播出；第 1 块还在飞。
+    rt.handle_bridge_event({"ev": "tts_chunk_started", "index": 0})
+    rt.handle_bridge_event({"ev": "tts_chunk_finished", "index": 0})
+    rt.handle_bridge_event({"ev": "tts_chunk_started", "index": 1})
+
+    calibrate(rt)
+    probe_erle(rt)
+    vad_rise(rt, db=-5.0)
+
+    chunks = [p for t, p in emitted if t == "speech.tts_started"][-1]["chunks"]
+    cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"][-1]
+    started_n = len([p for t, p in emitted if t == "speech.tts_chunk_started"])
+    finished_n = len([p for t, p in emitted if t == "speech.tts_chunk_finished"])
+    played = cancelled["played"]
+
+    assert cancelled["reason"] == "barge_in"
+    assert played <= chunks
+    assert finished_n <= started_n <= chunks
+    assert played <= finished_n
+    assert (played, finished_n, started_n, chunks) == (1, 1, 2, 2)
+
+
+def test_bridge_dropped_is_carried_on_cancelled_without_new_event_type():
+    rt, emitted = make_runtime()
+    start_speaking(rt)
+    rt.handle_bridge_event({"ev": "tts_chunk_started", "index": 0})
+    rt.handle_bridge_event({"ev": "tts_chunk_finished", "index": 0})
+    # 桥的有界队列丢弃事实：契约不新增事件类型，只累计到 cancelled.dropped。
+    rt.handle_bridge_event({"ev": "tts_chunk_dropped", "index": 1, "reason": "queue_full"})
+
+    rt.abort_speaking(reason="user_cancel")
+
+    cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"][-1]
+    assert cancelled["played"] == 1
+    assert cancelled["dropped"] == 1
+    assert not [t for t, _p in emitted if t == "speech.tts_chunk_dropped"]

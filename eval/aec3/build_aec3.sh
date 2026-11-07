@@ -4,7 +4,8 @@
 # 为什么不用 CMake：本机没装 cmake/ninja，而 CMakeLists 只是「收集所有 src/*.cc 加一组 include
 # 路径」，逻辑很简单，直接用 clang 复刻即可，避免为了一个实验引入构建系统依赖。
 #
-# 源码：work/refs/webrtc-aec3（Enaium/webrtc-aec3，从 WebRTC 提取的独立 AEC3）
+# 源码：third_party/webrtc-aec3（Enaium/webrtc-aec3，从 WebRTC 提取的独立 AEC3，MIT）
+#       入库方式：sh scripts/vendor-aec3.sh <commit-or-tag>
 # 许可证：MIT
 #
 # 排除项与 CMakeLists 一致：
@@ -15,11 +16,19 @@
 set -eu
 
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
-SRC=$HERE/work/refs/webrtc-aec3
+# 优先用**入库**源码，保证别人 clone 下来就能构建；work/ 只保留作本地离线实验回退。
+SRC=${AEC3_SRC:-$HERE/third_party/webrtc-aec3}
+if [ ! -d "$SRC/src" ] && [ -d "$HERE/work/refs/webrtc-aec3/src" ]; then
+    SRC=$HERE/work/refs/webrtc-aec3
+fi
 OUT=$HERE/work/verify/build
 mkdir -p "$OUT/obj"
 
-[ -d "$SRC/src" ] || { echo "缺源码：$SRC（git clone Enaium/webrtc-aec3）"; exit 1; }
+[ -d "$SRC/src" ] || {
+    echo "缺源码：$SRC" >&2
+    echo "先运行：sh scripts/vendor-aec3.sh <commit-or-tag>（需要网络）" >&2
+    exit 1
+}
 
 INC="-I$SRC/src -I$SRC/src/api -I$SRC/src/base/rtc_base -I$SRC/src/base \
  -I$SRC/src/base/system_wrappers/include -I$SRC/src/audio_processing \
