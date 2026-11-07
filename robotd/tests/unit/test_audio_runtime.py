@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from robotd.core.announce import render_announcement
 from robotd.core.audio_runtime import AudioRuntime
 from robotd.core.types import DeviceStatus
 
@@ -79,6 +80,56 @@ def test_mute_cancels_utterance_in_flight():
     assert finals[0]["stop_reason"] == "muted"
     assert finals[0]["no_speech"] is False
     assert rt.utt is None
+
+
+# ---------------------------------------------------------------- 系统播报
+def test_announcement_render_uses_fixed_template():
+    text = render_announcement(
+        kind="approval_repeat",
+        action_label="向前跟随",
+        args_summary="目标：穿红衣服的人",
+    )
+    assert "向前跟随" in text
+    assert "目标：穿红衣服的人" in text
+    assert "确认" in text
+    with pytest.raises(ValueError):
+        render_announcement(kind="free_speech", action_label="x", args_summary="y")
+
+
+def test_announcement_events_carry_approval_id_and_complete_only_on_bridge_finish():
+    rt, emitted = make_runtime()
+    resp = rt.new_response(task_id="t-ann", approval_id="appr-1", kind="approval_repeat")
+    rt.speak(resp, text=render_announcement(kind="approval_repeat", action_label="向前", args_summary="两米"))
+
+    # 「请求发出去了」不等于「播完了」：在桥报 tts_finished 之前没有完成事件
+    assert not [e for e in emitted if e[0] == "speech.tts_finished"]
+
+    rt.handle_bridge_event({"ev": "tts_started", "chunks": 1})
+    started = [p for t, p in emitted if t == "speech.tts_started"][-1]
+    assert started["approval_id"] == "appr-1"
+    assert started["kind"] == "approval_repeat"
+
+    rt.handle_bridge_event({"ev": "tts_finished", "chunks": 1, "played": 1})
+    finished = [p for t, p in emitted if t == "speech.tts_finished"][-1]
+    assert finished["approval_id"] == "appr-1"
+    assert finished["kind"] == "approval_repeat"
+    assert finished["task_id"] == "t-ann"
+    assert finished["played"] == 1
+
+
+def test_abort_response_emits_cancelled_immediately_and_clears_active_response():
+    rt, emitted = make_runtime()
+    resp = rt.new_response(task_id="t-ann", approval_id="appr-2", kind="approval_repeat")
+    rt.speak(resp, text="固定模板")
+
+    rt.abort_response("stop")
+
+    assert rt.response is None
+    assert any(c.get("cmd") == "stop_speak" for c in rt.bridge.sent)
+    cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"]
+    assert len(cancelled) == 1
+    assert cancelled[0]["approval_id"] == "appr-2"
+    assert cancelled[0]["reason"] == "stop"
 
 
 # ---------------------------------------------------------------- 桥不可用

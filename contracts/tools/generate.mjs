@@ -121,7 +121,8 @@ for (const [route, item] of Object.entries(spec.paths ?? {})) {
   for (const method of ['get', 'post', 'delete', 'put', 'patch']) {
     const op = item[method];
     if (!op) continue;
-    if ((op.tags ?? []).includes('debug') || op['x-websocket']) continue;
+    // 系统路径（审批复述等）不是 Agent 可调用的能力：显式排除，而不是靠调用方自觉。
+    if ((op.tags ?? []).includes('debug') || op['x-websocket'] || op['x-mcp-exclude'] === true) continue;
     const name = op.operationId ?? `${method}_${route.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
     tools.push({
       name,

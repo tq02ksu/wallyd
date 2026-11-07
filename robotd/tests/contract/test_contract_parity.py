@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from robotd.api.http import build_routes
 from robotd.capabilities import Implementation, Registry
 from robotd.core.errors import ErrorCode, RobotdError, http_status_for
 from robotd.core.types import TaskState
@@ -78,11 +79,32 @@ def test_mcp_tool_face_matches_contract_tools(tools):
     """MCP 工具面由契约投影，不由内部能力表决定。"""
     registry = Registry()
     public_names = {cap.public_name for cap in registry.all() if cap.public_name}
-    assert public_names - {"events_subscribe"} == {tool["name"] for tool in tools}
+    # 系统路径（robot_announce）也在能力表里，但显式排除出 Agent 工具面。
+    assert public_names - {"events_subscribe", "robot_announce"} == {tool["name"] for tool in tools}
     # debug 与 websocket 必须被排除
     names = {t["name"] for t in tools}
     assert "debug_serial" not in names
     assert "events_subscribe" not in names
+    assert "robot_announce" not in names
+    assert len(tools) == 14, f"MCP 工具面必须保持 14 项，实际 {len(tools)}"
+
+
+def test_robot_announce_is_contract_declared_system_path(spec, tools):
+    """审批复述必须有一条契约可见、免审批、且不在 Agent 工具面的路径。"""
+    operation = spec["paths"]["/v1/robot/announce"]["post"]
+    assert operation["operationId"] == "robot_announce"
+    assert operation.get("x-requires-approval") is not True
+    assert operation.get("x-mcp-exclude") is True
+    assert "robot_announce" not in {t["name"] for t in tools}
+
+    speak = next(t for t in tools if t["name"] == "robot_speak")
+    assert speak["requiresApproval"] is True
+    assert "text" in speak["inputSchema"]["properties"]
+
+    announce_body = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    schema = spec["components"]["schemas"][announce_body.rsplit("/", 1)[-1]]
+    assert "text" not in schema["properties"], "系统播报不得接受任意自由文本"
+    assert schema.get("additionalProperties") is False
 
 
 def test_no_hardware_primitives_in_public_tools(tools):
@@ -101,6 +123,35 @@ def test_approval_flags_in_contract_are_reflected_in_capabilities(spec):
                 continue
             cap = registry.by_public_name(operation["operationId"])
             assert cap.requires_approval is operation.get("x-requires-approval", False)
+
+
+def test_approval_flags_in_contract_are_reflected_in_routes(spec):
+    """契约的审批声明必须落到**路由表**上，而不是只落在能力注册表里。
+
+    审批门（ISSUE-B / #18）读的是 ``Route.requires_approval``：如果某条路由把
+    ``robot_announce`` 误标成需审批，审批复述就会重新变成「审批里再审批」；
+    反过来把 ``robot_speak`` 标成免审批，等于给任意调用方开一个后门。
+    直接比对 ``build_routes()``，不依赖起监听 socket，也不会因为能力表被改而漏检。
+    """
+    declared: dict[str, bool] = {}
+    for item in spec["paths"].values():
+        for method in ("get", "post", "put", "delete", "patch"):
+            operation = item.get(method)
+            if not operation or "debug" in operation.get("tags", []):
+                continue
+            declared[operation["operationId"]] = bool(operation.get("x-requires-approval", False))
+
+    routed = {r.operation_id: r.requires_approval for r in build_routes(debug=False)}
+    assert routed.keys() == (declared.keys() - {"events_subscribe"})
+    mismatched = {
+        op: (routed[op], flag) for op, flag in declared.items() if op in routed and routed[op] is not flag
+    }
+    assert not mismatched, f"路由的 requires_approval 与契约不一致：{mismatched}"
+
+    announce = next(r for r in build_routes(debug=False) if r.operation_id == "robot_announce")
+    assert announce.method == "POST"
+    assert announce.template == "/v1/robot/announce"
+    assert announce.requires_approval is False
 
 
 def test_task_state_enum_matches_implementation(spec):

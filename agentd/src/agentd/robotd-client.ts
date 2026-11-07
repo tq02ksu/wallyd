@@ -123,6 +123,22 @@ export interface StopResult {
   stopped_tasks: number;
 }
 
+export interface AnnounceInput {
+  approval_id: string;
+  kind: 'approval_repeat';
+  action_label: string;
+  args_summary: string;
+}
+
+export interface AnnounceAccepted {
+  task_id: string;
+  status: 'accepted';
+  approval_id: string;
+  kind: 'approval_repeat';
+  /** robotd 实际交给 TTS 的固定模板句子，供审计与界面展示。 */
+  text: string;
+}
+
 interface ObservationMeta {
   observed_at: string;
   instance_id: string | null;
@@ -342,6 +358,16 @@ export class RobotdClient {
    */
   async stop(reason = 'api'): Promise<StopResult> {
     return (await this.request('POST', '/v1/robot/stop', { reason }, 6000)) as StopResult;
+  }
+
+  // ---------------------------------------------------------------- 系统播报
+  /**
+   * 审批复述的系统播报。**不走 MCP 能力面、不走审批门**——它不是 Agent 工具。
+   *
+   * 返回只表示 robotd 已受理；真正「播完了」由 `speech.tts_finished` 事件给出。
+   */
+  async announce(input: AnnounceInput): Promise<AnnounceAccepted> {
+    return (await this.request('POST', '/v1/robot/announce', input)) as AnnounceAccepted;
   }
 
   // ---------------------------------------------------------------- 能力调用
