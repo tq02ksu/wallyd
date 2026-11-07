@@ -9,6 +9,7 @@
  * - `--allow-manual-approve` 是唯一的测试开关，且会在 `/healthz` 与总览里显式标出。
  */
 import process from 'node:process';
+import { ensureApprovalSigningKey } from './approval-key.ts';
 import { createRuntime, defaultConfig, makeLogger, type AgentdConfig } from './service.ts';
 
 function parseArgs(argv: string[]): AgentdConfig {
@@ -90,6 +91,13 @@ async function main(): Promise<void> {
   }
 
   const log = makeLogger(config.logLevel);
+
+  // 共享审批秘密的信任根：首次启动自动生成，无需任何人工初始化。
+  // robotd 可能先于 agentd 启动；它每次请求重读该文件，所以这里晚一步也不影响。
+  const approvalKey = ensureApprovalSigningKey();
+  log(approvalKey.created ? '审批验签秘密已生成' : '审批验签秘密已就绪', {
+    path: approvalKey.path,
+  });
 
   if (config.allowManualApprove) {
     log('WARNING: 测试模式已开启（allow_manual_approve）。生产运行时不得开启。');

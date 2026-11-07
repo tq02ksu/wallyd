@@ -133,10 +133,12 @@ def test_stop_is_idempotent_and_requires_no_approval(live):
 
 def test_unimplemented_capability_returns_503_with_reason(live):
     _app, port = live
-    status, body, _ = call(port, "POST", "/v1/robot/follow", {"target": "穿红衣服的人"})
+    # 用免审批的标定读取端点：审批端点在无凭据时先 403（GH-18），
+    # 「未实现 → 503」这条语义由不需要审批的路径来验证。
+    status, body, _ = call(port, "GET", "/v1/robot/odometry/calibration")
     assert status == 503, "未实现能力必须 503，不能 200 假装受理"
     assert body["error"]["code"] == "E_UNAVAILABLE"
-    assert body["error"]["details"]["capability"] == "robot.follow"
+    assert body["error"]["details"]["capability"] == "robot.calibration.get"
 
 
 def test_unknown_field_rejected(live):

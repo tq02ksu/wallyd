@@ -86,6 +86,7 @@
 
 - [GH-4 语音桥双管道设计](design/GH-4.md) - 拾音（采集→VAD→ASR）与出话（分句→合成→有界队列→渲染）拆分及可替换 engine 边界
 - [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
+- [GH-18 审批拒绝侧设计](design/GH-18.md) - `X-Wally-Approval` 一次性凭据、共享秘密与已消费 nonce 账本
 - [GH-19：审批复述的系统播报路径](design/GH-19.md) - `robot_announce` 的契约、事件与确认窗口时序
 
 ## 8. 实测与评测（有时效）

@@ -29,7 +29,8 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 from xml.sax.saxutils import escape as _xml_escape  # noqa: F401 - 保留给将来的 HTML 错误页
 
-from ..app import App
+from ..approval import CREDENTIAL_HEADER, enforce_approval
+from ..app import App, resolve_work_dir
 from ..core.announce import APPROVAL_REPEAT, render_announcement
 from ..core.errors import ErrorCode, RobotdError, wrap_unexpected
 from ..core.types import Exclusivity, TaskError, TaskState
@@ -159,6 +160,29 @@ def _call_capability(app: App, name: str, fn: Callable[[Any], Any]) -> Any:
     cap = app.registry.get(name)
     cap.check_available()
     return fn(cap)
+
+
+def _enforce_approval(ctx: RouteContext, route: Route) -> None:
+    """审批门：``Route.requires_approval`` 唯一的读取点。
+
+    能力名与「必须绑定的参数」都来自能力表（它已由契约一致性测试锁住）；
+    秘密与已消费 nonce 的路径分别由 :mod:`robotd.approval` 解析。
+    **``--debug`` 不改变这条判断**：调试旁路只多开 ``/v1/debug/*``。
+    """
+    cap = ctx.app.registry.by_public_name(route.operation_id)
+    enforce_approval(
+        header_value=_credential_header(ctx.handler),
+        capability=route.operation_id,
+        approval_params=cap.approval_params,
+        body=ctx.body,
+        work_dir=resolve_work_dir(ctx.app.config),
+    )
+
+
+def _credential_header(handler: BaseHTTPRequestHandler | None) -> str | None:
+    if handler is None:
+        return None
+    return handler.headers.get(CREDENTIAL_HEADER)
 
 
 # ===================================================================== 处理函数
@@ -710,6 +734,8 @@ class _RobotdHandler(BaseHTTPRequestHandler):
                 body=body,
                 handler=self,
             )
+            if route.requires_approval:
+                _enforce_approval(ctx, route)
             result = route.fn(ctx)
             self._write_json(200, result)
         except RobotdError as err:

@@ -50,3 +50,18 @@ export function codexHomePath(): string {
 export function agentdDataDir(): string {
   return path.join(appDataRoot(), 'robot', 'agentd');
 }
+
+/**
+ * 两进程共享的审批验签秘密（HMAC key）。
+ *
+ * 由 agentd 首次启动时自动生成，robotd 每次需审批请求重读同一个文件。
+ * 位置与 `agentdDataDir()` 一致，但**不放**项目内的 `work/`：`work/` 是可清理的
+ * 运行产物目录，秘密跟着被清掉会让所有审批凭据突然验签失败。
+ *
+ * `WALLY_APP_DATA_DIR` 只用于测试隔离或显式布局；robotd 侧同名读取。
+ */
+export function approvalSecretPath(): string {
+  const override = process.env.WALLY_APP_DATA_DIR;
+  const root = override && override.length > 0 ? path.resolve(override) : appDataRoot();
+  return path.join(root, 'robot', 'agentd', 'approval-signing-key');
+}
