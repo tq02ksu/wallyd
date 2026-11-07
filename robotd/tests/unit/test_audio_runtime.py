@@ -82,21 +82,6 @@ def test_mute_cancels_utterance_in_flight():
     assert rt.utt is None
 
 
-# ---------------------------------------------------------------- 桥不可用
-def test_no_bridge_refuses_utterance():
-    rt, _ = make_runtime()
-    rt.detach()
-    with pytest.raises(RuntimeError, match="语音桥不可用"):
-        rt.new_utterance(task_id="t-4")
-
-
-def test_bridge_not_ready_refuses_utterance():
-    rt = AudioRuntime(emit=lambda t, p: None)
-    rt.attach(FakeBridge(ready=False))
-    with pytest.raises(RuntimeError, match="语音桥不可用"):
-        rt.new_utterance(task_id="t-5")
-
-
 # ---------------------------------------------------------------- 系统播报
 def test_announcement_render_uses_fixed_template():
     text = render_announcement(
@@ -145,6 +130,20 @@ def test_abort_response_emits_cancelled_immediately_and_clears_active_response()
     assert len(cancelled) == 1
     assert cancelled[0]["approval_id"] == "appr-2"
     assert cancelled[0]["reason"] == "stop"
+
+# ---------------------------------------------------------------- 桥不可用
+def test_no_bridge_refuses_utterance():
+    rt, _ = make_runtime()
+    rt.detach()
+    with pytest.raises(RuntimeError, match="语音桥不可用"):
+        rt.new_utterance(task_id="t-4")
+
+
+def test_bridge_not_ready_refuses_utterance():
+    rt = AudioRuntime(emit=lambda t, p: None)
+    rt.attach(FakeBridge(ready=False))
+    with pytest.raises(RuntimeError, match="语音桥不可用"):
+        rt.new_utterance(task_id="t-5")
 
 
 # ---------------------------------------------------------------- 常听自动轮次
