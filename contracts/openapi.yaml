@@ -35,6 +35,14 @@ info:
 
     可执行实现：`contracts/tools/approval-digest.mjs` 与
     `robotd/src/robotd/approval_digest.py`。
+
+    ## 一次性授权凭据的传输
+
+    需审批的端点要求请求头 `X-Wally-Approval`（见 `components.parameters.ApprovalCredential`）。
+    凭据由 agentd 在用户语音确认后签发，robotd 只做**拒绝侧**校验：验签、capability 对齐、
+    复算 `args_digest`、有效期、nonce 一次性。没有有效凭据一律 `403` + `E_APPROVAL`；
+    `robot_stop` 是安全旁路，不需要凭据。凭据格式与共享秘密位置见
+    [`docs/design/GH-18.md`](../docs/design/GH-18.md)。
 servers:
   # 端口由启动配置（--http / ROBOTD_HTTP_PORT）决定，默认 8787；此处只示意回环地址，
   # 不要把某个具体端口写死成契约的一部分（robotd 只绑 127.0.0.1，不监听 0.0.0.0）。
@@ -113,6 +121,8 @@ paths:
       operationId: robot_calibration_set
       x-requires-approval:
         params: [steps_per_m, wheelbase_mm]
+      parameters:
+        - $ref: "#/components/parameters/ApprovalCredential"
       tags: [robot]
       summary: 设置标定参数并下发到板侧（无需重刷固件）
       requestBody:
@@ -139,6 +149,8 @@ paths:
       operationId: robot_speak
       x-requires-approval:
         params: [text]
+      parameters:
+        - $ref: "#/components/parameters/ApprovalCredential"
       tags: [robot]
       summary: 请求机器人播报
       requestBody:
@@ -296,6 +308,8 @@ paths:
       operationId: robot_follow
       x-requires-approval:
         params: [target_track_id, target]
+      parameters:
+        - $ref: "#/components/parameters/ApprovalCredential"
       tags: [robot]
       summary: 跟随目标人物
       description: |
@@ -532,6 +546,19 @@ paths:
         "403":
           description: 调试旁路未开启
 components:
+  parameters:
+    ApprovalCredential:
+      name: X-Wally-Approval
+      in: header
+      required: true
+      description: |
+        agentd 在用户语音确认后签发的一次性授权凭据：
+        `<base64url(payload-json)>.<base64url(hmac-sha256(secret, payload-segment))>`。
+        robotd 校验签发者、capability、参数摘要、有效期与 nonce 未消费；
+        失败或缺失一律 `403` + `E_APPROVAL`。凭据与共享秘密格式见
+        `docs/design/GH-18.md`。
+      schema:
+        type: string
   schemas:
     Health:
       type: object

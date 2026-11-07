@@ -51,12 +51,15 @@ check('stop 幂等', stopAgain.ok === true);
 const tasks = await client.listTasks();
 check('listTasks 返回数组', Array.isArray(tasks));
 
-// 能力调用：follow 未实现应抛 E_UNAVAILABLE（503）
+// 能力调用：follow 需要 agentd 签发的一次性授权凭据（GH-18）。
+// 这个客户端不带凭据，所以必须在 robotd 侧被 403/E_APPROVAL 拦下——
+// 不能再像以前那样直接落到「未实现 → E_UNAVAILABLE」。
 try {
-  await client.callCapability('robot_follow', { target_x: 200, target_y: 0 });
-  console.log('  ..   robot_follow 返回成功（若已实现则正常）');
+  await client.callCapability('robot_follow', { target: '穿红衣服的人' });
+  check('robot_follow 无凭据必须被拒绝', false);
 } catch (e) {
   check('robot_follow 抛 RobotdCallError', e instanceof RobotdCallError, String(e));
+  check('robot_follow 无凭据为 E_APPROVAL/403', e.code === 'E_APPROVAL' && e.httpStatus === 403, `${e.code} ${e.httpStatus}`);
   console.log(`       code=${e.code} http=${e.httpStatus} msg=${e.message}`);
 }
 

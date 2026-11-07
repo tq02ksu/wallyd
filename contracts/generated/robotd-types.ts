@@ -727,7 +727,16 @@ export interface components {
         };
     };
     responses: never;
-    parameters: never;
+    parameters: {
+        /**
+         * @description agentd 在用户语音确认后签发的一次性授权凭据：
+         *     `<base64url(payload-json)>.<base64url(hmac-sha256(secret, payload-segment))>`。
+         *     robotd 校验签发者、capability、参数摘要、有效期与 nonce 未消费；
+         *     失败或缺失一律 `403` + `E_APPROVAL`。凭据与共享秘密格式见
+         *     `docs/design/GH-18.md`。
+         */
+        ApprovalCredential: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -797,7 +806,16 @@ export interface operations {
     robot_calibration_set: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                /**
+                 * @description agentd 在用户语音确认后签发的一次性授权凭据：
+                 *     `<base64url(payload-json)>.<base64url(hmac-sha256(secret, payload-segment))>`。
+                 *     robotd 校验签发者、capability、参数摘要、有效期与 nonce 未消费；
+                 *     失败或缺失一律 `403` + `E_APPROVAL`。凭据与共享秘密格式见
+                 *     `docs/design/GH-18.md`。
+                 */
+                "X-Wally-Approval": components["parameters"]["ApprovalCredential"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -830,7 +848,16 @@ export interface operations {
     robot_speak: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                /**
+                 * @description agentd 在用户语音确认后签发的一次性授权凭据：
+                 *     `<base64url(payload-json)>.<base64url(hmac-sha256(secret, payload-segment))>`。
+                 *     robotd 校验签发者、capability、参数摘要、有效期与 nonce 未消费；
+                 *     失败或缺失一律 `403` + `E_APPROVAL`。凭据与共享秘密格式见
+                 *     `docs/design/GH-18.md`。
+                 */
+                "X-Wally-Approval": components["parameters"]["ApprovalCredential"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -1034,7 +1061,16 @@ export interface operations {
     robot_follow: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                /**
+                 * @description agentd 在用户语音确认后签发的一次性授权凭据：
+                 *     `<base64url(payload-json)>.<base64url(hmac-sha256(secret, payload-segment))>`。
+                 *     robotd 校验签发者、capability、参数摘要、有效期与 nonce 未消费；
+                 *     失败或缺失一律 `403` + `E_APPROVAL`。凭据与共享秘密格式见
+                 *     `docs/design/GH-18.md`。
+                 */
+                "X-Wally-Approval": components["parameters"]["ApprovalCredential"];
+            };
             path?: never;
             cookie?: never;
         };
