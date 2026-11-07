@@ -60,6 +60,9 @@ for (const ev of events.events ?? []) {
   if (!/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(ev.type)) problems.push(`events.json: 事件名不合规 ${ev.type}`);
   if (seen.has(ev.type)) problems.push(`events.json: 事件重复登记 ${ev.type}`);
   seen.add(ev.type);
+  if ('no_state' in ev && typeof ev.no_state !== 'boolean') {
+    problems.push(`events.json: ${ev.type}.no_state 必须是布尔值`);
+  }
   if (!ev.payload) { problems.push(`events.json: ${ev.type} 缺 payload 定义`); continue; }
   if (ev.payload.$ref) {
     if (!spec.components?.schemas?.[ev.payload.$ref]) {
@@ -232,6 +235,8 @@ const eventIndex = {
     return {
       type: e.type,
       category: e.category,
+      // GH-20：「合法但只记日志」必须显式声明，不能靠 _reduce 末尾的 pass 分支隐式表达。
+      ...(e.no_state === true ? { no_state: true } : {}),
       payload_ref: ref ?? null,
       payload_fields: target
         ? Object.keys(target.properties ?? {})

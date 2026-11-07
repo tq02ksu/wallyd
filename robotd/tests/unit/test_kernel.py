@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from robotd.core.errors import ErrorCode, RobotdError
+from robotd.core.errors import ErrorCode, EventContractError, RobotdError
 from robotd.core.kernel import EventKernel, matches_filter
 from robotd.core.state import RobotStateStore
 from robotd.core.types import FORBIDDEN_PAYLOAD_KEYS, Exclusivity, TaskState
@@ -485,3 +485,71 @@ def test_state_rejected_has_no_payload_values():
         "reason": "reduce_failed",
     }
     assert "unplugged-secret-marker" not in str(record)
+
+
+# ---------------------------------------------------------------- 事件登记表（GH-20）
+def test_unregistered_event_rejected_without_side_effects():
+    """验收 1：拼错的事件名在分配序号之前就被拒绝，完全「没发生过」。"""
+    k = make_kernel()
+    pushed: list = []
+    k.subscribe(["*"], pushed.append)
+    before = k.snapshot()
+
+    with pytest.raises(EventContractError) as ei:
+        k.emit("device.recoverd", device="esp32")
+
+    assert ei.value.code is ErrorCode.VALIDATION
+    assert ei.value.to_public()["error"]["code"] == "E_VALIDATION"
+    assert k.last_seq == 0
+    assert len(k._log) == 0
+    assert pushed == []
+    assert k.resume("inst-test", 0) == ("ok", [])
+    # 这不是「归并拒绝」（状态迁移失败），而是一条根本不存在的事件：不留形状记录。
+    assert k.rejections() == []
+    assert state_fields(k.snapshot(), with_cursor=True) == state_fields(before, with_cursor=True)
+
+
+def test_typo_never_appears_in_resume_backlog():
+    """验收 4：补发窗口里不能留下拼错事件的残影（与验收 1 分开测）。"""
+    k = make_kernel()
+    first = k.emit("device.ready", device="esp32", firmware="poc-2.1")
+    with pytest.raises(EventContractError):
+        k.emit("device.recoverd", device="esp32")
+
+    assert k.last_seq == first.seq
+    assert len(k._log) == 1
+    assert k.resume("inst-test", first.seq) == ("ok", [])
+    verdict, replay = k.resume("inst-test", 0)
+    assert verdict == "ok"
+    assert [(ev.seq, ev.type) for ev in replay] == [(first.seq, "device.ready")]
+
+
+def test_publish_locked_rejects_unregistered_before_seq():
+    """内部发布口同样只接受登记过的事件，且失败不消耗序号。"""
+    k = make_kernel()
+    with pytest.raises(EventContractError) as ei:
+        k._publish_locked("device.recoverd", {})
+
+    assert ei.value.code is ErrorCode.VALIDATION
+    assert k.last_seq == 0
+    assert len(k._log) == 0
+
+
+def test_reserved_prefix_allows_unimplemented_surface_only():
+    """验收 5：预留面按 ``vision.`` 前缀放行，而不是按 ``vision`` 放行。"""
+    k = make_kernel()
+    ev = k.emit("vision.detected", {})
+    assert ev.type == "vision.detected"
+    assert ev.seq == 1
+
+    with pytest.raises(EventContractError):
+        k.emit("visionfoo.x", {})
+
+
+def test_debug_board_events_are_exact_names_not_prefix():
+    """``board.log`` 是精确名；``board.`` 不是通配前缀。"""
+    k = make_kernel()
+    assert [k.emit(name, line="rx").seq for name in ("board.log", "board.tx", "board.rx")] == [1, 2, 3]
+    with pytest.raises(EventContractError):
+        k.emit("board.anything", {})
+    assert k.last_seq == 3

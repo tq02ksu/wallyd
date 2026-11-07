@@ -42,6 +42,7 @@
     {
       "type": "task.started",
       "category": "task",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "task_id",
@@ -57,6 +58,7 @@
     {
       "type": "task.progress",
       "category": "task",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "task_id",
@@ -70,6 +72,7 @@
     {
       "type": "task.completed",
       "category": "task",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "task_id",
@@ -83,6 +86,7 @@
     {
       "type": "task.failed",
       "category": "task",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "task_id",
@@ -99,6 +103,7 @@
     {
       "type": "task.cancelled",
       "category": "task",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "task_id",
@@ -211,6 +216,7 @@
     {
       "type": "state.rejected",
       "category": "state",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "type",
@@ -226,6 +232,7 @@
     {
       "type": "audio.state",
       "category": "audio",
+      "no_state": true,
       "payload_ref": "AudioState",
       "payload_fields": [
         "mode",
@@ -251,6 +258,7 @@
     {
       "type": "speech.ready",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "task_id",
@@ -265,6 +273,7 @@
     {
       "type": "speech.started",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "utterance_id",
@@ -279,6 +288,7 @@
     {
       "type": "speech.speech_ended",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "utterance_id",
@@ -291,6 +301,7 @@
     {
       "type": "speech.partial",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "utterance_id",
@@ -306,6 +317,7 @@
     {
       "type": "speech.endpoint",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "utterance_id",
@@ -321,6 +333,7 @@
     {
       "type": "speech.final",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "utterance_id",
@@ -336,6 +349,7 @@
     {
       "type": "speech.interrupted",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "response_id",
@@ -350,6 +364,7 @@
     {
       "type": "speech.tts_started",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "response_id",
@@ -366,6 +381,7 @@
     {
       "type": "speech.tts_chunk_started",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "response_id",
@@ -379,6 +395,7 @@
     {
       "type": "speech.tts_chunk_finished",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "response_id",
@@ -392,6 +409,7 @@
     {
       "type": "speech.tts_finished",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "response_id",
@@ -408,6 +426,7 @@
     {
       "type": "speech.tts_cancelled",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "response_id",
@@ -425,6 +444,7 @@
     {
       "type": "speech.announce_failed",
       "category": "speech",
+      "no_state": true,
       "payload_ref": null,
       "payload_fields": [
         "approval_id",
