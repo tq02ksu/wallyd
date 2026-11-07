@@ -628,6 +628,10 @@ export interface components {
             capability: string;
             /** @description 规范化、脱敏后的参数摘要（用于复述与审计） */
             args_summary?: string;
+            /** @description 本次调用是否需要（且已经获得）语音审批 */
+            requires_approval?: boolean;
+            /** @description 绑定到本次调用的审批记录；批准只对原 capability 与原参数有效 */
+            approval_id?: string | null;
             /** @enum {string} */
             state: "requested" | "awaiting_approval" | "running" | "succeeded" | "failed" | "outcome_unknown" | "denied";
             robot_task_id?: string | null;
@@ -830,7 +834,7 @@ export interface components {
             capability: string;
             args_summary?: string;
             /** @enum {string} */
-            status: "persisted" | "announced" | "waiting" | "approved" | "denied" | "expired" | "cancelled";
+            status: "persisted" | "announced" | "waiting" | "approved" | "denied" | "timeout" | "cancelled";
             /** @description 系统播报的复述文本，与语音确认窗口绑定 */
             prompt_text?: string;
             /** Format: date-time */
@@ -1401,7 +1405,7 @@ export interface operations {
     agentd_list_approvals: {
         parameters: {
             query?: {
-                status?: "persisted" | "announced" | "waiting" | "approved" | "denied" | "expired" | "cancelled";
+                status?: "persisted" | "announced" | "waiting" | "approved" | "denied" | "timeout" | "cancelled";
                 limit?: components["parameters"]["Limit"];
             };
             header?: never;

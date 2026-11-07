@@ -26,6 +26,7 @@ import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
 import { codexHomePath } from './paths.ts';
 import { ApprovalAnnouncer } from './approval-announcer.ts';
+import { executeApprovedCapability } from './approval-executor.ts';
 import { FAST_RULES } from './router.ts';
 import {
   ApiError,
@@ -141,13 +142,17 @@ export async function createRuntime(
     log: (m, x) => log(m, x),
   });
   let announcerRef: ApprovalAnnouncer | null = null;
+  // 语音确认通道：桥收到 final 后交给 runs 做 settle。V04 落地后同一条入口继续扩展。
+  let approvalVoiceHandler:
+    | ((input: { utterance_id: string; text: string; started_at?: string; echo: boolean }) => void)
+    | null = null;
   const robotdBridge = new RobotdEventBridge({
     events,
     store,
     hooks: {
       log: (m, x) => log(m, x),
       onAnnouncementFinished: (outcome) => announcerRef?.onFinished(outcome),
-      // 路由（A11）尚未实现：这里明确不消费，避免让人以为已经接上路由。
+      onUtteranceHeard: (input) => approvalVoiceHandler?.(input),
     },
   });
   robotdEvents.on('event', (ev) => robotdBridge.handle(ev));
@@ -235,6 +240,32 @@ export async function createRuntime(
     noteSpeak: (taskId, text) => robotdBridge.noteSpeak(taskId, text),
   });
   announcerRef = approvalAnnouncer;
+
+  // 语音确认：只有存在待确认审批时才消费 final；其它语音留给 V04 的通用路由。
+  approvalVoiceHandler = (input) => {
+    const latest = runs.latestApprovalForVoice();
+    if (!latest) return;
+    const result = runs.settleApproval({
+      approvalId: latest.approval_id,
+      text: input.text,
+      utteranceId: input.utterance_id,
+      startedAt: input.started_at ?? null,
+      echo: input.echo,
+    });
+    if (result.outcome === 'approved' && result.run_id && result.capability) {
+      void executeApprovedCapability(
+        { runs, robotd, store, log },
+        {
+          approvalId: result.approval_id,
+          runId: result.run_id,
+          capability: result.capability,
+          args: result.args ?? {},
+          actionLabel: result.action_label ?? result.capability,
+        },
+      );
+    }
+  };
+
   const models = new ModelService({
     store,
     events,
@@ -267,11 +298,11 @@ export async function createRuntime(
       recovered_runs: rec.interrupted,
     },
   });
-  if (rec.interrupted > 0) {
+  if (rec.interrupted > 0 || rec.cancelledApprovals > 0) {
     events.emitStandalone({
       type: 'daemon.recovered',
       severity: 'warning',
-      params: { interrupted_runs: rec.interrupted, cancelled_approvals: 0 },
+      params: { interrupted_runs: rec.interrupted, cancelled_approvals: rec.cancelledApprovals },
     });
   }
 
@@ -688,7 +719,7 @@ export async function createRuntime(
           'waiting',
           'approved',
           'denied',
-          'expired',
+          'timeout',
           'cancelled',
         ] as const) ?? null;
       const where = status ? 'WHERE status = ?' : '';
@@ -727,6 +758,14 @@ export async function createRuntime(
       const { sameOrigin } = checkOrigin(req, router.config.allowedOrigins);
       const hit = router.match(req.method ?? 'GET', url.pathname);
 
+      // CORS 预检：只回允许的方法，不给通配。必须在 `!hit` 之前处理——
+      // OPTIONS 本身不是注册路由，否则会掉进 405/404 分支。
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, { allow: [...router.allowedMethods(url.pathname), 'OPTIONS'].join(', ') });
+        res.end();
+        return;
+      }
+
       if (!hit) {
         // 405 vs 404：同路径有其他方法就是 405，并给出 Allow
         const allowed = router.allowedMethods(url.pathname);
@@ -741,13 +780,6 @@ export async function createRuntime(
         }
         if (router.config.staticDir && serveStatic(res, router.config.staticDir, url.pathname, log)) return;
         throw new ApiError('E_NOT_FOUND', `资源不存在：${url.pathname}`);
-      }
-
-      // CORS 预检：只回允许的方法，不给通配
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204, { allow: [...router.allowedMethods(url.pathname), 'OPTIONS'].join(', ') });
-        res.end();
-        return;
       }
 
       if (hit.route.write) checkCsrf(req, csrfToken);
@@ -844,6 +876,7 @@ export async function createRuntime(
   robotdEvents.start();
 
   const close = async (): Promise<void> => {
+    runs.dispose();
     robotdEvents.stop();
     hub.shutdown();
     await new Promise<void>((resolve) => server.close(() => resolve()));

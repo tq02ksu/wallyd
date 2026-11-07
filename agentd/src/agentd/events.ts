@@ -167,7 +167,7 @@ function buildContext(params: Record<string, unknown>): Record<string, string> {
         ? '已确认'
         : decision === 'denied'
           ? '已拒绝'
-          : decision === 'expired'
+          : decision === 'expired' || decision === 'timeout'
             ? '已超时，未执行'
             : decision === 'cancelled'
               ? '已取消，未执行'

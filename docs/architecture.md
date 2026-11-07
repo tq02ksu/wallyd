@@ -889,11 +889,13 @@ MCP 工具携带 `approvalParams: string[]`（字段存在即需审批，`[]` �
    校验成功后才执行，并将结果回传。其他本地调用路径也不能绕过审批策略。
 5. robotd 执行结果及审批结论由各自 daemon 记录；审批历史归 agentd，机器人运行状态仍归 robotd。
 
-当前 POC 只实现了 MCP → `POST /api/approvals` → agentd 内存 `Map` → WS 调试页人工点击 → 批准后由 `robot-mcp`
-调用 robotd；这是临时开发/验证手段，不是正常业务审批实现。robotd 侧的**拒绝侧**已实现（#18）：
+审批请求（MCP 或快速路由）现在由 agentd `RunService` 持久化到 Store，经系统播报复述后在限时
+确认窗口内由 `speech.final` settle；`/api/approvals` 只读，正常界面没有批准入口。robotd 侧的
+**拒绝侧**已实现（#18）：
 需审批端点要求 `X-Wally-Approval` 一次性凭据，robotd 验签、绑定参数摘要、校验有效期并持久记录已消费 nonce；
 共享秘密由 agentd 首次启动自动生成（见 [GH-18 设计记录](design/GH-18.md)）。
-语音复述/确认与凭据签发侧尚未实现（#11），因此当前 POC 不能宣称已具备完整审批保障。
+语音复述（#19）、确认窗口与凭据签发侧（#11）已实现，robotd 的校验侧（#18）也已落地；
+真实硬件上的语音确认仍依赖 V02/V04/V06 的真机链路验证，当前 POC 不能宣称已完成整机验收。
 自动批准仅限显式测试模式，不能作为生产默认值。软件 `robot_stop` 是安全旁路，免审批；
 它不替代尚未实现的独立硬件急停。
 

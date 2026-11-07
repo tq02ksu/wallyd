@@ -23,6 +23,7 @@ import type { Tx } from './store.ts';
 import type { EventLog } from './events.ts';
 import { encodeCursor, decodeCursor } from './events.ts';
 import { ApiError } from './http.ts';
+import { classifyApprovalUtterance } from './approval-intent.ts';
 
 export type RunStatus =
   | 'accepted'
@@ -226,6 +227,7 @@ function toolCallView(row: ToolCallRow): Record<string, unknown> {
     action_label: row.action_label,
     args_summary: row.args_summary,
     requires_approval: row.requires_approval === 1,
+    approval_id: row.approval_id ?? null,
     state: row.state,
     robot_task_id: row.robot_task_id ?? null,
     requested_at: row.requested_at,
@@ -274,17 +276,49 @@ export interface RecordClarificationInput {
   fast_rule?: string | null;
 }
 
+/** 一次语音 settle 的输入。判定所需的窗口/回声事实由调用方（事件桥）提供。 */
+export interface ApprovalSettleInput {
+  approvalId: string;
+  /** `speech.final` 的文本（已确认只来自 final）。 */
+  text: string;
+  utteranceId?: string | null;
+  /** 该轮 `speech.started` 的 robotd 时间戳；缺失或早于开窗时刻一律不认。 */
+  startedAt?: string | null;
+  /** 这一轮是否是机器人自己 TTS 的回声（由事件桥判定，runs 不读 ERLE）。 */
+  echo?: boolean;
+}
+
+export type ApprovalSettleOutcome = 'approved' | 'denied' | 'ignored' | 'expired' | 'none';
+
+export interface ApprovalSettleResult {
+  outcome: ApprovalSettleOutcome;
+  reason?: string;
+  approval_id: string;
+  run_id: string | null;
+  action_label?: string;
+  capability?: string;
+  args?: Record<string, unknown>;
+}
+
 export class RunService {
   private store: Store;
   private events: EventLog;
   private log: (msg: string, extra?: Record<string, unknown>) => void;
   private onEvent: ((seq: number) => void) | undefined;
+  /** 确认窗口的过期定时器；unref 过，不拖住进程退出。 */
+  private windowTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(opts: RunServiceOptions) {
     this.store = opts.store;
     this.events = opts.events;
     this.log = opts.log;
     this.onEvent = opts.onEvent;
+  }
+
+  /** 释放定时器（进程关闭 / 测试结束）。 */
+  dispose(): void {
+    for (const timer of this.windowTimers.values()) clearTimeout(timer);
+    this.windowTimers.clear();
   }
 
   /** 提交后通知（事务已提交）。失败不影响主流程。 */
@@ -703,6 +737,7 @@ export class RunService {
     }
     const ts = nowIso();
     let voided = 0;
+    const cleared: string[] = [];
     const seq = this.store.transaction((tx) => {
       const pending = tx.all<{ approval_id: string; capability: string }>(
         `SELECT approval_id, capability FROM approvals
@@ -710,6 +745,7 @@ export class RunService {
         runId,
       );
       for (const a of pending) {
+        cleared.push(a.approval_id);
         tx.run(
           `UPDATE approvals SET status = 'cancelled', decided_at = ?, decided_by = 'cancel' WHERE approval_id = ?`,
           ts,
@@ -745,6 +781,7 @@ export class RunService {
         params: { reason: reason ?? '用户取消', cancelled_approvals: voided },
       }).seq;
     });
+    for (const id of cleared) this.clearWindowTimer(id);
     this.notify(seq);
     return { detail: this.getRunDetail(runId), changed: true, voidedApprovals: voided };
   }
@@ -936,6 +973,9 @@ export class RunService {
       return { opened: false, reason: `approval_${fresh.status}`, ...freshBase };
     }
     for (const seq of seqs) this.notify(seq);
+    // 窗口到点必须**自己失效**：没有语音事件时也要把 run 收尾成 cancelled，
+    // 不能等下一句话。settle 仍会再比一次 window_closes_at（防定时器丢失/乱序）。
+    this.armWindowTimer(approvalId, windowMs);
     return {
       opened: true,
       reason: 'opened',
@@ -946,6 +986,300 @@ export class RunService {
       window_opens_at: opens,
       window_closes_at: closes,
     };
+  }
+
+  // ---------------------------------------------------------------- 语音 settle
+  /**
+   * 最近一条与语音确认有关的审批。
+   *
+   * - `waiting`：可以做 settle；
+   * - `timeout`（5 分钟内）：迟到的「确认」要留下 `approval.ignored {reason:"expired"}`；
+   * - 其它状态（cancelled/denied/approved/persisted…）返回 null：不产生任何判定。
+   */
+  latestApprovalForVoice(): ApprovalRow | null {
+    const a = this.store.one<ApprovalRow>(
+      'SELECT * FROM approvals ORDER BY created_at DESC, rowid DESC LIMIT 1',
+    );
+    if (!a) return null;
+    if (a.status === 'waiting') return a;
+    if (a.status === 'timeout' && a.decided_at) {
+      const age = Date.now() - Date.parse(a.decided_at);
+      if (Number.isFinite(age) && age >= 0 && age <= 5 * 60_000) return a;
+    }
+    return null;
+  }
+
+  /**
+   * 用一句 `speech.final` settle 一个审批。
+   *
+   * 顺序（任何一步不通过都**不改状态**，只写 `approval.ignored`）：
+   * 过期 → 窗口外开口 → 回声 → 意图判定（否定优先）。
+   */
+  settleApproval(input: ApprovalSettleInput): ApprovalSettleResult {
+    this.store.requireWritable();
+    const a = this.getApproval(input.approvalId);
+    const base = {
+      approval_id: input.approvalId,
+      run_id: a?.run_id ?? null,
+      action_label: a?.action_label,
+    };
+    if (!a) return { outcome: 'none', reason: 'not_found', ...base };
+
+    if (a.status === 'timeout') {
+      // 过期后的「确认」不能再生效；只有确实想确认/拒绝时才留一条 ignored，
+      // 避免窗口结束后每一句闲聊都刷事件。
+      if (classifyApprovalUtterance(input.text).intent !== 'none') {
+        this.recordIgnored(a, 'expired', input.utteranceId);
+      }
+      return { outcome: 'ignored', reason: 'expired', ...base };
+    }
+    if (a.status !== 'waiting') return { outcome: 'none', reason: `approval_${a.status}`, ...base };
+
+    const now = nowIso();
+    if (a.window_closes_at && Date.parse(now) >= Date.parse(a.window_closes_at)) {
+      this.expireApproval(a.approval_id);
+      if (classifyApprovalUtterance(input.text).intent !== 'none') {
+        this.recordIgnored(a, 'expired', input.utteranceId);
+      }
+      return { outcome: 'expired', reason: 'expired', ...base };
+    }
+
+    const run = a.run_id ? this.getRunRow(a.run_id) : null;
+    if (!run || isTerminal(run.status) || run.status !== 'waiting_confirmation') {
+      // run 已经不在这道门上了：不凭一句语音改任何状态。
+      return { outcome: 'none', reason: run ? `run_${run.status}` : 'run_missing', ...base };
+    }
+
+    const opensAt = a.window_opens_at ? Date.parse(a.window_opens_at) : NaN;
+    const startedAt = input.startedAt ? Date.parse(input.startedAt) : NaN;
+    if (!Number.isFinite(opensAt) || !Number.isFinite(startedAt) || !(startedAt > opensAt)) {
+      this.recordIgnored(a, 'before_window', input.utteranceId);
+      return { outcome: 'ignored', reason: 'before_window', ...base };
+    }
+
+    if (input.echo === true) {
+      this.recordIgnored(a, 'echo', input.utteranceId);
+      return { outcome: 'ignored', reason: 'echo', ...base };
+    }
+
+    const classified = classifyApprovalUtterance(input.text);
+    if (classified.intent === 'none') {
+      this.recordIgnored(a, 'unrecognized', input.utteranceId);
+      return { outcome: 'ignored', reason: 'unrecognized', ...base };
+    }
+    return classified.intent === 'deny'
+      ? this.resolveDenied(a, input.utteranceId)
+      : this.resolveApproved(a, input.utteranceId);
+  }
+
+  /** 审批过期：审批 `timeout`、run `cancelled`，并显式写 `approval.expired`。 */
+  expireApproval(approvalId: string): { changed: boolean; run_id: string | null } {
+    this.store.requireWritable();
+    const a = this.getApproval(approvalId);
+    if (!a) return { changed: false, run_id: null };
+    if (a.status !== 'waiting') return { changed: false, run_id: a.run_id };
+    const run = a.run_id ? this.getRunRow(a.run_id) : null;
+    const ts = nowIso();
+    const seqs: number[] = [];
+    let won = false;
+    this.store.transaction((tx) => {
+      won = tx.run(
+        `UPDATE approvals SET status = 'timeout', decided_at = ?, decided_by = 'timeout'
+         WHERE approval_id = ? AND status = 'waiting'`,
+        ts,
+        approvalId,
+      ).changes === 1;
+      if (!won) return;
+      seqs.push(
+        this.events.emit(tx, {
+          type: 'approval.expired',
+          run_id: a.run_id,
+          approval_id: approvalId,
+          session_id: run?.session_id ?? null,
+          params: { approval_id: approvalId, action_label: a.action_label, expired_at: ts },
+        }).seq,
+      );
+      if (run && !isTerminal(run.status)) {
+        tx.run(
+          `UPDATE runs SET status = 'cancelled', finished_at = ?, updated_at = ?, blocking_reason = 'expired'
+           WHERE run_id = ?`,
+          ts,
+          ts,
+          run.run_id,
+        );
+        seqs.push(
+          this.events.emit(tx, {
+            type: 'run.finished',
+            run_id: run.run_id,
+            session_id: run.session_id,
+            severity: 'warning',
+            params: { outcome: 'cancelled', detail: '确认窗口已过期（expired），没有执行。' },
+          }).seq,
+        );
+      }
+    });
+    if (!won) return { changed: false, run_id: a.run_id };
+    this.clearWindowTimer(approvalId);
+    for (const seq of seqs) this.notify(seq);
+    return { changed: true, run_id: a.run_id };
+  }
+
+  private resolveApproved(a: ApprovalRow, utteranceId?: string | null): ApprovalSettleResult {
+    const run = a.run_id ? this.getRunRow(a.run_id) : null;
+    if (!run || isTerminal(run.status) || run.status !== 'waiting_confirmation') {
+      return { outcome: 'none', reason: run ? `run_${run.status}` : 'run_missing', approval_id: a.approval_id, run_id: a.run_id, action_label: a.action_label };
+    }
+    const ts = nowIso();
+    const seqs: number[] = [];
+    let won = false;
+    this.store.transaction((tx) => {
+      won = tx.run(
+        `UPDATE approvals SET status = 'approved', decided_at = ?, decided_by = 'voice'
+         WHERE approval_id = ? AND status = 'waiting'`,
+        ts,
+        a.approval_id,
+      ).changes === 1;
+      if (!won) return;
+      tx.run(
+        `UPDATE runs SET status = 'executing', updated_at = ?, blocking_reason = NULL WHERE run_id = ?`,
+        ts,
+        run.run_id,
+      );
+      seqs.push(
+        this.events.emit(tx, {
+          type: 'approval.resolved',
+          run_id: run.run_id,
+          approval_id: a.approval_id,
+          session_id: run.session_id,
+          params: {
+            approval_id: a.approval_id,
+            action_label: a.action_label,
+            status: 'approved',
+            decided_by: 'voice',
+            utterance_id: utteranceId ?? undefined,
+          },
+        }).seq,
+      );
+      seqs.push(
+        this.events.emit(tx, {
+          type: 'run.step_changed',
+          run_id: run.run_id,
+          session_id: run.session_id,
+          params: { step_id: 'phase-executing', step_title: PHASE_LABELS.executing, state: 'active' },
+        }).seq,
+      );
+    });
+    if (!won) {
+      return { outcome: 'none', reason: 'lost_race', approval_id: a.approval_id, run_id: a.run_id, action_label: a.action_label };
+    }
+    this.clearWindowTimer(a.approval_id);
+    for (const seq of seqs) this.notify(seq);
+    return {
+      outcome: 'approved',
+      approval_id: a.approval_id,
+      run_id: run.run_id,
+      action_label: a.action_label,
+      capability: a.capability,
+      args: loadJson<Record<string, unknown>>(a.args_json, {}),
+    };
+  }
+
+  private resolveDenied(a: ApprovalRow, utteranceId?: string | null): ApprovalSettleResult {
+    const run = a.run_id ? this.getRunRow(a.run_id) : null;
+    const ts = nowIso();
+    const seqs: number[] = [];
+    let won = false;
+    this.store.transaction((tx) => {
+      won = tx.run(
+        `UPDATE approvals SET status = 'denied', decided_at = ?, decided_by = 'voice'
+         WHERE approval_id = ? AND status = 'waiting'`,
+        ts,
+        a.approval_id,
+      ).changes === 1;
+      if (!won) return;
+      if (run && !isTerminal(run.status)) {
+        tx.run(
+          `UPDATE runs SET status = 'cancelled', finished_at = ?, updated_at = ?, blocking_reason = 'denied'
+           WHERE run_id = ?`,
+          ts,
+          ts,
+          run.run_id,
+        );
+      }
+      seqs.push(
+        this.events.emit(tx, {
+          type: 'approval.resolved',
+          run_id: a.run_id,
+          approval_id: a.approval_id,
+          session_id: run?.session_id ?? null,
+          params: {
+            approval_id: a.approval_id,
+            action_label: a.action_label,
+            status: 'denied',
+            decided_by: 'voice',
+            utterance_id: utteranceId ?? undefined,
+          },
+        }).seq,
+      );
+      if (run && !isTerminal(run.status)) {
+        seqs.push(
+          this.events.emit(tx, {
+            type: 'run.finished',
+            run_id: run.run_id,
+            session_id: run.session_id,
+            severity: 'warning',
+            params: { outcome: 'cancelled', detail: '用户拒绝（denied），没有执行。' },
+          }).seq,
+        );
+      }
+    });
+    if (!won) {
+      return { outcome: 'none', reason: 'lost_race', approval_id: a.approval_id, run_id: a.run_id, action_label: a.action_label };
+    }
+    this.clearWindowTimer(a.approval_id);
+    for (const seq of seqs) this.notify(seq);
+    return { outcome: 'denied', reason: 'denied', approval_id: a.approval_id, run_id: a.run_id, action_label: a.action_label };
+  }
+
+  /** 记一条 `approval.ignored`；**不改任何状态**。 */
+  private recordIgnored(a: ApprovalRow, reason: string, utteranceId?: string | null): void {
+    try {
+      const res = this.events.emitStandalone({
+        type: 'approval.ignored',
+        run_id: a.run_id,
+        approval_id: a.approval_id,
+        session_id: null,
+        params: {
+          approval_id: a.approval_id,
+          reason,
+          utterance_id: utteranceId ?? undefined,
+        },
+      });
+      this.notify(res.seq);
+    } catch (e: any) {
+      this.log('写 approval.ignored 失败', { approval_id: a.approval_id, reason, error: e.message });
+    }
+  }
+
+  private armWindowTimer(approvalId: string, windowMs: number): void {
+    this.clearWindowTimer(approvalId);
+    const timer = setTimeout(() => {
+      this.windowTimers.delete(approvalId);
+      try {
+        this.expireApproval(approvalId);
+      } catch (e: any) {
+        this.log('确认窗口过期收尾失败', { approval_id: approvalId, error: e.message });
+      }
+    }, Math.max(0, windowMs));
+    (timer as { unref?: () => void }).unref?.();
+    this.windowTimers.set(approvalId, timer);
+  }
+
+  private clearWindowTimer(approvalId: string): void {
+    const timer = this.windowTimers.get(approvalId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.windowTimers.delete(approvalId);
   }
 
   /**
@@ -1037,6 +1371,7 @@ export class RunService {
       const fresh = this.getApproval(approvalId);
       return { changed: false, reason: fresh ? `approval_${fresh.status}` : 'not_found', run_id: a.run_id };
     }
+    this.clearWindowTimer(approvalId);
     for (const seq of seqs) this.notify(seq);
     return { changed: true, reason: opts.byStop ? 'cancelled_by_stop' : 'announce_failed', run_id: a.run_id };
   }
@@ -1057,15 +1392,48 @@ export class RunService {
    * 已经没了。这类 run 不能装作还在跑：一律标为 `interrupted`，
    * 并明确写出「不确定是否执行过」，让人去看而不是自动重试。
    */
-  reconcileOnStartup(): { interrupted: number; details: string[] } {
+  reconcileOnStartup(): { interrupted: number; details: string[]; cancelledApprovals: number } {
+    const ts = nowIso();
+    // 进程重启后，内存里的确认窗口定时器已经不存在了：残留的审批不可能再被
+    // 合法 settle，一律作废。不能让它们停在 persisted/announced/waiting 上，
+    // 否则界面会显示一个永远等不到的「等待确认」。
+    const stale = this.store.all<{ approval_id: string; run_id: string | null; action_label: string }>(
+      `SELECT approval_id, run_id, action_label FROM approvals
+       WHERE status IN ('persisted','announced','waiting')`,
+    );
+    if (stale.length > 0) {
+      this.store.transaction((tx) => {
+        for (const a of stale) {
+          tx.run(
+            `UPDATE approvals SET status = 'cancelled', decided_at = ?, decided_by = 'system'
+             WHERE approval_id = ?`,
+            ts,
+            a.approval_id,
+          );
+          this.events.emit(tx, {
+            type: 'approval.resolved',
+            run_id: a.run_id,
+            approval_id: a.approval_id,
+            params: {
+              approval_id: a.approval_id,
+              action_label: a.action_label,
+              status: 'cancelled',
+              decided_by: 'system',
+            },
+          });
+        }
+      });
+    }
     const placeholders = RUN_STATUSES.filter((s) => !isTerminal(s)).map(() => '?').join(',');
     const stuck = this.store.all<RunRow>(
       `SELECT * FROM runs WHERE status IN (${placeholders}) ORDER BY rowid ASC`,
       ...RUN_STATUSES.filter((s) => !isTerminal(s)),
     );
-    if (stuck.length === 0) return { interrupted: 0, details: [] };
+    if (stuck.length === 0) {
+      this.log('startup reconciliation', { interrupted: 0, details: [], cancelledApprovals: stale.length });
+      return { interrupted: 0, details: [], cancelledApprovals: stale.length };
+    }
 
-    const ts = nowIso();
     const details: string[] = [];
     let interrupted = 0;
     for (const run of stuck) {
@@ -1136,8 +1504,8 @@ export class RunService {
       details.push(`${run.run_id}: ${run.status} → ${nextStatus}`);
       interrupted += 1;
     }
-    this.log('startup reconciliation', { interrupted, details });
-    return { interrupted, details };
+    this.log('startup reconciliation', { interrupted, details, cancelledApprovals: stale.length });
+    return { interrupted, details, cancelledApprovals: stale.length };
   }
 
   // ---------------------------------------------------------------- 步骤与工具调用
@@ -1168,9 +1536,15 @@ export class RunService {
     state: string,
     // `approvalParams` 是这次调用实际绑定的审批参数字段；`[]`（或缺省）表示没有绑定。
     // 持久化列仍叫 `requires_approval`（布尔），语义是「本次调用是否绑定了审批参数」。
-    opts: { args?: Record<string, unknown>; approvalParams?: string[]; toolCallId?: string } = {},
+    opts: {
+      args?: Record<string, unknown>;
+      approvalParams?: string[];
+      approvalId?: string | null;
+      toolCallId?: string;
+    } = {},
   ): string {
     const cid = opts.toolCallId ?? newId('call');
+    const gated = Boolean(opts.approvalId) || Boolean(opts.approvalParams && opts.approvalParams.length > 0);
     tx.run(
       `INSERT INTO tool_calls(tool_call_id, run_id, capability, action_label, args_summary, args_json,
          state, requires_approval, approval_id, robot_task_id, evidence, error_code, detail,
@@ -1183,8 +1557,8 @@ export class RunService {
       argsSummary,
       compactJson(opts.args ?? {}),
       state,
-      opts.approvalParams && opts.approvalParams.length > 0 ? 1 : 0,
-      null,
+      gated ? 1 : 0,
+      opts.approvalId ?? null,
       null,
       null,
       null,

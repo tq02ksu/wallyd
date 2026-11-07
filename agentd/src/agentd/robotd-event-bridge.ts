@@ -32,6 +32,19 @@ import type { RobotdEvent } from './robotd-events.ts';
 /** 摘要上限。超过就截断并标注，绝不把整段对话写进事件库。 */
 export const EXCERPT_MAX = 80;
 
+/**
+ * 回声判定门限（dB）：`aec_erle_db` 是「参考电平 − 麦克风电平」的回声抑制量。
+ * 小于该值说明麦克风几乎还是喇叭的声音。**门限只在这里出现一次**；
+ * V02 落地 `speech.gate.verdict` 后改为消费 verdict，不再读 ERLE。
+ */
+export const ECHO_ERLE_MAX_DB = 6;
+
+interface UtteranceStart {
+  started_at: string;
+  aec_erle_db: number | null;
+  during_tts: boolean;
+}
+
 export interface SpeechRouterHooks {
   /** 收到一句定稿文本时调用（供 A11 路由使用）。默认没有消费者。 */
   onUtteranceHeard?: (input: {
@@ -39,6 +52,10 @@ export interface SpeechRouterHooks {
     text: string;
     stop_reason?: string;
     route_hint?: string;
+    /** 该轮 `speech.started` 的 robotd 时间戳（窗口因果判断用）。 */
+    started_at?: string;
+    /** 该轮是否是机器人自己 TTS 的回声（事实 + 门限判定，见 ECHO_ERLE_MAX_DB）。 */
+    echo: boolean;
   }) => void;
   /**
    * 系统播报（审批复述）的真实终态。
@@ -52,6 +69,7 @@ export interface SpeechRouterHooks {
     reason?: string;
     response_id?: string;
     task_id?: string;
+    played?: number;
   }) => void;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
@@ -66,6 +84,10 @@ export class RobotdEventBridge {
   private pendingSpeak = new Map<string, string>();
   /** 上一次音频可用性，避免重复写同一状态 */
   private audioAvailable: boolean | null = null;
+  /** 每一轮 `speech.started` 的事实，供确认窗口判断「窗口开启之后才开始」。 */
+  private utteranceStarts = new Map<string, UtteranceStart>();
+  /** 正在播放的 TTS response；用于判断一轮 utterance 是否发生在播报期间。 */
+  private activeResponses = new Set<string>();
 
   constructor(deps: { events: EventLog; store: Store; hooks?: SpeechRouterHooks }) {
     this.events = deps.events;
@@ -89,12 +111,17 @@ export class RobotdEventBridge {
         this.onFinal(p);
         return;
 
+      case 'speech.started':
+        this.onStarted(ev.timestamp, p);
+        return;
+
       case 'speech.tts_started':
         // 记下这次的文本，供 tts_finished 写摘要
         if (typeof p.task_id === 'string' && typeof p.response_id === 'string') {
           const txt = this.pendingSpeak.get(p.task_id);
           if (txt) this.speakText.set(p.response_id, txt);
         }
+        if (typeof p.response_id === 'string' && p.response_id) this.activeResponses.add(p.response_id);
         return;
 
       case 'speech.tts_finished':
@@ -105,6 +132,7 @@ export class RobotdEventBridge {
           excerpt: this.speakText.get(String(p.response_id ?? '')),
         });
         this.speakText.delete(String(p.response_id ?? ''));
+        if (typeof p.response_id === 'string') this.activeResponses.delete(p.response_id);
         if (typeof p.approval_id === 'string' && p.approval_id) {
           this.hooks.onAnnouncementFinished?.({
             approval_id: p.approval_id,
@@ -112,6 +140,7 @@ export class RobotdEventBridge {
             ok: true,
             response_id: typeof p.response_id === 'string' ? p.response_id : undefined,
             task_id: typeof p.task_id === 'string' ? p.task_id : undefined,
+            played: playedValue(p.played),
           });
         }
         return;
@@ -123,6 +152,7 @@ export class RobotdEventBridge {
           played: int(p.played),
         });
         this.speakText.delete(String(p.response_id ?? ''));
+        if (typeof p.response_id === 'string') this.activeResponses.delete(p.response_id);
         if (typeof p.approval_id === 'string' && p.approval_id) {
           this.hooks.onAnnouncementFinished?.({
             approval_id: p.approval_id,
@@ -131,6 +161,7 @@ export class RobotdEventBridge {
             reason: typeof p.reason === 'string' ? p.reason : 'interrupted',
             response_id: typeof p.response_id === 'string' ? p.response_id : undefined,
             task_id: typeof p.task_id === 'string' ? p.task_id : undefined,
+            played: playedValue(p.played),
           });
         }
         return;
@@ -167,6 +198,24 @@ export class RobotdEventBridge {
   }
 
   // ---------------------------------------------------------------- 听
+  private onStarted(timestamp: string, p: Record<string, unknown>): void {
+    const utteranceId = String(p.utterance_id ?? '');
+    if (!utteranceId) return;
+    const erle = typeof p.aec_erle_db === 'number' && Number.isFinite(p.aec_erle_db)
+      ? p.aec_erle_db
+      : null;
+    this.utteranceStarts.set(utteranceId, {
+      started_at: timestamp,
+      aec_erle_db: erle,
+      // 播报期间开始的这一轮，最可能是机器人自己的声音（barge-in 当前关闭）。
+      during_tts: this.activeResponses.size > 0,
+    });
+    if (this.utteranceStarts.size > 200) {
+      const first = this.utteranceStarts.keys().next().value;
+      if (first !== undefined) this.utteranceStarts.delete(first);
+    }
+  }
+
   private onFinal(p: Record<string, unknown>): void {
     const utteranceId = String(p.utterance_id ?? '');
     const text = typeof p.text === 'string' ? p.text.trim() : '';
@@ -210,12 +259,20 @@ export class RobotdEventBridge {
       route_hint: typeof p.route_hint === 'string' ? p.route_hint : undefined,
     });
 
+    const info = this.utteranceStarts.get(utteranceId);
+    const echo = info
+      ? info.during_tts || (info.aec_erle_db !== null && info.aec_erle_db < ECHO_ERLE_MAX_DB)
+      : false;
+    this.utteranceStarts.delete(utteranceId);
+
     // 交给路由层（A11）。这里只转发，不做任何解释。
     this.hooks.onUtteranceHeard?.({
       utterance_id: utteranceId,
       text,
       stop_reason: stopReason,
       route_hint: typeof p.route_hint === 'string' ? p.route_hint : undefined,
+      started_at: info?.started_at,
+      echo,
     });
   }
 
@@ -275,6 +332,12 @@ function int(v: unknown): number {
 }
 
 function intOrUndef(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : undefined;
+}
+
+/** `played` 要保留「缺失」与「明确为 0」的区别。 */
+function playedValue(v: unknown): number | undefined {
+  if (v === false) return 0;
   return typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : undefined;
 }
 

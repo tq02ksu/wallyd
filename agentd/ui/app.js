@@ -877,11 +877,12 @@ function approvalLabel(status) {
     approved: '已确认',
     denied: '已拒绝',
     expired: '已超时',
+    timeout: '已超时',
     cancelled: '已取消',
   }[status] ?? status;
 }
 function approvalPill(status) {
-  return status === 'approved' ? 'ok' : status === 'denied' || status === 'expired' ? 'err' : status === 'waiting' || status === 'announced' ? 'warn' : 'muted';
+  return status === 'approved' ? 'ok' : status === 'denied' || status === 'expired' || status === 'timeout' ? 'err' : status === 'waiting' || status === 'announced' ? 'warn' : 'muted';
 }
 function deciderLabel(by) {
   return { voice: '语音确认', timeout: '超时', cancel: '随任务取消', manual_test: '手工（测试模式）', system: '系统' }[by] ?? by;
