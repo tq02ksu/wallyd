@@ -94,3 +94,71 @@ def test_bridge_not_ready_refuses_utterance():
     rt.attach(FakeBridge(ready=False))
     with pytest.raises(RuntimeError, match="语音桥不可用"):
         rt.new_utterance(task_id="t-5")
+
+
+# ---------------------------------------------------------------- 常听自动轮次
+def test_bridge_auto_ready_is_adopted_as_utterance():
+    """VAD 自动开启的一轮必须被运行时认领，否则 partial/final 会被当成无主事件丢掉。"""
+    rt, emitted = make_runtime()
+
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-1", "source": "mic"})
+
+    assert rt.utt is not None
+    assert rt.utt.utterance_id == "utt-auto-1"
+    assert rt.utt.task_id is None
+    ready = [p for t, p in emitted if t == "speech.ready"]
+    assert len(ready) == 1
+    assert ready[0]["utterance_id"] == "utt-auto-1"
+    assert ready[0]["task_id"] is None
+
+
+def test_events_for_other_utterance_are_ignored():
+    """自动轮次切换后，旧轮的迟到事件不能污染当前轮。"""
+    rt, emitted = make_runtime()
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-1"})
+    rt.handle_bridge_event({"ev": "final", "utterance_id": "utt-auto-1", "text": "旧轮"})
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-2"})
+
+    rt.handle_bridge_event({"ev": "partial", "utterance_id": "utt-auto-1", "text": "迟到"})
+    rt.handle_bridge_event({"ev": "speech_state", "state": "speech", "utterance_id": "utt-auto-1"})
+
+    assert rt.utt is not None and rt.utt.utterance_id == "utt-auto-2"
+    assert not [p for t, p in emitted if t == "speech.partial"]
+    assert not [p for t, p in emitted if t == "speech.started"]
+
+
+def test_explicit_listen_reuses_in_flight_auto_utterance():
+    """显式 listen 不应在常听自动轮已经开启时把桥打成 E_BUSY。"""
+    rt, emitted = make_runtime()
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-3"})
+
+    utt = rt.new_utterance(task_id="t-auto")
+
+    assert utt.utterance_id == "utt-auto-3"
+    # 复用已有轮次时不再向桥重复发 listen
+    assert not [c for c in rt.bridge.sent if c.get("cmd") == "listen"]
+    assert rt.utt is utt
+
+
+def test_engine_unavailable_is_a_failure_not_no_speech():
+    """sherpa not-implemented 必须显式失败，不能被空文本重判成「用户没说话」。"""
+    rt, emitted = make_runtime()
+    done: list[tuple[str, str | None]] = []
+    rt.on_utterance_done = lambda _utt, outcome, reason: done.append((outcome, reason))
+    rt.new_utterance(task_id="t-engine")
+
+    rt.handle_bridge_event(
+        {
+            "ev": "final",
+            "utterance_id": rt.utt.utterance_id,
+            "text": "",
+            "stop_reason": "engine_unavailable",
+            "no_speech": False,
+            "engine_error": "E_ASR_NOT_IMPLEMENTED",
+        }
+    )
+
+    final = [p for t, p in emitted if t == "speech.final"][-1]
+    assert final["no_speech"] is False
+    assert final["stop_reason"] == "engine_unavailable"
+    assert done == [("failed", "engine_unavailable")]

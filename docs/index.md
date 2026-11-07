@@ -33,6 +33,7 @@
 - [层与模块关系（唯一口径）](layers-and-modules.md) - 「层」这个词的唯一解释：执行位置、边界 B1–B4、接口面 A–C
 - [分层通信与接口设计](communication-protocol.md) - 进程内/进程间/线协议每条边界的传输方式
 - [语音输入输出改造方案（流式优先）](voice-architecture.md) - 语音从 request/response 改为流式管线；方案已部分落地
+- [GH-4 语音桥双管道设计](design/GH-4.md) - 拾音（采集→VAD→ASR）与出话（分句→合成→有界队列→渲染）拆分及可替换 engine 边界
 - [模型选型](model-selection.md) - LLM / TTS / ASR 选型（苹果生态优先，2026-09-17 口径）
 - [产品定位与套件化约束](product-positioning.md) - 平台而非成品、套件化销售的口述决策
 - [可行性评估与技术风险清单](risk-assessment.md) - R1–R7 风险项与验证顺序
@@ -54,6 +55,7 @@
 - [agentd 详细功能与界面设计](spec/agentd-functional-design.md) - 编排、模型配置、总览/任务/事件界面与安全边界
 - [agentd 开发任务清单](spec/agentd-development-plan.md) - 六阶段任务与分批交付门槛
 - [摄像头自动检测与配置](spec/camera-detection.md) - macOS UVC 判定与采集配置
+- [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
 
 ## 5. 契约专题（有时效）
 

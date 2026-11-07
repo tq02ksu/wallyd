@@ -11,9 +11,10 @@
 
 关键点：
 
-- **快照与订阅同锁**：``kernel.subscribe()`` 在返回时已经在同一把锁内取好快照并完成注册，
-  所以没有「取快照与开始监听之间的窗口」。补发窗口由先前的 ``kernel.resume()`` 判定
-  （``subscribe()`` 本身不回放历史），本模块只负责把这几段按顺序写出去。
+- **快照与订阅同锁**：``kernel.subscribe()`` 在返回时已经在同一把锁内取好快照，
+  快照的 ``event_seq`` 就是订阅起点，之后的实时事件才推送；更早的历史只由
+  ``resume()`` 判定是否可以补发（``kernel.subscribe()`` 不回放）。
+  所以没有「取快照与开始监听之间的窗口」，本模块只负责把这几段按顺序写出去。
 - **游标过期 / 实例变更 → ``resync_required``**：宁可让客户端重拉状态，也不给一段有洞的流。
 - **经过滤的订阅看不到某些全局 seq 不代表丢包**：本模块不据此发 gap 告警，只在
   ``resume`` 判定为过期时明确告知。
@@ -154,7 +155,7 @@ def serve_ws(app: App, sock: socket.socket, handshake: Any, query: dict[str, lis
             # 顺序纪律：`subscription.accepted` 与 `state.snapshot` 必须先于任何实时事件。
             # 竞态来源：kernel.subscribe() 注册后，别处的 emit() 可能在另一个线程里
             # 立刻调用 push_event，抢在我们 enqueue 这两条之前。做法是：
-            # 先用缓冲接住实时事件 → 写 accepted/snapshot/backlog → 再切直通并回放缓冲。
+            # 先用缓冲接住实时事件 → 写 accepted/snapshot/resume 补发 → 再切直通并回放缓冲。
             buffered: list[Event] = []
             passthrough = False
             buffer_lock = threading.Lock()
