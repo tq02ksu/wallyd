@@ -168,11 +168,21 @@ function lastEventParams(type, approvalId) {
 async function submitFastRun(prompt) {
   const res = await api('POST', '/api/run', { prompt });
   check(`提交快速指令：${prompt}`, res.status === 200 && typeof res.json.run_id === 'string', JSON.stringify(res.json));
+  // 只有真正走到快速路由才会过审批门；落成 harness 就没有审批，后面的断言会全线失真。
+  // 之前用过「过来 target:abc」，它对规则来说是**不可路由**的表达（槽位只认
+  // target_track_id / track / 目标），于是 run 落成 harness、整份验收静默失效。
+  check('走的是快速路由（否则不会有审批门）', res.json.route === 'fast', JSON.stringify(res.json));
   const runId = res.json.run_id;
   const approval = await waitFor(() =>
     runtime.store.one('SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at DESC LIMIT 1', runId),
   );
   check('审批已持久化', Boolean(approval), JSON.stringify(approval));
+  if (!approval) {
+    // 没有审批就没有后续验收：明确失败并退出，不要留一个 TypeError 栈把失败原因埋掉。
+    console.log('FAIL 没有产生审批，后续裁决断言无法进行');
+    fs.rmSync(root, { recursive: true, force: true });
+    process.exit(1);
+  }
   await waitFor(() => {
     const a = approvalById(approval.approval_id);
     return a && a.approval_id === approval.approval_id && a.status === 'announced' ? a : null;
@@ -222,7 +232,7 @@ console.log('— 判定谓词：泛化肯定不批准、否定优先');
 // ---------------------------------------------------------------- 判据 1 / 5 / 10
 console.log('— 判据 1/5/10：确认 → executing → succeeded；复述不走 robot_speak');
 {
-  const { runId, approval } = await submitFastRun('过来 target:abc');
+  const { runId, approval } = await submitFastRun('过来 track:abc');
   check('审批 capability 是 robot_follow', approval.capability === 'robot_follow', approval.capability);
   check('播报走系统 announce，且没有 text 字段', robotdCalls.some((c) => c.path === '/v1/robot/announce' && !('text' in c.body)));
 
@@ -265,7 +275,7 @@ console.log('— 判据 1/5/10：确认 → executing → succeeded；复述不�
 // ---------------------------------------------------------------- 判据 2
 console.log('— 判据 2：说「不用」→ cancelled(denied)，robotd 没收到动作');
 {
-  const { runId, approval } = await submitFastRun('过来 target:abc');
+  const { runId, approval } = await submitFastRun('过来 track:abc');
   await openWindow(approval.approval_id);
   const before = robotdCalls.filter((c) => c.path === '/v1/robot/follow').length;
   utterance(approval.approval_id, 'utt-deny-1', '不用');
@@ -281,7 +291,7 @@ console.log('— 判据 2：说「不用」→ cancelled(denied)，robotd 没收
 // ---------------------------------------------------------------- 判据 5
 console.log('— 判据 5：说「确认不用」按 deny');
 {
-  const { runId, approval } = await submitFastRun('过来 target:abc');
+  const { runId, approval } = await submitFastRun('过来 track:abc');
   await openWindow(approval.approval_id);
   utterance(approval.approval_id, 'utt-deny-2', '确认不用');
   await waitFor(() => (runRow(runId).status === 'cancelled' ? true : null));
@@ -292,7 +302,7 @@ console.log('— 判据 5：说「确认不用」按 deny');
 // ---------------------------------------------------------------- 判据 7
 console.log('— 判据 7：窗口开启前就开始说 → before_window');
 {
-  const { runId, approval } = await submitFastRun('过来 target:abc');
+  const { runId, approval } = await submitFastRun('过来 track:abc');
   await openWindow(approval.approval_id);
   const opens = approvalById(approval.approval_id).window_opens_at;
   utterance(approval.approval_id, 'utt-early', '确认', { startedAt: new Date(Date.parse(opens) - 1000).toISOString() });
@@ -306,7 +316,7 @@ console.log('— 判据 7：窗口开启前就开始说 → before_window');
 // ---------------------------------------------------------------- 判据 8
 console.log('— 判据 8：TTS 回声 → echo');
 {
-  const { runId, approval } = await submitFastRun('过来 target:abc');
+  const { runId, approval } = await submitFastRun('过来 track:abc');
   await openWindow(approval.approval_id);
   const before = countEvents('approval.ignored', approval.approval_id);
   utterance(approval.approval_id, 'utt-echo', '确认', { erle: 1.0 });
@@ -320,7 +330,7 @@ console.log('— 判据 8：TTS 回声 → echo');
 // ---------------------------------------------------------------- 判据 9
 console.log('— 判据 9：播报未完成（played=0）不开窗，也不做 settle 判定');
 {
-  const { runId, approval } = await submitFastRun('过来 target:abc');
+  const { runId, approval } = await submitFastRun('过来 track:abc');
   feed('speech.tts_finished', {
     response_id: `tts-zero-${approval.approval_id}`,
     approval_id: approval.approval_id,
@@ -339,7 +349,7 @@ console.log('— 判据 9：播报未完成（played=0）不开窗，也不做 s
 // ---------------------------------------------------------------- 判据 3 / 4
 console.log('— 判据 3/4：窗口过期 → timeout → cancelled；迟到的确认被 ignored(expired)');
 {
-  const { runId, approval } = await submitFastRun('过来 target:abc');
+  const { runId, approval } = await submitFastRun('过来 track:abc');
   const opened = runtime.runs.openConfirmationWindow(approval.approval_id, 20);
   check('直接开一个 20ms 窗口', opened.opened === true, JSON.stringify(opened));
   await waitFor(() => (runRow(runId).status === 'cancelled' ? true : null), { timeoutMs: 1500 });
@@ -371,7 +381,7 @@ console.log('— 判据 6：/api/approvals 只读，manual_approve_enabled=false
 // ---------------------------------------------------------------- 判据 1 补充：speech.partial 不参与
 console.log('— 只用 final：speech.partial 不参与批准');
 {
-  const { runId, approval } = await submitFastRun('过来 target:abc');
+  const { runId, approval } = await submitFastRun('过来 track:abc');
   await openWindow(approval.approval_id);
   const ignoredBefore = countEvents('approval.ignored', approval.approval_id);
   feed('speech.partial', { utterance_id: 'utt-partial', revision: 1, text: '确认' });

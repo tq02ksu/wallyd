@@ -65,7 +65,7 @@ const robotd = new FakeRobotd();
 const deps = { runs, robotd, store, log: () => {} };
 
 function approvedRun() {
-  const run = runs.submitRun({ prompt: '过来 target:abc', route: 'fast' });
+  const run = runs.submitRun({ prompt: '过来 track:abc', route: 'fast' });
   runs.transition(run.run_id, 'executing');
   const a = runs.createApproval({
     runId: run.run_id,

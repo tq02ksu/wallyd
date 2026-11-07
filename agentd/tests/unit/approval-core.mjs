@@ -111,7 +111,7 @@ function runOf(id) {
 }
 
 async function pending() {
-  const run = runs.submitRun({ prompt: '过来 target:abc', route: 'fast' });
+  const run = runs.submitRun({ prompt: '过来 track:abc', route: 'fast' });
   const a = runs.createApproval({
     runId: run.run_id,
     capability: 'robot_follow',
