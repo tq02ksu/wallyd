@@ -15,6 +15,7 @@ import { ensureApprovalSigningKey } from '../../src/agentd/approval-key.ts';
 import { approvalSecretPath } from '../../src/agentd/paths.ts';
 import { approvalArgsDigest } from '../../../contracts/tools/approval-digest.mjs';
 import { classifyApprovalUtterance } from '../../src/agentd/approval-intent.ts';
+import { composeNarrationText } from '../../src/agentd/run-narrator.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..', '..');
@@ -73,7 +74,14 @@ const fakeRobotd = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     let body = {};
     try { body = raw ? JSON.parse(raw) : {}; } catch { body = { raw }; }
-    robotdCalls.push({ method: req.method, path: url.pathname, body, header: req.headers['x-wally-approval'] ?? null });
+    const call = {
+      method: req.method,
+      path: url.pathname,
+      body,
+      header: req.headers['x-wally-approval'] ?? null,
+      res_task_id: null,
+    };
+    robotdCalls.push(call);
     const json = (code, obj) => {
       res.writeHead(code, { 'content-type': 'application/json' });
       res.end(JSON.stringify(obj));
@@ -92,7 +100,9 @@ const fakeRobotd = http.createServer((req, res) => {
       return json(200, { ok: true, task_id: 'robot-task-1', state: 'accepted' });
     }
     if (req.method === 'POST' && url.pathname === '/v1/robot/speak') {
-      return json(200, { ok: true, task_id: 'speak-should-not-happen' });
+      // GH-13：run 终态会给结论播报走这里，每次都要回一个可关联的 task_id。
+      call.res_task_id = `speak-task-${robotdCalls.length}`;
+      return json(200, { ok: true, task_id: call.res_task_id, status: 'accepted' });
     }
     return json(404, { ok: false, error: { code: 'E_NOT_FOUND', message: 'no route' } });
   });
@@ -165,7 +175,62 @@ function lastEventParams(type, approvalId) {
   return row ? JSON.parse(row.params_json) : null;
 }
 
+function countEventsByType(type) {
+  return runtime.store.one('SELECT COUNT(*) AS n FROM events WHERE type = ?', type).n;
+}
+
+/** 某条 utterance 的 `observation.speech_ignored`（分发器写的，不是审批 settle 写的）。 */
+function ignoredForUtterance(utteranceId) {
+  return runtime.store.all(
+    "SELECT * FROM events WHERE type = 'observation.speech_ignored' AND params_json LIKE ? ORDER BY seq DESC",
+    `%${utteranceId}%`,
+  );
+}
+
+function speakCalls() {
+  return robotdCalls.filter((c) => c.path === '/v1/robot/speak');
+}
+
+function decodeCredential(header) {
+  const [payloadSeg] = String(header ?? '').split('.');
+  if (!payloadSeg) return null;
+  try {
+    return JSON.parse(Buffer.from(payloadSeg, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 每个验收段开跑前必须没有活动 run。
+ *
+ * 活动上限是 1，忙时不排队；上一段若留下一个非终态 run（例如播报未完成时说了句
+ * 「确认」，分发器会如实把它当成新指令提交），下一段会拿到 E_BUSY 而不是被测行为。
+ * 之前靠人肉记着每段收尾，漏一处就变成 `runId === undefined` 进 SQL 的 TypeError。
+ */
+async function ensureIdle() {
+  const active = runtime.runs.activeRun();
+  if (!active) return;
+  runtime.runs.cancelRun(active.run_id, 'cleanup');
+  const done = await waitFor(
+    () => {
+      const row = runRow(active.run_id);
+      return row && row.status === 'cancelled' ? row : null;
+    },
+    { timeoutMs: 2000 },
+  );
+  if (!done) {
+    console.log(
+      'FAIL 前置清理：活动 run 没有进入 cancelled（后续验收会被 E_BUSY 污染）',
+      active.run_id,
+      runRow(active.run_id)?.status,
+    );
+    process.exit(1);
+  }
+}
+
 async function submitFastRun(prompt) {
+  await ensureIdle();
   const res = await api('POST', '/api/run', { prompt });
   check(`提交快速指令：${prompt}`, res.status === 200 && typeof res.json.run_id === 'string', JSON.stringify(res.json));
   // 只有真正走到快速路由才会过审批门；落成 harness 就没有审批，后面的断言会全线失真。
@@ -173,6 +238,11 @@ async function submitFastRun(prompt) {
   // target_track_id / track / 目标），于是 run 落成 harness、整份验收静默失效。
   check('走的是快速路由（否则不会有审批门）', res.json.route === 'fast', JSON.stringify(res.json));
   const runId = res.json.run_id;
+  if (typeof runId !== 'string' || !runId) {
+    // 明确失败退出，不要让它进到 SQL 里变成一个看不出原因的 TypeError。
+    console.log('FAIL 提交没有返回 run_id，后续断言无法进行', JSON.stringify(res.json));
+    process.exit(1);
+  }
   const approval = await waitFor(() =>
     runtime.store.one('SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at DESC LIMIT 1', runId),
   );
@@ -238,6 +308,8 @@ console.log('— 判据 1/5/10：确认 → executing → succeeded；复述不�
 
   const opened = await openWindow(approval.approval_id);
   check('播完后进入 waiting_confirmation', Boolean(opened));
+  // 复述阶段（announce）不能触发结论播报：run 还没到终态，没东西可播。
+  check('复述阶段没有结论播报', speakCalls().length === 0, JSON.stringify(speakCalls()));
 
   const before = robotdCalls.filter((c) => c.path === '/v1/robot/follow').length;
   utterance(approval.approval_id, 'utt-approve-1', '确认');
@@ -269,7 +341,79 @@ console.log('— 判据 1/5/10：确认 → executing → succeeded；复述不�
   check('tool_calls.requires_approval=true', call?.requires_approval === true, JSON.stringify(call));
   check('tool_calls 关联 approval_id', call?.approval_id === approval.approval_id, JSON.stringify(call));
 
-  check('复述路径没有 robot_speak 调用', !robotdCalls.some((c) => c.path === '/v1/robot/speak'));
+  // GH-13 判据 1：run 终态 → 桥收到 speak → speech.tts_finished → 事件库 speech.spoken。
+  // 播报异步执行（不阻塞状态推进），所以要等它落到假 robotd 上。
+  const speaks = await waitFor(() => (speakCalls().length > 0 ? speakCalls() : null));
+  check('run 终态触发且只触发一次结论播报', speaks?.length === 1, String(speaks?.length));
+  const speak = speaks?.[0];
+  check(
+    'speak 带 X-Wally-Approval',
+    typeof speak?.header === 'string' && speak.header.includes('.'),
+    String(speak?.header),
+  );
+  const speakCredential = decodeCredential(speak?.header);
+  check('凭据 capability = robot_speak', speakCredential?.capability === 'robot_speak', JSON.stringify(speakCredential));
+  const expectedNarration = composeNarrationText(run, detail.json.steps ?? []);
+  check(
+    '播报正文来自执行事实（result_summary / step note / 兜底）',
+    typeof speak?.body?.text === 'string' && speak.body.text === expectedNarration,
+    `${JSON.stringify(speak?.body?.text)} != ${JSON.stringify(expectedNarration)}`,
+  );
+  check('播报正文非空', typeof speak?.body?.text === 'string' && speak.body.text.trim().length > 0);
+
+  feed('speech.tts_started', { response_id: 'tts-narr-1', task_id: speak?.res_task_id });
+  feed('speech.tts_finished', {
+    response_id: 'tts-narr-1',
+    task_id: speak?.res_task_id,
+    chunks: 2,
+    played: 2,
+  });
+  const afterSpoken = await waitFor(() => (runRow(runId).narration === 'spoken' ? runRow(runId) : null));
+  check('播完后 narration=spoken', afterSpoken?.narration === 'spoken', afterSpoken?.narration);
+  check('播报不改 run 状态', afterSpoken?.status === 'succeeded', afterSpoken?.status);
+  const spokenEvent = runtime.store.one(
+    "SELECT * FROM events WHERE type = 'speech.spoken' AND run_id = ?",
+    runId,
+  );
+  check('事件库出现 speech.spoken 且关联 run', Boolean(spokenEvent), JSON.stringify(spokenEvent));
+  const spokenParams = spokenEvent ? JSON.parse(spokenEvent.params_json) : null;
+  check(
+    'speech.spoken 带 chunks/played',
+    spokenParams?.chunks === 2 && spokenParams?.played === 2,
+    JSON.stringify(spokenParams),
+  );
+}
+
+// ---------------------------------------------------------------- 判据 2（结论播报被打断）
+console.log('— 判据 2：结论播报中 barge-in → run 仍 succeeded，narration=interrupted');
+{
+  const { runId, approval } = await submitFastRun('过来 track:abc');
+  await openWindow(approval.approval_id);
+  const speakBefore = speakCalls().length;
+  utterance(approval.approval_id, 'utt-approve-bargein', '确认');
+  await waitFor(() => (runRow(runId).status === 'succeeded' ? true : null));
+  const speaks = await waitFor(() => (speakCalls().length > speakBefore ? speakCalls() : null));
+  const speak = speaks?.at(-1);
+  check('被打断的是本次 run 的结论播报', Boolean(speak?.res_task_id), JSON.stringify(speak));
+
+  // V03 的打断：话没说完，不是任务没做成。
+  feed('speech.tts_cancelled', {
+    response_id: 'tts-narr-bargein',
+    task_id: speak?.res_task_id,
+    reason: 'barge_in',
+    played: 1,
+  });
+  const interrupted = await waitFor(() => (runRow(runId).narration === 'interrupted' ? runRow(runId) : null));
+  check('narration = interrupted', interrupted?.narration === 'interrupted', interrupted?.narration);
+  check('被 barge-in 的 run 仍是 succeeded', interrupted?.status === 'succeeded', interrupted?.status);
+  const cancelEvent = runtime.store.one(
+    "SELECT * FROM events WHERE type = 'speech.speak_cancelled' AND run_id = ?",
+    runId,
+  );
+  check('事件库出现 speech.speak_cancelled 且关联 run', Boolean(cancelEvent), JSON.stringify(cancelEvent));
+  const cancelParams = cancelEvent ? JSON.parse(cancelEvent.params_json) : null;
+  check('打断原因 = barge_in', cancelParams?.reason === 'barge_in', JSON.stringify(cancelParams));
+  check('没有把「没播完」记成播报失败', countEventsByType('speech.speak_failed') === 0);
 }
 
 // ---------------------------------------------------------------- 判据 2
@@ -318,13 +462,29 @@ console.log('— 判据 8：TTS 回声 → echo');
 {
   const { runId, approval } = await submitFastRun('过来 track:abc');
   await openWindow(approval.approval_id);
-  const before = countEvents('approval.ignored', approval.approval_id);
+  const ignoredBefore = countEvents('approval.ignored', approval.approval_id);
+  const dispatchBefore = countEventsByType('observation.speech_ignored');
+  // 回声证据挂在 `speech.started` 上（契约 events.json：speech.started.aec_erle_db，
+  // GH-11 设计 §规则 6）。`speech.final` 的 payload 里没有这个字段——它只带文本。
   utterance(approval.approval_id, 'utt-echo', '确认', { erle: 1.0 });
-  await waitFor(() => countEvents('approval.ignored', approval.approval_id) > before);
-  const ignored = lastEventParams('approval.ignored', approval.approval_id);
-  check('reason = echo', ignored?.reason === 'echo', JSON.stringify(ignored));
+
+  // 分发器在 take 审批之前就把回声拦下：写 `observation.speech_ignored {reason:"echo"}`，
+  // 不会走到 settle，所以 `approval.ignored` 一条都不该多。
+  const dispatched = await waitFor(() =>
+    countEventsByType('observation.speech_ignored') > dispatchBefore ? ignoredForUtterance('utt-echo') : null,
+  );
+  check('分发器记了 observation.speech_ignored', dispatched?.length === 1, String(dispatched?.length));
+  const ignoredParams = dispatched?.[0] ? JSON.parse(dispatched[0].params_json) : null;
+  check('reason = echo', ignoredParams?.reason === 'echo', JSON.stringify(ignoredParams));
+  check(
+    '回声没有进审批 settle',
+    countEvents('approval.ignored', approval.approval_id) === ignoredBefore,
+    String(countEvents('approval.ignored', approval.approval_id) - ignoredBefore),
+  );
   check('回声不让 run 推进', runRow(runId).status === 'waiting_confirmation', runRow(runId).status);
+  check('回声不改变审批状态', approvalById(approval.approval_id).status === 'waiting', approvalById(approval.approval_id).status);
   runtime.runs.cancelRun(runId, 'cleanup');
+  await waitFor(() => (runRow(runId).status === 'cancelled' ? true : null));
 }
 
 // ---------------------------------------------------------------- 判据 9

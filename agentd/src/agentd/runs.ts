@@ -1507,6 +1507,27 @@ export class RunService {
       return { action: 'approval', approval: settled, run_id: settled.run_id ?? undefined };
     }
 
+    // 窗口刚过期（`latestApprovalForVoice` 只回 5 分钟内的 timeout）：迟到的「确认」
+    // 必须留下 `approval.ignored {reason:"expired"}` 的账，而不是被当成一条新指令。
+    // 但**只吞下确实像审批回答的那一句**——过期之后的普通指令照常提交，不能被一个
+    // 已经死掉的窗口堵住 5 分钟；「停」是安全旁路，任何时候都不当审批回答。
+    // 窗口还开着时上一条分支已经接管，走不到这里。
+    if (
+      approval &&
+      approval.status === 'timeout' &&
+      !isProtectedUtterance(text) &&
+      classifyApprovalUtterance(text).intent !== 'none'
+    ) {
+      const settled = this.settleApproval({
+        approvalId: approval.approval_id,
+        text,
+        utteranceId: input.utterance_id,
+        startedAt: input.started_at ?? null,
+        echo: false,
+      });
+      return { action: 'approval', approval: settled, run_id: settled.run_id ?? undefined };
+    }
+
     // 2. 忙：语音侧不排队，也不静默丢弃。
     //    例外是受保护规则（停止）：停止是安全旁路，语音不能比 POST /api/run 更弱。
     const busy = this.activeRun();

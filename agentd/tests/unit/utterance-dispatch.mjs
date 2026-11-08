@@ -234,6 +234,93 @@ console.log('— 事件桥把 echo 事实交给分发器（播报期间听到的
   check('提交的是原话', submitted[0]?.text === '停止', JSON.stringify(submitted[0]));
 }
 
+console.log('— ERLE 门限：播报已结束但 ERLE < 6 dB 仍是回声（判据 8 的同一条路径）');
+{
+  const submitted = [];
+  const svc = makeService((input) => {
+    submitted.push(input);
+    return { run_id: 'run-erle' };
+  });
+  const bridge = new RobotdEventBridge({
+    events,
+    store,
+    hooks: { onUtteranceHeard: (input) => svc.dispatchUtterance(input) },
+  });
+  // 没有活动播报（during_tts=false），只有 `speech.started.aec_erle_db` 这个事实：
+  // 麦克风几乎还是喇叭的声音，所以这一轮是自听。
+  bridge.handle({ type: 'speech.started', payload: { utterance_id: 'u-erle-low', aec_erle_db: 1 } });
+  bridge.handle({
+    type: 'speech.final',
+    payload: { utterance_id: 'u-erle-low', text: '确认', stop_reason: 'endpoint' },
+  });
+  check('低 ERLE 的 final 没有提交', submitted.length === 0, JSON.stringify(submitted));
+  const low = ignoredEvents('u-erle-low');
+  check('写了一条 speech_ignored', low.length === 1, String(low.length));
+  check(
+    '忽略原因是 echo',
+    low[0] ? JSON.parse(low[0].params_json).reason === 'echo' : false,
+    low[0]?.params_json,
+  );
+
+  // 反向：ERLE 足够高（AEC 压住了回声）时，同一句话必须照常提交。
+  bridge.handle({ type: 'speech.started', payload: { utterance_id: 'u-erle-high', aec_erle_db: 30 } });
+  bridge.handle({
+    type: 'speech.final',
+    payload: { utterance_id: 'u-erle-high', text: '往前走一步', stop_reason: 'endpoint' },
+  });
+  check('高 ERLE 的 final 被提交', submitted.length === 1, JSON.stringify(submitted));
+  check('提交的是原话', submitted[0]?.text === '往前走一步', JSON.stringify(submitted[0]));
+}
+
+console.log('— 窗口过期后：迟到的「确认」记账为 expired，「停」与普通指令照常提交');
+{
+  // 放在最后：这一段的 timeout 审批会留在库里成为「最近一次审批」，会影响后续用例。
+  const submitted = [];
+  const svc = makeService((input) => {
+    submitted.push(input);
+    return { run_id: 'run-after-timeout' };
+  });
+  const run = svc.submitRun({ prompt: '跟着我', route: 'fast' });
+  const approval = svc.createApproval({
+    runId: run.run_id,
+    capability: 'robot_follow',
+    actionLabel: '向前跟随',
+    argsSummary: '目标：我',
+  });
+  svc.markApprovalAnnounced(approval.approval_id, '请确认：向前跟随。确认请说“确认”。');
+  svc.openConfirmationWindow(approval.approval_id, 30_000);
+  svc.expireApproval(approval.approval_id);
+  check('审批已是 timeout', svc.getApproval(approval.approval_id)?.status === 'timeout');
+
+  const late = svc.dispatchUtterance({
+    utterance_id: 'u-late-confirm',
+    text: '确认',
+    echo: false,
+    started_at: new Date(Date.now() + 10).toISOString(),
+  });
+  check('迟到的确认走审批分支', late.action === 'approval', late.action);
+  check('结算原因是 expired', late.approval?.reason === 'expired', JSON.stringify(late.approval));
+  check('没有把「确认」当成新指令提交', submitted.length === 0, JSON.stringify(submitted));
+  const ignored = store.all(
+    "SELECT * FROM events WHERE type = 'approval.ignored' AND approval_id = ?",
+    approval.approval_id,
+  );
+  check('留下 approval.ignored', ignored.length === 1, String(ignored.length));
+  check(
+    '忽略原因是 expired',
+    ignored[0] ? JSON.parse(ignored[0].params_json).reason === 'expired' : false,
+    ignored[0]?.params_json,
+  );
+
+  // 反向：死掉的窗口不能把「停」或普通指令也吞掉。
+  const stop = svc.dispatchUtterance({ utterance_id: 'u-stop-after-timeout', text: '停', echo: false });
+  check('过期后的「停」照常提交', stop.action === 'submitted', stop.action);
+  const normal = svc.dispatchUtterance({ utterance_id: 'u-after-timeout', text: '往前走一步', echo: false });
+  check('过期后的普通指令照常提交', normal.action === 'submitted', normal.action);
+  check('提交的是原话', submitted.map((s) => s.text).join('|') === '停|往前走一步', JSON.stringify(submitted));
+  svc.cancelRun(run.run_id, '清理');
+}
+
 store.close();
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
