@@ -1,0 +1,25 @@
+{
+  "fixture": "a_single_zh_15s",
+  "kind": "single_utterance",
+  "duration_ms": 15000,
+  "source": "synthesized",
+  "voice": "zh-CN",
+  "expected": {
+    "utterances": 1,
+    "texts": [
+      "瓦力，先检查一下前轮有没有卡住，再把地面上的灰尘清理干净，最后回来向我报告电池还剩多少，如果发现异常就停下来等我。"
+    ]
+  },
+  "notes": "A 类中句。与 5s 夹具同音色、同语速，用来验证首字延迟不随句长增长。合成音不是真人，texts 不是 CER 真值。",
+  "generate": {
+    "segments": [
+      {
+        "name": "a_single_zh_15s",
+        "text": "瓦力，先检查一下前轮有没有卡住，再把地面上的灰尘清理干净，最后回来向我报告电池还剩多少，如果发现异常就停下来等我。",
+        "lead_ms": 900,
+        "tail_ms": 1400,
+        "rate": 0.5
+      }
+    ]
+  }
+}

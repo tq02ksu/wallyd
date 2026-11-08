@@ -1,0 +1,23 @@
+{
+  "fixture": "a_single_zh_5s",
+  "kind": "single_utterance",
+  "duration_ms": 5000,
+  "source": "synthesized",
+  "voice": "zh-CN",
+  "expected": {
+    "utterances": 1,
+    "texts": ["瓦力，请告诉我今天外面的天气怎么样。"]
+  },
+  "notes": "A 类短句。合成音不是真人，expected.texts 只是大致台词，不能当 CER 的 ground truth。时长是名义值，实际时长由生成器回报并记入报告。",
+  "generate": {
+    "segments": [
+      {
+        "name": "a_single_zh_5s",
+        "text": "瓦力，请告诉我今天外面的天气怎么样。",
+        "lead_ms": 900,
+        "tail_ms": 1400,
+        "rate": 0.5
+      }
+    ]
+  }
+}

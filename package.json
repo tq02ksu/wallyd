@@ -22,6 +22,8 @@
     "test:agentd": "npm --prefix agentd run -s test",
     "test:agentd:live": "npm --prefix agentd run -s test:live",
     "test:e2e": "npm --prefix agentd run -s test:e2e",
+    "test:voice": "sh eval/voice/run_baseline.sh",
+    "test:voice:unit": "python3 -m unittest discover -s eval/voice/tests",
     "lint": "node scripts/ci/lint-sources.mjs",
     "gates": "bash scripts/ci/run-gates.sh"
   },

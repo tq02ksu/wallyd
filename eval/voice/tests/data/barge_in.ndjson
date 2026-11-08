@@ -1,0 +1,4 @@
+{"ev":"tts_started","response_id":"tts-replay","dry_run":false,"ts_mono_ns":0}
+{"ev":"tts_chunk_started","response_id":"tts-replay","index":0,"text":"你好","ts_mono_ns":100000000}
+{"ev":"speech_state","state":"speech","utterance_id":"utt-replay","rms_db":-20.0,"audio_ms":2000,"ts_mono_ns":1000000000}
+{"ev":"tts_cancelled","response_id":"tts-replay","reason":"stdin","chunks":3,"played":1,"ts_mono_ns":1180000000}

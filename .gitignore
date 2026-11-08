@@ -27,3 +27,12 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
+
+# GH-14 voice baseline: only the fixture annotations are committed
+/eval/voice/fixtures/**/*.caf
+/eval/voice/fixtures/**/*.wav
+/eval/voice/fixtures/**/*.aiff
+/eval/voice/fixtures/**/*.aif
+/eval/voice/fixtures/**/*.m4a
+/eval/voice/fixtures/**/*.generated.json
+/eval/voice/runs/

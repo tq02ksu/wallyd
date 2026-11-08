@@ -1,0 +1,15 @@
+{
+  "fixture": "d_silence_10min",
+  "kind": "silence",
+  "duration_ms": 600000,
+  "source": "synthesized",
+  "expected": {
+    "utterances": 0,
+    "texts": []
+  },
+  "notes": "D 类纯静音 10 分钟（16kHz 单声道 16bit WAV，全零样本）。判据：speech_finals=0、partials=0、speech_state(speech)=0。注意 --file 到 EOF 总会吐一个 final 信封（文本为空），空文本 final 不算语音 final，否则这条永远判红。",
+  "generate": {
+    "silence_ms": 600000,
+    "audio": "d_silence_10min.wav"
+  }
+}

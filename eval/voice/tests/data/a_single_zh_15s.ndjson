@@ -1,0 +1,7 @@
+{"ev":"ready","locale":"zh_CN","source":"file","utterance_id":"a_single_zh_15s","auto_endpoint":true,"ts_mono_ns":0}
+{"ev":"vad_calibrated","ambient_db":-91.0,"speech_db":-36.0,"silence_db":-42.0,"ts_mono_ns":600000000}
+{"ev":"speech_state","state":"speech","utterance_id":"a_single_zh_15s","rms_db":-27.0,"audio_ms":600,"ts_mono_ns":1400000000}
+{"ev":"partial","text":"瓦力，先检查","revision":1,"utterance_id":"a_single_zh_15s","audio_start_ms":300,"audio_end_ms":1050,"ts_mono_ns":1900000000}
+{"ev":"speech_state","state":"silence","utterance_id":"a_single_zh_15s","audio_ms":14800,"ts_mono_ns":2150000000}
+{"ev":"endpoint","reason":"silence","utterance_id":"a_single_zh_15s","speech_ms":14200,"silence_ms":700,"audio_ms":15500,"ts_mono_ns":2160000000}
+{"ev":"final","text":"瓦力，先检查一下前轮有没有卡住。","utterance_id":"a_single_zh_15s","stop_reason":"silence","ts_mono_ns":2480000000}

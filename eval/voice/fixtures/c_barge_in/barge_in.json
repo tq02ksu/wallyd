@@ -1,0 +1,11 @@
+{
+  "fixture": "c_barge_in",
+  "kind": "barge_in",
+  "duration_ms": 0,
+  "source": "pending-hardware",
+  "expected": {
+    "utterances": 0,
+    "texts": []
+  },
+  "notes": "C 类（机器人自身播放 + 用户插话）合成不了：需要真扬声器输出、真实房间回声和真实人声插入。这里只登记场景，不提供音频；旁边出现任何 .caf/.wav 都会被校验判为「拿假录音冒充真机」，见 eval/voice/README.md。真实采集与 AEC harness 随 #41 落地。"
+}

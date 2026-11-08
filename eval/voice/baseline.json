@@ -1,0 +1,37 @@
+{
+  "schema": "wallyd.voice-baseline/1",
+  "generated_at": null,
+  "seeded": false,
+  "host": null,
+  "device": {
+    "mic": null,
+    "speaker": null,
+    "source": null,
+    "mic_authorization": null,
+    "swift": null,
+    "signature": null,
+    "signature_note": "未播种：没有真机运行"
+  },
+  "environment": {
+    "ambient_db": null,
+    "note": "未播种：还没有真机数据"
+  },
+  "fixtures": [],
+  "metrics": [
+    {"metric": "first_token", "label": "首字延迟", "status": "skipped", "reason": "unseeded: 等待真机播种", "unit": "ms", "threshold_ms": 800, "p50": null, "p95": null, "n": 0, "verdict": null, "samples": [], "failures": []},
+    {"metric": "asr_final", "label": "ASR 最终延迟", "status": "skipped", "reason": "unseeded: 等待真机播种", "unit": "ms", "threshold_ms": 1500, "p50": null, "p95": null, "n": 0, "verdict": null, "samples": [], "failures": []},
+    {"metric": "tts_first_chunk", "label": "TTS 首包", "status": "skipped", "reason": "unseeded: 等待真机播种", "unit": "ms", "threshold_ms": 800, "p50": null, "p95": null, "n": 0, "verdict": null, "samples": [], "failures": []},
+    {"metric": "barge_in", "label": "打断响应", "status": "skipped", "reason": "unseeded: 等待真机播种", "unit": "ms", "threshold_ms": 300, "p50": null, "p95": null, "n": 0, "verdict": null, "samples": [], "failures": []},
+    {"metric": "self_trigger", "label": "自听误触发率", "status": "skipped", "reason": "unseeded: 等待真机播种", "unit": "count", "threshold_max": 0, "p50": null, "p95": null, "n": 0, "verdict": null, "samples": [], "failures": []},
+    {"metric": "capture_continuity", "label": "采集连续性", "status": "skipped", "reason": "unseeded: 等待真机播种", "unit": "ms", "threshold_ms": 2000, "p50": null, "p95": null, "n": 0, "verdict": null, "samples": [], "failures": []}
+  ],
+  "stability": null,
+  "summary": {"pass": 0, "fail": 0, "skip": 6},
+  "result": "incomplete",
+  "exit_code": 3,
+  "warnings": [
+    "baseline.json 未播种：先在同一台 Mac 上跑 sh eval/voice/run_baseline.sh，确认数字可信后加 --seed-baseline 覆盖本文件"
+  ],
+  "baseline": {"seeded": false, "generated_at": null, "relative_limit": 0.2},
+  "seed_note": "未播种。播种后的 baseline.json 与运行报告同构（同一份 JSON，seeded=true）；只有 status=measured 的指标参与 20% 相对回归，SKIP 的 p95 保持 null。"
+}

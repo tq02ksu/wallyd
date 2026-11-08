@@ -1,0 +1,3 @@
+{"ev":"ready","locale":"zh_CN","source":"file","utterance_id":"d_silence_10min","auto_endpoint":true,"ts_mono_ns":0}
+{"ev":"vad_calibrated","ambient_db":-120.0,"speech_db":-36.0,"silence_db":-42.0,"ts_mono_ns":600000000}
+{"ev":"final","text":"","utterance_id":"d_silence_10min","stop_reason":"stdin","ts_mono_ns":60000000000}

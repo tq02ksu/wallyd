@@ -1,0 +1,7 @@
+{"ev":"ready","locale":"zh_CN","source":"file","utterance_id":"b_two_speakers-4","auto_endpoint":true,"ts_mono_ns":0}
+{"ev":"vad_calibrated","ambient_db":-90.0,"speech_db":-36.0,"silence_db":-42.0,"ts_mono_ns":600000000}
+{"ev":"speech_state","state":"speech","utterance_id":"b_two_speakers-4","rms_db":-31.0,"audio_ms":600,"ts_mono_ns":1400000000}
+{"ev":"partial","text":"窗户","revision":1,"utterance_id":"b_two_speakers-4","audio_start_ms":300,"audio_end_ms":1070,"ts_mono_ns":1900000000}
+{"ev":"speech_state","state":"silence","utterance_id":"b_two_speakers-4","audio_ms":5080,"ts_mono_ns":2150000000}
+{"ev":"endpoint","reason":"silence","utterance_id":"b_two_speakers-4","speech_ms":4480,"silence_ms":700,"audio_ms":5780,"ts_mono_ns":2160000000}
+{"ev":"final","text":"窗户已经关好了，还需要我做别的事情吗？","utterance_id":"b_two_speakers-4","stop_reason":"silence","ts_mono_ns":2480000000}
