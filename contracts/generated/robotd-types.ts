@@ -172,6 +172,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/speech/abort": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 中止当前播报（barge-in 的对外能力），幂等
+         * @description **这是「停止播报」，不是「取消任务」**：barge-in 是正常结束，调用方不应把
+         *     未播完的句子当成失败。无活动播报时同样返回 200（幂等），因为用户可能连说两次「停」。
+         *     终态以 `speech.tts_cancelled{reason, played, dropped}` 为准；本端点只表示请求已受理。
+         *     `response_id` 省略表示停掉当前所有播报；给了就只停对应那一轮。
+         */
+        post: operations["speech_abort"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/robot/follow": {
         parameters: {
             query?: never;
@@ -528,6 +551,10 @@ export interface components {
             locale?: string;
             /** @default true */
             auto_endpoint?: boolean;
+        };
+        SpeechAbortRequest: {
+            /** @description 只中止这一轮播报；省略表示停掉当前所有播报。 */
+            response_id?: string;
         };
         /**
          * @description 目标绑定来源二选一，至少给一个：
@@ -1049,6 +1076,39 @@ export interface operations {
             };
             /** @description 已有任务在跑 */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    speech_abort: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["SpeechAbortRequest"];
+            };
+        };
+        responses: {
+            /** @description 已受理；无活动播报时也是 200（幂等） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskAccepted"];
+                };
+            };
+            /** @description 字段不合法 */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

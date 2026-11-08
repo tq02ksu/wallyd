@@ -177,6 +177,13 @@ def default_capabilities() -> list[Capability]:
             summary="流式听音（VAD 端点 + partial/final）",
         ),
         Capability(
+            name="speech.abort",
+            public_name="speech_abort",
+            group="speech",
+            implementation=Implementation.IMPLEMENTED,
+            summary="中止当前播报（barge-in 的对外能力）；无活动播报时幂等返回 200",
+        ),
+        Capability(
             name="audio.state",
             public_name="audio_state",
             group="speech",

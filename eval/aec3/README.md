@@ -7,11 +7,13 @@
 
 - 桥二进制：`sh scripts/build_audio_bridge.sh` → `work/bin/AudioBridge.app`
 - 麦克风授权：稳定签名已生效时无需反复授权（见 eval §5.5）
-- AEC3 源码（仅 `build_aec3.sh` 需要）：
+- AEC3 源码（仅 `build_aec3.sh` 需要）：入库到 `third_party/webrtc-aec3/`，
+  用固定 commit/tag 拉取（需要网络）：
   ```sh
-  git clone --depth 1 <Enaium/webrtc-aec3 镜像地址> work/refs/webrtc-aec3
+  sh scripts/vendor-aec3.sh <commit-or-tag>
   ```
-  该库为 MIT 许可。**源码与编译产物都不入库**，放在 gitignore 的 `work/` 下。
+  该库为 MIT 许可；vendor 脚本会校验 `LICENSE` 与 `src/` 后才入库。
+  `work/refs/webrtc-aec3` 仅作为本地离线实验的回退路径。
 
 ## 脚本与顺序
 
@@ -35,6 +37,12 @@ sh eval/aec3/smoke_play.sh --aec
 
 # 2) VPIO 基线（约 2 分钟，需安静）
 sh eval/aec3/aec_ab2.sh 3
+
+# AEC3 对照（需要桥实现 --aec3；桥必须回报 aec_mode=aec3，否则实验作废）
+sh eval/aec3/aec_ab2.sh 3 aec3
+
+# 步骤 1 的逐样本验收：包装层输出必须与 aec3_eval 逐字节一致
+python3 eval/aec3/compare_wav.py work/verify/eval.wav work/verify/wrapper.wav
 
 # 3) 真实录音 + AEC3 离线对照
 sh eval/aec3/collect_pair.sh work/verify/pairs/r1

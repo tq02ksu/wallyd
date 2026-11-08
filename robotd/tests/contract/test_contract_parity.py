@@ -86,7 +86,9 @@ def test_mcp_tool_face_matches_contract_tools(tools):
     assert "debug_serial" not in names
     assert "events_subscribe" not in names
     assert "robot_announce" not in names
-    assert len(tools) == 14, f"MCP 工具面必须保持 14 项，实际 {len(tools)}"
+    # GH-6 新增 speech_abort：工具面从 14 增到 15。数量是契约的一部分，
+    # 增删端点必须同时改这里，否则「契约悄悄多了一条路」不会被发现。
+    assert len(tools) == 15, f"MCP 工具面必须保持 15 项，实际 {len(tools)}"
 
 
 def test_robot_announce_is_contract_declared_system_path(spec, tools):

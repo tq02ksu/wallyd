@@ -374,6 +374,56 @@ def test_stop_interrupts_announcement(live):
     assert task.state.value == "cancelled"
 
 
+# --------------------------------------------------------------------- 停止播报（GH-6）
+def test_speech_abort_stops_playback_with_user_cancel_and_is_idempotent(live):
+    """判据 5 + reason 区分：先停一轮，再停一次（无活动播报）都必须 200。"""
+    app, port = live
+    bridge = _attach_fake_audio(app)
+
+    status, body, _ = call(
+        port,
+        "POST",
+        "/v1/robot/announce",
+        {
+            "approval_id": "appr-6",
+            "kind": "approval_repeat",
+            "action_label": "向前",
+            "args_summary": "三米",
+        },
+    )
+    assert status == 200, body
+    response_id = next(c["response_id"] for c in bridge.sent if c.get("cmd") == "speak")
+    app.audio.handle_bridge_event({"ev": "tts_started", "response_id": response_id, "chunks": 2})
+    app.audio.handle_bridge_event({"ev": "tts_chunk_started", "index": 0})
+    app.audio.handle_bridge_event({"ev": "tts_chunk_finished", "index": 0})
+
+    status, abort_body, _ = call(port, "POST", "/v1/speech/abort", {"response_id": response_id})
+    assert status == 200, abort_body
+    assert abort_body["status"] == "accepted"
+    assert any(c.get("cmd") == "stop_speak" for c in bridge.sent)
+
+    cancelled = [e for e in app.kernel.recent_events(40) if e.type == "speech.tts_cancelled"]
+    assert len(cancelled) == 1
+    # 必须是 user_cancel，不能被归一化成 barge_in / interrupted。
+    assert cancelled[0].payload["reason"] == "user_cancel"
+    assert cancelled[0].payload["played"] == 1
+    assert cancelled[0].payload["approval_id"] == "appr-6"
+
+    # 无活动播报时连说两次「停」：仍然 200，不报 404。
+    status, again, _ = call(port, "POST", "/v1/speech/abort", {})
+    assert status == 200, again
+    assert again["status"] == "accepted"
+    status, again2, _ = call(port, "POST", "/v1/speech/abort", {"response_id": "tts-missing"})
+    assert status == 200, again2
+
+
+def test_speech_abort_rejects_unknown_fields(live):
+    _app, port = live
+    status, body, _ = call(port, "POST", "/v1/speech/abort", {"text": "stop"})
+    assert status == 400, body
+    assert body["error"]["code"] == "E_VALIDATION"
+
+
 # --------------------------------------------------------------------- 板侧故障
 def test_board_lost_makes_state_degraded_and_stop_reports_no_ack(live):
     app, port = live

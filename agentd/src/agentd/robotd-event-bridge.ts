@@ -377,6 +377,7 @@ function isInterrupted(reason?: string): boolean {
     case 'muted':
     case 'interrupted':
     case 'barge_in':
+    case 'user_cancel':
     case 'bridge_exit':
       return true;
     default:
@@ -388,6 +389,7 @@ function normCancelReason(reason: unknown): string {
   const r = String(reason ?? '');
   switch (r) {
     case 'barge_in':
+    case 'user_cancel':
     case 'interrupted':
     case 'bridge_exit':
     case 'muted':

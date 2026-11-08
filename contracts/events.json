@@ -312,8 +312,30 @@
       "payload": {
         "response_id": {"type": "string", "required": true},
         "task_id": {"type": "string", "required": false},
-        "reason": {"type": "string", "required": true},
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "barge_in",
+            "user_cancel",
+            "stop",
+            "announce_failed",
+            "interrupted",
+            "bridge_exit",
+            "bridge_shutdown",
+            "stop_speak",
+            "engine_unavailable",
+            "synth_error",
+            "muted"
+          ],
+          "notes": "中止原因。barge_in=用户在播报中开口打断；user_cancel=用户显式请求停止播报（POST /v1/speech/abort）；其余为安全旁路、桥退出或合成失败。"
+        },
         "played": {"type": "integer", "required": false},
+        "dropped": {
+          "type": "integer",
+          "required": false,
+          "notes": "有界队列中因满或取消而未播出的块数；只在桥确实丢弃时出现。对账式（实现使用）：played + dropped ≤ chunks，且 played ≤ finished_n。"
+        },
         "approval_id": {"type": "string", "required": false},
         "kind": {"type": "string", "required": false}
       }

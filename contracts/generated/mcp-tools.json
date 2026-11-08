@@ -191,6 +191,28 @@
     }
   },
   {
+    "name": "speech_abort",
+    "description": "中止当前播报（barge-in 的对外能力），幂等\n**这是「停止播报」，不是「取消任务」**：barge-in 是正常结束，调用方不应把\n未播完的句子当成失败。无活动播报时同样返回 200（幂等），因为用户可能连说两次「停」。\n终态以 `speech.tts_cancelled{reason, played, dropped}` 为准；本端点只表示请求已受理。\n`response_id` 省略表示停掉当前所有播报；给了就只停对应那一轮。\n",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "response_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "只中止这一轮播报；省略表示停掉当前所有播报。"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "operation": {
+      "method": "POST",
+      "path": "/v1/speech/abort",
+      "pathParams": []
+    }
+  },
+  {
     "name": "robot_follow",
     "description": "跟随目标人物\n机器人语义能力：调用方表达「跟随哪个目标」，robotd 负责目标跟踪、跟随控制、运动任务与安全停止。\n不是通用自然语言接口，不保证是无人看护安全的自主行驶。\n**目标绑定来源必须唯一**：给 `target_track_id` 就只跟这条 track；只给 `target` 时是语义描述，\n需要机器人自行确定目标，歧义时由调用方澄清而非机器人私自切换。\n目标丢失、观测过期、相机/链路故障时**停止并提交明确终态**，默认不自动旋转搜索。\n",
     "inputSchema": {

@@ -92,3 +92,30 @@ def test_speech_gate_is_registered_in_the_event_contract():
         assert payload[field]["required"] is True
     for field in ("db", "aec_erle_db", "threshold_db"):
         assert field in payload
+
+
+def test_tts_cancelled_reason_enum_separates_barge_in_and_user_cancel():
+    """GH-6：不新增事件类型，但 ``reason`` 的取值必须能区分「谁打断的」。"""
+    events = json.loads((ROOT / "contracts" / "events.json").read_text(encoding="utf-8"))
+    registered = {event["type"]: event for event in events["events"]}
+    payload = registered["speech.tts_cancelled"]["payload"]
+    reason = payload["reason"]
+
+    assert reason["required"] is True
+    assert isinstance(reason["enum"], list)
+    assert "barge_in" in reason["enum"]
+    assert "user_cancel" in reason["enum"]
+    assert "barge_in" != "user_cancel"
+    # 计数对账字段必须仍可用；dropped 只在桥真的丢弃时出现。
+    assert payload["played"]["type"] == "integer"
+    assert payload["dropped"]["required"] is False
+
+
+def test_speech_interrupted_is_never_emitted_by_robotd():
+    """GH-6 裁决 C：沿用 ``speech.tts_cancelled``，不得再 emit ``speech.interrupted``。
+
+    登记表里保留它（历史契约），但生产代码零 emit。若有人把判定搬回一个「判断类事件」，
+    这条会先红。
+    """
+    hits = _lines(ROBOTD_SRC, re.compile(r"speech\.interrupted"))
+    assert hits == [], f"robotd 不得 emit speech.interrupted：{hits}"

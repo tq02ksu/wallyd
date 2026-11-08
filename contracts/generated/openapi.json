@@ -415,6 +415,48 @@
         }
       }
     },
+    "/v1/speech/abort": {
+      "post": {
+        "operationId": "speech_abort",
+        "tags": [
+          "speech"
+        ],
+        "summary": "中止当前播报（barge-in 的对外能力），幂等",
+        "description": "**这是「停止播报」，不是「取消任务」**：barge-in 是正常结束，调用方不应把\n未播完的句子当成失败。无活动播报时同样返回 200（幂等），因为用户可能连说两次「停」。\n终态以 `speech.tts_cancelled{reason, played, dropped}` 为准；本端点只表示请求已受理。\n`response_id` 省略表示停掉当前所有播报；给了就只停对应那一轮。\n",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpeechAbortRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已受理；无活动播报时也是 200（幂等）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "字段不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/robot/follow": {
       "post": {
         "operationId": "robot_follow",
@@ -1250,6 +1292,18 @@
           "auto_endpoint": {
             "type": "boolean",
             "default": true
+          }
+        }
+      },
+      "SpeechAbortRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "response_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "只中止这一轮播报；省略表示停掉当前所有播报。"
           }
         }
       },

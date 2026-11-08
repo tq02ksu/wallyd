@@ -904,6 +904,7 @@
           "required": true,
           "enum": [
             "barge_in",
+            "user_cancel",
             "interrupted",
             "bridge_exit",
             "muted",
