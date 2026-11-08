@@ -16,6 +16,7 @@ import json
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -246,6 +247,24 @@ sys.stderr.flush()
 sys.exit(1)
 """
 
+# 3 行、每行 ~6 KiB（合计 > 8 KiB），行间 sleep 1s，最后再睡 1s。
+# 块缓冲实现会把尾行攒到 EOF（~4s）才交出来；真逐行实现每行 1s 内到达。
+LIVE_THREE_LINES = """
+import json, sys, time
+for index in range(3):
+    print(json.dumps({"ev": "partial", "index": index, "pad": "x" * 6000}), flush=True)
+    time.sleep(1.0)
+time.sleep(1.0)
+"""
+
+# 子进程立刻退出，但孙进程继承 stdout 写端并多活 5s：EOF 永远不来，
+# 读线程会在 terminate_grace 之后仍然活着。报告必须承认尾巴丢了。
+EMIT_ONE_THEN_ORPHAN = """
+import json, subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+print(json.dumps({"ev": "partial", "index": 0}), flush=True)
+"""
+
 
 def fake_command(source: str, *argv: str) -> list[str]:
     return [sys.executable, "-u", "-c", source, *argv]
@@ -276,6 +295,8 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(len(written), 3)
         self.assertEqual([json.loads(line)["index"] for line in written], [0, 1, 2])
         self.assertEqual(path.name, "a_zh_5s.clip.run1.ndjson")
+        self.assertFalse(result["truncated"])
+        self.assertFalse(result["dropped_tail"])
 
     def test_crash_keeps_events_and_reports_exit_code(self):
         result = vb.run_streaming(
@@ -348,6 +369,47 @@ class StreamingTests(unittest.TestCase):
         stderr_log = Path(result["stderr_path"]).read_text(encoding="utf-8")
         self.assertIn("not json", stderr_log)
         self.assertIn("E_MIC_PERM", stderr_log)
+
+    def test_lines_reach_the_callback_while_the_child_is_still_running(self):
+        seen: list[tuple[float, int]] = []
+        started = time.monotonic()
+
+        def record(event):
+            seen.append((time.monotonic() - started, event["index"]))
+
+        result = vb.run_streaming(
+            fake_command(LIVE_THREE_LINES), timeout=30.0, runs_dir=self.runs, on_event=record
+        )
+        elapsed = time.monotonic() - started
+        self.assertTrue(result["ok"])
+        self.assertEqual([index for _, index in seen], [0, 1, 2])
+        # 第 N 行必须在第 N 秒（+1.5s 调度余量）之前进回调，而不是攒到 EOF。
+        for at, index in seen:
+            self.assertLess(at, index + 1.5, f"event {index} arrived at {at:.2f}s")
+        # 尾行在子进程退出前 ~1s 就已交出来：块缓冲实现要等到 EOF，差值接近 0。
+        self.assertLess(seen[2][0], elapsed - 0.6, f"events={seen}, elapsed={elapsed:.2f}s")
+        # 三行合计 > 8 KiB，仍然逐行到达（不是攒满缓冲区才吐）。
+        self.assertGreaterEqual(sum(1 for line in Path(result["events_path"]).read_text(encoding="utf-8").splitlines()), 3)
+
+    def test_orphan_grandchild_is_reported_as_truncated_tail(self):
+        result = vb.run_streaming(
+            fake_command(EMIT_ONE_THEN_ORPHAN),
+            timeout=30.0,
+            runs_dir=self.runs,
+            stem="orphan.run1",
+            terminate_grace=0.5,
+        )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["truncated"])
+        self.assertTrue(result["dropped_tail"])
+        self.assertEqual(result["error"]["code"], "E_TAIL_LOST")
+        self.assertEqual(len(result["events"]), 1)
+        lines = Path(result["events_path"]).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[0])["index"], 0)
+        marker = json.loads(lines[1])
+        self.assertTrue(marker["truncated"])
+        self.assertEqual(marker["reason"], "reader_alive_after_join")
 
     def test_spawn_failure_is_reported_without_files(self):
         result = vb.run_streaming(["/definitely/not/a/binary"], timeout=5.0, runs_dir=self.runs)
@@ -767,6 +829,16 @@ class CollectionPlumbingTests(unittest.TestCase):
         self.assertEqual(failed["events"], 2)
         self.assertEqual(failed["events_path"], timeout_result["events_path"])
         self.assertEqual(report["exit_code"], 3)
+
+    def test_failed_run_record_carries_the_truncated_flag(self):
+        record = vb.failed_run_record(
+            {"error": {"code": "E_TAIL_LOST"}, "events": [{"ev": "partial"}], "truncated": True},
+            "a_single_zh_5s",
+            "clip",
+            1,
+        )
+        self.assertEqual(record["error_code"], "E_TAIL_LOST")
+        self.assertTrue(record["truncated"])
 
     def test_repeat_runs_use_distinct_event_file_stems(self):
         # 两轮不能写同一个文件名，否则后一轮把前一轮的原始事件覆盖掉。

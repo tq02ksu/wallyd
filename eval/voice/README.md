@@ -52,9 +52,12 @@ sh eval/voice/run_baseline.sh --out eval/voice/runs/run2.json
 ## 2. 采集层：逐行流式读 + 同时落盘（GH-45）
 
 采集器（`run_stream_file` / `run_tts_playback` / `run_stream_mic`）统一走 `run_streaming()`：
-`subprocess.Popen(..., bufsize=1, text=True)` 起进程，stdout **读一行就立刻** 解析成事件、
-追加写盘、再交给回调；stderr 同样逐行写 `*.stderr.log`（`--trace` 心跳靠它）。
-`speak-stream` 的 `text\nend\n` 喂法由 `stdin_lines` 参数负责。
+`subprocess.Popen(..., bufsize=0)` 起进程拿裸管道，再用
+`io.TextIOWrapper(..., encoding="utf-8", errors="replace", newline="")` 自己包一层读侧。
+`read(8192)` 是一次 `read(2)`，有多少读多少，不会攒满 8 KiB 或等到 EOF 才把行交出来：
+每读到一行就 ① 解析成事件 ② 原样追加写盘 ③ 交给回调（`on_event` 因此在子进程还在跑时就能拿到行）。
+stderr 同样逐行写 `*.stderr.log`（`--trace` 心跳靠它）。`speak-stream` 的 `text\nend\n`
+喂法由 `stdin_lines` 参数负责。
 
 每次运行一个目录 `eval/voice/runs/<UTC 时间戳>/`（gitignore），里面是
 `<fixture>.<clip>.run<N>.ndjson`（逐行原样落盘的事件）+ 同名 `*.stderr.log`。
@@ -67,6 +70,13 @@ sh eval/voice/run_baseline.sh --out eval/voice/runs/run2.json
 `error.code = "E_EXIT_<code>"`。`ok` 仍然是 `error is None and bool(events)` ——
 有 error 就是 `False`，半截数据不会被当成完整样本；这些运行会记进报告的 `failed_runs`，
 能看到「跑到第几个事件才停」以及原始文件路径。
+
+**读线程卡住也会说出来，而不是悄悄少一截。** 如果子进程把 stdout 写端交给了孙进程，
+EOF 永远不来，`proc.wait()` 能返回但读线程还活着。`run_streaming()` 在
+`terminate_grace` 后检查 `is_alive()`：活着就给结果加 `truncated` / `dropped_tail`、
+`error.code = "E_TAIL_LOST"`，并在落盘 `.ndjson` 尾部追加一行
+`{"truncated": true, "reason": "reader_alive_after_join"}`（**只进文件，不进 `events`**，
+逐字段比较不受影响）。这条样本会被标成不完整，而不是 `ok: true`。
 
 流式读**只改变「什么时候拿到事件」**，不改变「事件里自带的时间戳」：首字仍用
 `partial.audio_end_ms − speech_state.audio_ms`，final 仍用 `endpoint.silence_ms` + finalize 尾巴，

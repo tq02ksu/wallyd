@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import hashlib
+import io
 import json
 import math
 import platform
@@ -797,6 +798,13 @@ def run_streaming(
     ``first_event_ms`` 是首个事件到达的墙钟偏移，**只做诊断**，不参与任何指标：
     指标一律用事件自带的 ``ts_mono_ns`` / ``audio_ms`` / ``audio_end_ms``。
 
+    stdout/stderr 用裸管道（``bufsize=0``）再包 ``TextIOWrapper``，一次 ``read`` 有多少
+    就交多少行，不攒满 8 KiB 才触发 ``on_event``。如果读线程在 ``terminate_grace`` 内仍
+    没退出（子进程把 stdout 写端交给了孙进程，EOF 永远不来），本次样本会被明确标注：
+    结果带 ``truncated`` / ``dropped_tail``、``error.code = "E_TAIL_LOST"``，落盘文件尾部
+    追加一行 ``{"truncated": true, "reason": "reader_alive_after_join"}``（只进文件，不进
+    ``events``）。宁可报告「尾巴丢了」，也不让 ``ok: true`` 配一份悄悄少一截的事件流。
+
     ``ok`` 沿用旧定义 ``error is None and bool(events)``：超时后即使有事件，
     也不是成功（半截数据不能被当成完整样本）。
     """
@@ -809,30 +817,47 @@ def run_streaming(
 
     events: list[dict] = []
     stderr_chunks: list[str] = []
-    state: dict = {"malformed": 0, "bridge_error": None, "first_event_ms": None}
+    state: dict = {
+        "malformed": 0,
+        "bridge_error": None,
+        "first_event_ms": None,
+        "closed": False,
+        "truncated": False,
+    }
+    write_lock = threading.Lock()
 
     def on_stdout(raw: str) -> None:
-        kind, value = _classify_line(raw)
-        if kind == "event" and value is not None:
-            if state["first_event_ms"] is None:
-                state["first_event_ms"] = round((time.monotonic() - start_mono) * 1000.0, 3)
-            events.append(value)
-            # 原样落盘（只去掉行尾换行），保证改动前后的 ndjson 可逐字段比。
-            _append_line(events_handle, raw.rstrip("\r\n") + "\n")
-            if on_event is not None:
-                on_event(value)
-            return
-        if kind == "malformed":
-            state["malformed"] += 1
-        elif kind == "error":
-            state["bridge_error"] = value
-        if kind in ("malformed", "error"):
-            # 坏行 / 桥 fail() 输出不丢：原样记进 stderr 日志，崩溃现场还能查。
-            _append_line(stderr_handle, f"[stdout] {raw.rstrip()}\n")
+        notify = None
+        with write_lock:
+            # 主线程已经判定截断并关了文件：之后到的行无法再落盘，直接丢弃，
+            # 避免截断标记之后又冒出几行「完整」事件。
+            if state["closed"]:
+                return
+            kind, value = _classify_line(raw)
+            if kind == "event" and value is not None:
+                if state["first_event_ms"] is None:
+                    state["first_event_ms"] = round((time.monotonic() - start_mono) * 1000.0, 3)
+                events.append(value)
+                # 原样落盘（只去掉行尾换行），保证改动前后的 ndjson 可逐字段比。
+                _append_line(events_handle, raw.rstrip("\r\n") + "\n")
+                notify = value
+            else:
+                if kind == "malformed":
+                    state["malformed"] += 1
+                elif kind == "error":
+                    state["bridge_error"] = value
+                if kind in ("malformed", "error"):
+                    # 坏行 / 桥 fail() 输出不丢：原样记进 stderr 日志，崩溃现场还能查。
+                    _append_line(stderr_handle, f"[stdout] {raw.rstrip()}\n")
+        if notify is not None and on_event is not None:
+            on_event(notify)
 
     def on_stderr(raw: str) -> None:
-        stderr_chunks.append(raw)
-        _append_line(stderr_handle, raw if raw.endswith("\n") else raw + "\n")
+        with write_lock:
+            if state["closed"]:
+                return
+            stderr_chunks.append(raw)
+            _append_line(stderr_handle, raw if raw.endswith("\n") else raw + "\n")
 
     def pump(stream, handler) -> None:
         try:
@@ -850,8 +875,9 @@ def run_streaming(
             stdin=subprocess.PIPE if stdin_lines is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            bufsize=1,
-            text=True,
+            # 裸管道：read(8192) 是一次 read(2)，有多少读多少。block-buffered 的
+            # 读侧会攒满 8 KiB 或等到 EOF 才把行交给 on_event（GH-45 评审 §1）。
+            bufsize=0,
         )
     except OSError as exc:
         events_handle.close()
@@ -868,11 +894,15 @@ def run_streaming(
             "started_at": started_at,
             "first_event_ms": None,
             "exit_code": None,
+            "truncated": False,
+            "dropped_tail": False,
         }
 
+    stdout_reader = io.TextIOWrapper(proc.stdout, encoding="utf-8", errors="replace", newline="")
+    stderr_reader = io.TextIOWrapper(proc.stderr, encoding="utf-8", errors="replace", newline="")
     readers = [
-        threading.Thread(target=pump, args=(proc.stdout, on_stdout), daemon=True),
-        threading.Thread(target=pump, args=(proc.stderr, on_stderr), daemon=True),
+        threading.Thread(target=pump, args=(stdout_reader, on_stdout), daemon=True),
+        threading.Thread(target=pump, args=(stderr_reader, on_stderr), daemon=True),
     ]
     for reader in readers:
         reader.start()
@@ -883,7 +913,7 @@ def run_streaming(
             # 超时依旧生效。speak-stream 是 ``text\nend\n`` 喂法。
             try:
                 for line in stdin_lines:
-                    proc.stdin.write(f"{line}\n")
+                    proc.stdin.write(f"{line}\n".encode("utf-8"))
                 proc.stdin.flush()
                 proc.stdin.close()
             except (OSError, ValueError):
@@ -908,7 +938,18 @@ def run_streaming(
 
     for reader in readers:
         reader.join(timeout=terminate_grace)
-    for stream in (proc.stdout, proc.stderr):
+    # 读线程还活着 = EOF 永远不来（子进程/孙进程仍握着 stdout 写端）。主线程
+    # 照常返回会让报告显示 ok，却悄悄少了尾巴；这里显式记录截断。
+    tail_lost = any(reader.is_alive() for reader in readers)
+    if tail_lost:
+        with write_lock:
+            state["closed"] = True
+            state["truncated"] = True
+            _append_line(
+                events_handle,
+                json.dumps({"truncated": True, "reason": "reader_alive_after_join"}) + "\n",
+            )
+    for stream in (stdout_reader, stderr_reader):
         try:
             stream.close()
         except (OSError, ValueError):
@@ -917,7 +958,16 @@ def run_streaming(
     stderr_handle.close()
 
     stderr_full = "".join(stderr_chunks)
-    if timed_out:
+    if tail_lost:
+        timeout_note = "；同时已超时" if timed_out else ""
+        error: dict | None = {
+            "code": "E_TAIL_LOST",
+            "message": (
+                f"读线程在 {terminate_grace:.0f}s 内没有退出（子进程可能把 stdout 写端交给了孙进程）；"
+                f"已读到的 {len(events)} 条事件已落盘并以 truncated 标记结尾{timeout_note}"
+            ),
+        }
+    elif timed_out:
         error: dict | None = {
             "code": "E_TIMEOUT",
             "message": f"超时 {timeout:.0f}s；保留已读到的 {len(events)} 条事件（见 {events_path}）",
@@ -940,6 +990,8 @@ def run_streaming(
         "started_at": started_at,
         "first_event_ms": state["first_event_ms"],
         "exit_code": exit_code,
+        "truncated": state["truncated"],
+        "dropped_tail": state["truncated"],
     }
 
 
@@ -1028,6 +1080,7 @@ def failed_run_record(result: dict, fixture: str, clip: str, run_index: int) -> 
         "stderr_path": result.get("stderr_path"),
         "first_event_ms": result.get("first_event_ms"),
         "exit_code": result.get("exit_code"),
+        "truncated": bool(result.get("truncated")),
     }
 
 
