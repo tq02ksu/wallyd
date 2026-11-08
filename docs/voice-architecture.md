@@ -269,12 +269,12 @@ speech.tts_started / speech.tts_chunk / speech.tts_finished 事件
 
 | 事件（对齐后的公共名） | 关键字段 | 用途 | 现状 |
 | --- | --- | --- | --- |
-| `speech.ready` | `locale, source, auto_endpoint` | 会话就绪 | ✅ 已落地（与 `speech.started` 拆开） |
-| `speech.started` / `speech.speech_ended` | `utterance_id, rms_db, audio_ms` | VAD 判「开始说 / 说完了」 | ✅ 已落地（能量 VAD） |
+| `speech.ready` | `locale, source, auto_endpoint, trigger` | 会话就绪；`trigger=api/auto` 区分显式 listen 与自动开轮 | ✅ 已落地（GH-9 加 `trigger`） |
+| `speech.started` / `speech.speech_ended` | `utterance_id, trigger, rms_db, audio_ms` | VAD 判「开始说 / 说完了」 | ✅ 已落地（能量 VAD） |
 | `speech.gate` | `utterance_id, decision, reason, db, aec_erle_db, threshold_db` | 播报期间 VAD 上升是否放行打断（robotd 的 AudioRuntime 单点判定；pass 与 suppressed 都发） | ✅ 已落地（GH-5 / V02） |
 | `speech.partial` | `task_id, utterance_id, revision, text, audio_start_ms/end_ms` | 增量文本（可修订） | ✅ 已落地 |
 | `speech.final` | `task_id, utterance_id, text, stop_reason` | 最终文本（默认冻结） | ✅ 已落地 |
-| `speech.ignored` | `utterance_id, reason, run_id?` | 这一轮被丢弃（`busy` / `echo` / `empty` / `speaking`），让时间线有分母 | ✅ 已落地（GH-7；`speaking` 仅声明，留给 V06） |
+| `speech.ignored` | `utterance_id, reason, run_id?` | 这一轮被丢弃（`busy` / `echo` / `empty` / `speaking`），让时间线有分母 | ✅ 已落地（GH-7；`speaking` 由 GH-9 真正产生） |
 | `speech.speaker_segment` / `speech.speaker_resolved` | `segment_id, utterance_id, speaker_id, start_ms, end_ms, confidence` | 说话人分段 / 身份后置解析 | 待新增（或走 `people.*`） |
 | `speech.tts_started` / `speech.tts_chunk_started` / `speech.tts_chunk_finished` / `speech.tts_finished` / `speech.tts_cancelled` | `response_id, index, reason` | 播放进度与控制 | ✅ 已落地（`speak-stream`） |
 | `speech.interrupted` | `response_id, task_id, reason` | 用户打断机器人（barge-in） | ✅ 已落地（单点仲裁） |

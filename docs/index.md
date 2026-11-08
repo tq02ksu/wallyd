@@ -37,6 +37,7 @@
 - [GH-5 播报期 VAD 门控](design/GH-5.md) - 桥只报事实、AudioRuntime 单点判 barge-in，产出 `speech.gate`
 - [GH-6 实时 AEC3 / speech_abort](design/GH-6.md) - 停止播报端点、打断计数对账、AEC3 离线证据驱动的门限取值与实时接入方案
 - [GH-7 语音 final 变成 run](design/GH-7.md) - `onUtteranceHeard` 走与 `POST /api/run` 同一路径；因果断言、审批/执行分层、中断 final 与 `speech.ignored` 窄事件
+- [GH-9 常听会话状态机](design/GH-9.md) - AudioRuntime 的 idle/listening/thinking/speaking、runtime 驱动的自动续听、`inter_utterance_ms` 防抖与只拦非打断自动轮的 `speaking` 闸
 - [GH-13 run 结论播报](design/GH-13.md) - run 终态经 `robot_speak` 播报；一次性凭据、run_id 幂等、barge-in 只标 `narration: interrupted` 不改 run 状态
 - [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
 - [模型选型](model-selection.md) - LLM / TTS / ASR 选型（苹果生态优先，2026-09-17 口径）
@@ -63,6 +64,7 @@
 - [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
 - [GH-27 澄清不建 run 的设计](design/GH-27.md) - 澄清/歧义只写 `route.clarify` 事件、不占活动名额；受保护的停止规则不受忙限制
 - [GH-8 快速路由规则表的长大方式](design/GH-8.md) - 否定按作用域判断、结构化参数槽、三条规则与能力漂移断言
+- [GH-10 Harness 执行器](design/GH-10.md) - 一会话一 thread、显式 CODEX_HOME、原始事件只落 jsonl、取消走 abort
 
 ## 5. 契约专题（有时效）
 

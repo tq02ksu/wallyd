@@ -6,6 +6,7 @@
  */
 import { Store, nowIso, compactJson, SCHEMA_VERSION } from '../../src/agentd/store.ts';
 import fs from 'node:fs';
+import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 // 每次运行都用干净的库：固定路径 + 不清理会让第二次运行撞主键，
@@ -43,10 +44,13 @@ check(
 check('新库可写', s.isWritable === true);
 check('新库没有事件', s.stats().events === 0);
 
-// 真实部署里已经存在 v1 库：只验证「新建库」不够，v1 → v2 的 ALTER 也必须能跑。
+// 真实部署里已经存在 v1/v2 库：只验证「新建库」不够，旧库的 ALTER 也必须能跑。
 const pV1 = new URL('../../../work/agentd-test/store-v1.sqlite', import.meta.url).pathname;
 for (const f of [pV1, `${pV1}-wal`, `${pV1}-shm`]) fs.rmSync(f, { force: true });
 const raw = new DatabaseSync(pV1);
+raw.exec(`CREATE TABLE sessions (
+  session_id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
 raw.exec(`CREATE TABLE runs (
   run_id TEXT PRIMARY KEY, session_id TEXT, prompt TEXT NOT NULL, status TEXT NOT NULL,
   route TEXT NOT NULL, fast_rule TEXT, source TEXT NOT NULL DEFAULT 'text',
@@ -58,13 +62,49 @@ raw.exec('PRAGMA user_version=1');
 raw.close();
 const migrated = new Store(pV1, { log: () => {} });
 const migratedCols = migrated.all('PRAGMA table_info(runs)').map((c) => c.name);
+const migratedSessionCols = migrated.all('PRAGMA table_info(sessions)').map((c) => c.name);
 check(
   'v1 库升级后补上结论播报列',
   ['result_summary', 'narration_requested_at', 'narration'].every((c) => migratedCols.includes(c)),
   migratedCols.join(','),
 );
+check(
+  'v1 库升级后补上 thread_id（v3）',
+  migratedSessionCols.includes('thread_id'),
+  migratedSessionCols.join(','),
+);
 check('v1 升级后版本正确', migrated.stats().schema_version === SCHEMA_VERSION);
 migrated.close();
+
+// v2 库（GH-13 之后、GH-10 之前）必须能升到 v3，且迁移前有备份、数据不丢。
+const pV2 = new URL('../../../work/agentd-test/store-v2.sqlite', import.meta.url).pathname;
+for (const f of [pV2, `${pV2}-wal`, `${pV2}-shm`]) fs.rmSync(f, { force: true });
+fs.rmSync(path.join(path.dirname(pV2), 'backups'), { recursive: true, force: true });
+const rawV2 = new DatabaseSync(pV2);
+rawV2.exec(`CREATE TABLE sessions (
+  session_id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+rawV2.exec(`CREATE TABLE runs (
+  run_id TEXT PRIMARY KEY, session_id TEXT, prompt TEXT NOT NULL, status TEXT NOT NULL,
+  route TEXT NOT NULL, fast_rule TEXT, source TEXT NOT NULL DEFAULT 'text',
+  idempotency_key TEXT UNIQUE, model_profile_id TEXT, model_revision INTEGER,
+  blocking_reason TEXT, error_code TEXT, harness_exit INTEGER,
+  result_summary TEXT, narration_requested_at TEXT, narration TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT)`);
+rawV2.exec(`INSERT INTO sessions(session_id,title,created_at,updated_at)
+  VALUES('sess-v2','老会话','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`);
+rawV2.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+rawV2.exec('PRAGMA user_version=2');
+rawV2.close();
+const migratedV2 = new Store(pV2, { log: () => {} });
+const v2SessionCols = migratedV2.all('PRAGMA table_info(sessions)').map((c) => c.name);
+check('v2 升级后有 thread_id', v2SessionCols.includes('thread_id'), v2SessionCols.join(','));
+check('v2 升级后版本正确', migratedV2.stats().schema_version === SCHEMA_VERSION);
+check('v2 老会话数据不丢', migratedV2.all("SELECT session_id FROM sessions WHERE session_id='sess-v2'").length === 1);
+const backupDir = path.join(path.dirname(pV2), 'backups');
+const backupFiles = fs.existsSync(backupDir) ? fs.readdirSync(backupDir) : [];
+check('v2 升级前有备份', backupFiles.some((f) => f.includes('store-v2-v2-')), backupFiles.join(',') || 'no backups dir');
+migratedV2.close();
 
 console.log('— 事务提交');
 s.transaction((tx) => {

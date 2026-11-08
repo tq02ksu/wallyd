@@ -94,6 +94,11 @@ class Config:
     #: 同样允许配置覆盖（真机复核后按 eval 数据调整，见 docs/design/GH-6.md §4）。
     barge_in_erle_floor_db: float = 20.0
 
+    # --- 常听会话状态机（GH-9 / V06）---
+    #: 两轮「听」之间的最小间隔（ms）。由 robotd 侧保证，避免把一口气切成两句；
+    #: 与桥的 ``idle_timeout_ms``（桥自己的空闲超时）是两件事。0 = 关闭防抖。
+    inter_utterance_ms: int = 300
+
     # --- 工作区 ---
     #: 运行产物目录（日志、抓帧）。默认相对项目根的 work/，可覆盖。
     work_dir: str = ""
@@ -132,6 +137,8 @@ class Config:
             raise ConfigError("barge_in_erle_margin_db", f"{self.barge_in_erle_margin_db} 超出 [0, 120] dB")
         if not (0.0 <= self.barge_in_erle_floor_db <= 120.0):
             raise ConfigError("barge_in_erle_floor_db", f"{self.barge_in_erle_floor_db} 超出 [0, 120] dB")
+        if not (0 <= self.inter_utterance_ms <= 5000):
+            raise ConfigError("inter_utterance_ms", f"{self.inter_utterance_ms} 超出 [0, 5000]")
         if not self.modeld_url.startswith(("http://", "https://")):
             raise ConfigError("modeld_url", "必须是 http(s) URL")
         if not self.sim and not self.serial_port:
@@ -163,6 +170,7 @@ _ENV_MAP = {
     "ROBOTD_LOG_JSON": ("log_json", "bool"),
     "ROBOTD_BARGE_IN_ERLE_MARGIN_DB": ("barge_in_erle_margin_db", "float"),
     "ROBOTD_BARGE_IN_ERLE_FLOOR_DB": ("barge_in_erle_floor_db", "float"),
+    "ROBOTD_INTER_UTTERANCE_MS": ("inter_utterance_ms", "int"),
 }
 
 _TRUE = {"1", "true", "yes", "on"}

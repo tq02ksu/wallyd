@@ -190,7 +190,8 @@ def test_bridge_auto_ready_is_adopted_as_utterance():
 
 def test_events_for_other_utterance_are_ignored():
     """自动轮次切换后，旧轮的迟到事件不能污染当前轮。"""
-    rt, emitted = make_runtime()
+    # 本用例只看迟到隔离，不测轮次间防抖；把防抖置 0 以免 100ms 内切轮被当成一口气。
+    rt, emitted = make_runtime(inter_utterance_ms=0)
     rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-1"})
     rt.handle_bridge_event({"ev": "final", "utterance_id": "utt-auto-1", "text": "旧轮"})
     rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-2"})
@@ -363,7 +364,8 @@ def test_gate_passes_without_playback():
 
 def test_gate_passes_after_tts_finished():
     """B3：播报结束的尾巴不打断（没有播放对象）。"""
-    rt, emitted = make_runtime()
+    # 播报结束到恢复听之间有 inter_utterance_ms 防抖；本用例只验 gate 的原因。
+    rt, emitted = make_runtime(inter_utterance_ms=0)
     calibrate(rt)
     start_speaking(rt)
     rt.handle_bridge_event({"ev": "tts_finished", "chunks": 2, "played": 2})

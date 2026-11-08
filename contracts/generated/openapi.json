@@ -1486,6 +1486,7 @@
         "description": "常听（always_on）音频现状。识别结果本身走事件流（`speech.*`），本快照只给状态。\n未接麦克风 / 未授权 / 桥退出时必须显式体现，不得伪装成「在听但没说话」。\n",
         "required": [
           "mode",
+          "phase",
           "muted",
           "speaking",
           "bridge"
@@ -1494,9 +1495,20 @@
           "mode": {
             "type": "string",
             "enum": [
-              "always_on"
+              "always_on",
+              "idle"
             ],
-            "description": "当前实现只有常听一种模式"
+            "description": "常听是否由 AudioRuntime 维持。`always_on` = 桥就绪、未静音、未停止，\n自动续听已武装；`idle` = 静音 / 桥丢失 / 显式停止，不再自动开新轮。\n这个值由会话状态机计算，不是常量。\n"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "listening",
+              "thinking",
+              "speaking"
+            ],
+            "description": "会话状态机当前阶段。`listening` = 已开一轮在听；`thinking` = final 有文本、\n等待 agentd 播报；`speaking` = 正在播报；`idle` = 两轮之间（`inter_utterance_ms`\n防抖窗口）。播报结束必须经过 `speaking → idle → listening`，不得跳步。\n"
           },
           "muted": {
             "type": "boolean",
@@ -1504,7 +1516,7 @@
           },
           "speaking": {
             "type": "boolean",
-            "description": "当前是否有语音活动"
+            "description": "当前是否正在播报（等价于有活动 response）"
           },
           "bridge": {
             "$ref": "#/components/schemas/DeviceStatus"

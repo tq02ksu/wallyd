@@ -236,6 +236,7 @@
       "payload_ref": "AudioState",
       "payload_fields": [
         "mode",
+        "phase",
         "muted",
         "speaking",
         "bridge",
@@ -253,6 +254,7 @@
       ],
       "required_fields": [
         "mode",
+        "phase",
         "muted",
         "speaking",
         "bridge"
@@ -266,11 +268,13 @@
       "payload_fields": [
         "task_id",
         "utterance_id",
+        "trigger",
         "locale",
         "auto_endpoint"
       ],
       "required_fields": [
-        "utterance_id"
+        "utterance_id",
+        "trigger"
       ]
     },
     {
@@ -281,11 +285,13 @@
       "payload_fields": [
         "utterance_id",
         "task_id",
+        "trigger",
         "rms_db",
         "aec_erle_db"
       ],
       "required_fields": [
-        "utterance_id"
+        "utterance_id",
+        "trigger"
       ]
     },
     {
