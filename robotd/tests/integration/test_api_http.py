@@ -424,6 +424,56 @@ def test_speech_abort_rejects_unknown_fields(live):
     assert body["error"]["code"] == "E_VALIDATION"
 
 
+def test_audio_state_echoes_the_effective_barge_in_thresholds():
+    """GH-6 D2 判据 2：配置覆盖后的门限经 GET /v1/audio/state 如实回显。"""
+    from pathlib import Path
+
+    work = Path(__file__).resolve().parents[2] / "work" / "pytest-live"
+    work.mkdir(parents=True, exist_ok=True)
+    app = App(
+        Config(
+            sim=True,
+            http_port=0,
+            work_dir=str(work),
+            barge_in_erle_margin_db=30.0,
+            barge_in_erle_floor_db=22.0,
+        )
+    )
+    app.attach_sim_board(SimBoard())
+    app.start()
+    server = serve(app, bind="127.0.0.1", port=0, debug=False)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, state, _ = call(port, "GET", "/v1/audio/state")
+        assert status == 200, state
+        assert state["barge_in_erle_margin_db"] == 30.0
+        assert state["barge_in_erle_floor_db"] == 22.0
+        assert state["barge_in_erle_overridden"] == ["margin", "floor"]
+        # 回显的值就是判定用的值（同一份状态来自 AudioRuntime）。
+        assert app.audio.barge_in_erle_margin_db == state["barge_in_erle_margin_db"]
+        assert app.audio.barge_in_erle_floor_db == state["barge_in_erle_floor_db"]
+
+        # 端到端：配置里的 margin 真的进入 speech.gate 的门限算式（不只是回显）。
+        _attach_fake_audio(app)
+        app.audio.handle_bridge_event(
+            {"ev": "vad_calibrated", "ambient_db": -40.0, "speech_db": -32.0, "silence_db": -38.0}
+        )
+        app.audio.handle_bridge_event({"ev": "aec_echo_probe", "aec_erle_db": 32.0, "render_db": -10.0})
+        app.audio.handle_bridge_event(
+            {"ev": "speech_state", "state": "speech", "utterance_id": "utt-1", "rms_db": -12.0}
+        )
+        gates = [e.payload for e in app.kernel.recent_events(40) if e.type == "speech.gate"]
+        assert gates[-1]["threshold_db"] == -10.0, "ambient(-40) + margin(30) 必须生效"
+        assert gates[-1]["threshold_db"] == -40.0 + state["barge_in_erle_margin_db"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        app.shutdown()
+        thread.join(timeout=3)
+
+
 # --------------------------------------------------------------------- 板侧故障
 def test_board_lost_makes_state_degraded_and_stop_reports_no_ack(live):
     app, port = live

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from robotd.config import Config, ConfigError, from_env
+from robotd.config import Config, ConfigError, from_env, from_file
 
 
 def test_defaults_are_loopback_and_valid():
@@ -58,6 +60,100 @@ def test_barge_in_margin_is_tunable_and_validated():
     with pytest.raises(ConfigError) as ei:
         Config(barge_in_erle_margin_db=-1.0).validate()
     assert ei.value.field == "barge_in_erle_margin_db"
+
+
+def test_barge_in_floor_is_tunable_and_validated():
+    """GH-6 D2：ERLE 底线也是配置项，默认 20，越界拒绝。"""
+    assert Config().barge_in_erle_floor_db == 20.0
+    cfg = from_env(Config(), env={"ROBOTD_BARGE_IN_ERLE_FLOOR_DB": "18"})
+    assert cfg.barge_in_erle_floor_db == 18.0
+    with pytest.raises(ConfigError) as ei:
+        Config(barge_in_erle_floor_db=200.0).validate()
+    assert ei.value.field == "barge_in_erle_floor_db"
+
+
+def test_config_file_layer_sets_barge_in_thresholds(tmp_path):
+    """判据 2：配置文件可覆盖打断门限（默认值不变）。"""
+    path = tmp_path / "robotd.json"
+    path.write_text(
+        json.dumps({"barge_in_erle_margin_db": 30, "barge_in_erle_floor_db": 22}),
+        encoding="utf-8",
+    )
+
+    cfg = from_file(str(path))
+
+    # JSON 的 30 是 int，配置字段是 float：值必须真的生效，而不是被静默忽略。
+    assert cfg.barge_in_erle_margin_db == 30.0
+    assert cfg.barge_in_erle_floor_db == 22.0
+
+
+def test_env_layer_outranks_the_config_file(tmp_path):
+    path = tmp_path / "robotd.json"
+    path.write_text(json.dumps({"barge_in_erle_margin_db": 30}), encoding="utf-8")
+
+    cfg = from_env(from_file(str(path)), env={"ROBOTD_BARGE_IN_ERLE_MARGIN_DB": "12"})
+
+    assert cfg.barge_in_erle_margin_db == 12.0
+
+
+def test_config_file_rejects_unknown_keys(tmp_path):
+    """拼错键必须报错：静默沿用默认值会让「配置里写了 30」变成假话。"""
+    path = tmp_path / "robotd.json"
+    path.write_text(json.dumps({"barge_in_erle_margn_db": 30}), encoding="utf-8")
+
+    with pytest.raises(ConfigError) as ei:
+        from_file(str(path))
+
+    assert ei.value.field == "barge_in_erle_margn_db"
+    assert "未知键" in ei.value.reason
+
+
+def test_config_file_rejects_wrong_types(tmp_path):
+    path = tmp_path / "robotd.json"
+    path.write_text(json.dumps({"barge_in_erle_margin_db": "30"}), encoding="utf-8")
+
+    with pytest.raises(ConfigError) as ei:
+        from_file(str(path))
+
+    assert ei.value.field == "barge_in_erle_margin_db"
+    assert "必须是数字" in ei.value.reason
+
+
+def test_missing_config_file_is_actionable(tmp_path):
+    with pytest.raises(ConfigError) as ei:
+        from_file(str(tmp_path / "missing.json"))
+
+    assert "不存在" in ei.value.reason
+
+
+def test_check_config_cli_reports_the_config_file_thresholds(tmp_path, capsys):
+    """端到端：``--config`` 真的接到 Config，而不是只存在于解析函数里。"""
+    from robotd.__main__ import main
+
+    path = tmp_path / "robotd.json"
+    path.write_text(
+        json.dumps({"barge_in_erle_margin_db": 30, "barge_in_erle_floor_db": 22}),
+        encoding="utf-8",
+    )
+
+    assert main(["check-config", "--sim", "--config", str(path)]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["config"]["barge_in_erle_margin_db"] == 30.0
+    assert payload["config"]["barge_in_erle_floor_db"] == 22.0
+
+
+def test_config_defaults_match_the_audio_runtime_defaults():
+    """``App`` 用两个默认值判断「是否被覆盖」；两处常量漂移会让回显说谎。"""
+    from robotd.core.audio_runtime import (
+        DEFAULT_BARGE_IN_ERLE_FLOOR_DB,
+        DEFAULT_BARGE_IN_ERLE_MARGIN_DB,
+    )
+
+    cfg = Config()
+
+    assert cfg.barge_in_erle_margin_db == DEFAULT_BARGE_IN_ERLE_MARGIN_DB
+    assert cfg.barge_in_erle_floor_db == DEFAULT_BARGE_IN_ERLE_FLOOR_DB
 
 
 def test_frozen_config_cannot_be_mutated():

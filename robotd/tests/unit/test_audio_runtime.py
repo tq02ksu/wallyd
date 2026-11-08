@@ -31,9 +31,9 @@ class FakeBridge:
         self.sent.append(cmd)
 
 
-def make_runtime() -> tuple[AudioRuntime, list[tuple[str, dict]]]:
+def make_runtime(**kwargs) -> tuple[AudioRuntime, list[tuple[str, dict]]]:
     emitted: list[tuple[str, dict]] = []
-    rt = AudioRuntime(emit=lambda t, p: emitted.append((t, p)))
+    rt = AudioRuntime(emit=lambda t, p: emitted.append((t, p)), **kwargs)
     rt.attach(FakeBridge())
     return rt, emitted
 
@@ -542,17 +542,121 @@ def test_barge_in_counting_is_self_consistent():
     assert (played, finished_n, started_n, chunks) == (1, 1, 2, 2)
 
 
-def test_bridge_dropped_is_carried_on_cancelled_without_new_event_type():
+def test_queue_full_drops_are_reported_separately_from_dropped():
+    """GH-6 D3：队列满丢弃是桥的背压事实，不混进打断计数。"""
     rt, emitted = make_runtime()
     start_speaking(rt)
     rt.handle_bridge_event({"ev": "tts_chunk_started", "index": 0})
     rt.handle_bridge_event({"ev": "tts_chunk_finished", "index": 0})
-    # 桥的有界队列丢弃事实：契约不新增事件类型，只累计到 cancelled.dropped。
+    rt.handle_bridge_event({"ev": "tts_played", "index": 0, "played": 1})
     rt.handle_bridge_event({"ev": "tts_chunk_dropped", "index": 1, "reason": "queue_full"})
 
     rt.abort_speaking(reason="user_cancel")
 
     cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"][-1]
     assert cancelled["played"] == 1
-    assert cancelled["dropped"] == 1
+    # finished_n == played == 1：没有「合成完成却未播出」的块，dropped 不出现。
+    assert "dropped" not in cancelled
+    assert cancelled["queue_dropped"] == 1
     assert not [t for t, _p in emitted if t == "speech.tts_chunk_dropped"]
+
+
+def test_barge_in_reconciles_played_dropped_against_finished():
+    """本轮判据 3：播完一部分后 barge-in → ``played + dropped == finished_n``。"""
+    rt, emitted = make_runtime()
+    resp = start_speaking(rt)  # 计划 2 句
+    assert resp.chunks == 2
+    # 第 0 块合成完成并播出；第 1 块只合成完成（还在渲染队列里没播）。
+    rt.handle_bridge_event({"ev": "tts_chunk_started", "index": 0})
+    rt.handle_bridge_event({"ev": "tts_chunk_finished", "index": 0})
+    rt.handle_bridge_event({"ev": "tts_played", "index": 0, "played": 1})
+    rt.handle_bridge_event({"ev": "tts_chunk_started", "index": 1})
+    rt.handle_bridge_event({"ev": "tts_chunk_finished", "index": 1})
+
+    calibrate(rt)
+    probe_erle(rt)
+    vad_rise(rt, db=-5.0)
+
+    chunks = [p for t, p in emitted if t == "speech.tts_started"][-1]["chunks"]
+    finished_n = len([p for t, p in emitted if t == "speech.tts_chunk_finished"])
+    started_n = len([p for t, p in emitted if t == "speech.tts_chunk_started"])
+    cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"][-1]
+
+    assert cancelled["reason"] == "barge_in"
+    played = cancelled["played"]
+    assert played == 1
+    assert cancelled["dropped"] == 1
+    assert played + cancelled["dropped"] == finished_n == 2
+    assert finished_n <= started_n <= chunks == 2
+
+
+def test_cancelled_queue_drain_is_not_double_counted():
+    """取消清队列的丢弃已体现在 finished_n − played，不额外计入 dropped / queue_dropped。"""
+    rt, emitted = make_runtime()
+    start_speaking(rt)
+    rt.handle_bridge_event({"ev": "tts_chunk_started", "index": 0})
+    rt.handle_bridge_event({"ev": "tts_chunk_finished", "index": 0})
+    rt.handle_bridge_event({"ev": "tts_chunk_dropped", "index": 1, "reason": "cancelled"})
+
+    rt.abort_speaking(reason="user_cancel")
+
+    cancelled = [p for t, p in emitted if t == "speech.tts_cancelled"][-1]
+    assert cancelled["played"] == 1
+    assert "dropped" not in cancelled
+    assert "queue_dropped" not in cancelled
+
+
+# ---------------------------------------------------------------- 门限来自配置（GH-6 D2）
+def test_state_defaults_echo_the_unmodified_thresholds():
+    rt, _emitted = make_runtime()
+
+    state = rt.state()
+
+    assert state["barge_in_erle_margin_db"] == 15.0
+    assert state["barge_in_erle_floor_db"] == 20.0
+    assert state["barge_in_erle_overridden"] == []
+
+
+def test_configured_floor_controls_erle_usability():
+    """底线来自配置：低于生效底线 → no_erle（缺证据方向不变）。"""
+    rt, emitted = make_runtime(barge_in_erle_floor_db=25.0)
+    calibrate(rt)
+    start_speaking(rt)
+    probe_erle(rt, erle=22.0)  # 新鲜，但低于配置的 25 dB 底线
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["reason"] == "no_erle"
+    assert rt.response is not None
+
+
+def test_state_echo_matches_the_threshold_the_gate_uses():
+    """本轮判据 2：``/v1/audio/state`` 回显的值必须就是判定用的值，不许只回显不生效。"""
+    rt, emitted = make_runtime(
+        barge_in_erle_margin_db=30.0,
+        barge_in_erle_floor_db=22.0,
+        barge_in_erle_overridden=("margin", "floor"),
+    )
+    state = rt.state()
+    assert state["barge_in_erle_margin_db"] == 30.0
+    assert state["barge_in_erle_floor_db"] == 22.0
+    assert state["barge_in_erle_overridden"] == ["margin", "floor"]
+
+    calibrate(rt)
+    start_speaking(rt)
+    probe_erle(rt, erle=32.0)
+    vad_rise(rt, db=-12.0)  # 低于 ambient(-40) + margin(30) = -10
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "suppressed"
+    assert gate["reason"] == "echo"
+    assert gate["threshold_db"] == AMBIENT_DB + state["barge_in_erle_margin_db"]
+    assert gate["threshold_db"] == rt.speech_db_barge_in
+    assert rt.response is not None
+
+    # 同一配置下越过门限就该真的打断（回显不是装饰）。
+    rt.handle_bridge_event({"ev": "final", "utterance_id": "utt-auto-1", "text": "", "no_speech": True})
+    vad_rise(rt, utterance_id="utt-auto-2", db=-5.0)
+    assert gates(emitted)[-1]["decision"] == "pass"
+    assert [p for t, p in emitted if t == "speech.tts_cancelled"][-1]["reason"] == "barge_in"

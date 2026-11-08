@@ -17,7 +17,14 @@ from typing import Sequence
 
 from . import __version__
 from .app import App, resolve_work_dir, setup_logging
-from .config import DEFAULT_HTTP_PORT, DEFAULT_SERIAL_BAUD, DEFAULT_SERIAL_PORT, Config, from_env
+from .config import (
+    DEFAULT_HTTP_PORT,
+    DEFAULT_SERIAL_BAUD,
+    DEFAULT_SERIAL_PORT,
+    Config,
+    from_env,
+    from_file,
+)
 from .core.errors import RobotdError
 
 log = logging.getLogger("robotd.main")
@@ -45,6 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--modeld", default=None, help="modeld 端点（默认 http://127.0.0.1:8790）")
     p.add_argument("--model", default=None, help="modeld 模型 id")
     p.add_argument("--work-dir", default=None, help="运行产物目录（默认 <项目根>/work）")
+    p.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "JSON 配置文件路径（键为配置字段名，如 barge_in_erle_margin_db）。"
+            "优先级：内置默认 → 配置文件 → 环境变量 → 命令行；也可用 ROBOTD_CONFIG 指定"
+        ),
+    )
     p.add_argument("--debug", action="store_true", help="打开调试旁路（不进公开工具面）")
     p.add_argument("--json-log", action="store_true", help="日志输出 JSON 行")
     p.add_argument(
@@ -72,7 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _config_from_args(args: argparse.Namespace) -> Config:
-    base = from_env(Config())
+    """优先级：内置默认 → 配置文件 → 环境变量 → 命令行。"""
+    import os
+
+    path = args.config or os.environ.get("ROBOTD_CONFIG") or ""
+    base = from_file(path) if path else Config()
+    base = from_env(base)
     return base.with_overrides(
         sim=True if args.sim else None,
         bind=args.bind,
@@ -160,6 +180,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "modeld_url": config.modeld_url,
                         "heartbeat_hz": config.heartbeat_hz,
                         "board_watchdog_ms": config.board_watchdog_ms,
+                        "barge_in_erle_margin_db": config.barge_in_erle_margin_db,
+                        "barge_in_erle_floor_db": config.barge_in_erle_floor_db,
                     },
                     "work_dir": str(resolve_work_dir(config)),
                     "note": "check-config 不打开串口、不启动子进程、不监听端口",
