@@ -640,13 +640,22 @@ export interface components {
          */
         AudioState: {
             /**
-             * @description 当前实现只有常听一种模式
+             * @description 常听是否由 AudioRuntime 维持。`always_on` = 桥就绪、未静音、未停止，
+             *     自动续听已武装；`idle` = 静音 / 桥丢失 / 显式停止，不再自动开新轮。
+             *     这个值由会话状态机计算，不是常量。
              * @enum {string}
              */
-            mode: "always_on";
+            mode: "always_on" | "idle";
+            /**
+             * @description 会话状态机当前阶段。`listening` = 已开一轮在听；`thinking` = final 有文本、
+             *     等待 agentd 播报；`speaking` = 正在播报；`idle` = 两轮之间（`inter_utterance_ms`
+             *     防抖窗口）。播报结束必须经过 `speaking → idle → listening`，不得跳步。
+             * @enum {string}
+             */
+            phase: "idle" | "listening" | "thinking" | "speaking";
             /** @description true = 常听已暂停（不产生 utterance、不跑 ASR） */
             muted: boolean;
-            /** @description 当前是否有语音活动 */
+            /** @description 当前是否正在播报（等价于有活动 response） */
             speaking: boolean;
             bridge: components["schemas"]["DeviceStatus"];
             /** @description 本底噪声是否已校准 */

@@ -172,6 +172,12 @@
       "payload": {
         "task_id": {"type": "string", "required": false},
         "utterance_id": {"type": "string", "required": true},
+        "trigger": {
+          "type": "string",
+          "required": true,
+          "enum": ["api", "auto"],
+          "notes": "这一轮是谁开的：api = POST /v1/speech/listen；auto = 桥 VAD 自动开轮或 AudioRuntime 自动续听。下游不得再用 task_id is None 猜。"
+        },
         "locale": {"type": "string", "required": false},
         "auto_endpoint": {"type": "boolean", "required": false}
       }
@@ -183,6 +189,12 @@
       "payload": {
         "utterance_id": {"type": "string", "required": true},
         "task_id": {"type": "string", "required": false},
+        "trigger": {
+          "type": "string",
+          "required": true,
+          "enum": ["api", "auto"],
+          "notes": "与 speech.ready 同源：api 由显式 listen 开启，auto 由桥 VAD / runtime 续听开启。"
+        },
         "rms_db": {"type": "number", "required": false},
         "aec_erle_db": {
           "type": "number",
@@ -261,7 +273,7 @@
           "type": "string",
           "required": true,
           "enum": ["busy", "echo", "empty", "speaking"],
-          "notes": "这一轮为什么没进入分发。busy=已有轮次/活动任务；echo=自听；empty=空文本；speaking=机器人正在播报（V06 预留，本轮只声明）。"
+          "notes": "这一轮为什么没进入分发。busy=已有轮次/活动任务；echo=自听；empty=空文本；speaking=机器人正在播报且这一轮不是打断（GH-9 / V06）。speaking 是 AudioRuntime 的状态判定，与 speech.gate 的声学判定不是同一件事。"
         },
         "run_id": {"type": "string", "required": false}
       },
