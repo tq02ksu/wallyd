@@ -139,6 +139,7 @@ class App:
             barge_in_erle_margin_db=config.barge_in_erle_margin_db,
             barge_in_erle_floor_db=config.barge_in_erle_floor_db,
             barge_in_erle_overridden=overridden,
+            inter_utterance_ms=config.inter_utterance_ms,
         )
         self.audio.on_utterance_done = self._on_utterance_done
         self.audio.on_response_done = self._on_response_done

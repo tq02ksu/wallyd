@@ -62,6 +62,32 @@ BARGE_IN_ERLE_MAX_AGE_MS = 1000
 #: 按设计文档回退到 30 dB，而不是继续压门限。
 DEFAULT_BARGE_IN_ERLE_MARGIN_DB = 15.0
 
+#: 两轮「听」之间的最小间隔（ms）。由 **robotd 侧** 保证，避免把一口气切成两句。
+#: 与桥的 ``idle_timeout_ms`` 是两件事：后者是桥自己的空闲超时。
+DEFAULT_INTER_UTTERANCE_MS = 300
+
+#: 自动续听开启的一轮在桥侧的空闲超时（ms）。20 s 是桥 ``listen`` 的既有默认值；
+#: 这里显式下发，让静音房间里的自动轮按 ``idle_timeout`` 收尾，而不是挂到 30 分钟
+#: ``max_seconds``。它不是两轮之间的防抖（见 ``DEFAULT_INTER_UTTERANCE_MS``）。
+DEFAULT_AUTO_IDLE_TIMEOUT_MS = 20_000
+
+#: 自动续听一轮的最大时长（s）。与桥侧自动轮的 1800 s 对齐。
+AUTO_MAX_SECONDS = 1800.0
+
+#: 会话状态机的阶段。``mode`` 是「常听是否维持」，``phase`` 是机器当前阶段，两者不同。
+SESSION_IDLE = "idle"
+SESSION_LISTENING = "listening"
+SESSION_THINKING = "thinking"
+SESSION_SPEAKING = "speaking"
+
+
+def _timer_schedule(delay_ms: int, fn: Callable[[], None]) -> threading.Timer:
+    """一次性恢复定时（不是轮询）。daemon 线程，进程退出不阻塞。"""
+    timer = threading.Timer(max(0, int(delay_ms)) / 1000.0, fn)
+    timer.daemon = True
+    timer.start()
+    return timer
+
 
 @dataclass
 class Utterance:
@@ -69,8 +95,9 @@ class Utterance:
 
     utterance_id: str
     task_id: str | None
-    #: True = 桥的 VAD 在常听模式下自动开启，而不是 ``POST /v1/speech/listen`` 发起
-    auto: bool = False
+    #: 这一轮是谁开的：``"api"`` = ``POST /v1/speech/listen``；``"auto"`` = 桥 VAD 或
+    #: AudioRuntime 自动续听。下游不得再用 ``task_id is None`` 猜。
+    trigger: str = "api"
     revision: int = 0
     partial: str | None = None
     speech_ms: int | None = None
@@ -78,6 +105,14 @@ class Utterance:
     saw_speech: bool = False
     errored: str | None = None
     cancelled: bool = False
+    #: 桥是否已经用 ``ready`` 确认这一轮。runtime 主动 ``listen`` 的轮次在收到
+    #: ``ready`` 前是未确认的；桥报 ``E_BUSY`` 时据此释放，避免幽灵轮次卡住常听。
+    confirmed: bool = True
+
+    @property
+    def auto(self) -> bool:
+        """兼容旧读法；唯一真值是 :attr:`trigger`。"""
+        return self.trigger == "auto"
 
 
 @dataclass
@@ -116,9 +151,17 @@ class AudioRuntime:
         barge_in_erle_margin_db: float = DEFAULT_BARGE_IN_ERLE_MARGIN_DB,
         barge_in_erle_floor_db: float = DEFAULT_BARGE_IN_ERLE_FLOOR_DB,
         barge_in_erle_overridden: tuple[str, ...] | list[str] = (),
+        inter_utterance_ms: int = DEFAULT_INTER_UTTERANCE_MS,
+        auto_idle_timeout_ms: int = DEFAULT_AUTO_IDLE_TIMEOUT_MS,
+        now: Callable[[], int] | None = None,
+        schedule: Callable[[int, Callable[[], None]], Any] | None = None,
     ) -> None:
         self._emit = emit
         self._lock = threading.RLock()
+        #: 可注入时钟：30 分钟静音判据用虚拟时间推进，不真 sleep。
+        self._now: Callable[[], int] = now or now_ms
+        #: 一次性恢复调度器。默认真定时器；单测注入假调度器以虚拟推进时间。
+        self._schedule_fn = schedule or _timer_schedule
         self.bridge: Any | None = None
         self.muted = False
         self.utt: Utterance | None = None
@@ -144,6 +187,20 @@ class AudioRuntime:
         #: 最近一次 utterance 的终态回调（由 app 注入，用于把任务表收尾）
         self.on_utterance_done: Callable[[Utterance, str, str | None], None] | None = None
         self.on_response_done: Callable[[Response, str], None] | None = None
+        #: 两轮之间的最小间隔（robotd 侧防抖），可注入小值 / 0 做反向验证。
+        self.inter_utterance_ms = max(0, int(inter_utterance_ms))
+        self.auto_idle_timeout_ms = max(0, int(auto_idle_timeout_ms))
+        #: 会话状态机当前阶段（idle / listening / thinking / speaking）。
+        self.phase = SESSION_IDLE
+        #: 上一轮结束时刻；None = 还没结束过（首次进入常听的防抖落点）。
+        self._last_end_ms: int | None = None
+        #: 桥报过 ``bridge_ready`` 才允许自动续听：没有真实桥就绪就不制造轮次。
+        self._bridge_ready_seen = False
+        #: mute / stop / bridge_exit 之后不再自动开轮，直到显式 listen / unmute。
+        self._halted = False
+        #: 播报期间 gate=pass 的自动轮（打断候选）与被拒绝的轮，用于「同一轮只记一次」。
+        self._speaking_pass: set[str] = set()
+        self._speaking_rejected: set[str] = set()
 
     # ------------------------------------------------------------ 桥装配
     def attach(self, bridge: Any) -> None:
@@ -170,7 +227,8 @@ class AudioRuntime:
         """契约 ``AudioState``。**字段必须齐**，没有数据就填 null/空串，不编估算值。"""
         with self._lock:
             return {
-                "mode": "always_on",
+                "mode": self._mode(),
+                "phase": self.phase,
                 "muted": self.muted,
                 "speaking": self.response is not None,
                 "bridge": self.bridge_status.value,
@@ -184,22 +242,143 @@ class AudioRuntime:
                 "barge_in_erle_margin_db": self.barge_in_erle_margin_db,
                 "barge_in_erle_floor_db": self.barge_in_erle_floor_db,
                 "barge_in_erle_overridden": list(self.barge_in_erle_overridden),
-                "ts": now_ms(),
+                "ts": self._now(),
             }
 
     def emit_state(self) -> None:
         self._emit("audio.state", dict(self.state()))
+
+    # ------------------------------------------------------------ 状态机
+    def _mode(self) -> str:
+        """``always_on`` = runtime 正在维持常听；否则 ``idle``。
+
+        由状态机计算，不是常量：静音 / 桥丢失 / 显式停止都会让它掉回 ``idle``。
+        """
+        with self._lock:
+            if self.muted or self._halted:
+                return "idle"
+            if self.bridge is None or not self.ready():
+                return "idle"
+            return "always_on"
+
+    def _can_resume(self) -> bool:
+        """现在能不能自动开新一轮。**不制造幽灵轮次**的唯一判据。"""
+        with self._lock:
+            return (
+                self._bridge_ready_seen
+                and not self.muted
+                and not self._halted
+                and self.response is None
+                and self.utt is None
+                and self.bridge is not None
+                and self.ready()
+            )
+
+    def _debounce_remaining_ms(self) -> int:
+        with self._lock:
+            if self._last_end_ms is None:
+                return 0
+            return max(0, self._last_end_ms + self.inter_utterance_ms - self._now())
+
+    def _mark_round_end(self, *, thinking: bool) -> None:
+        """一轮听结束：落 ``last_end_ms``，进入 thinking 或 idle，并在 idle 排恢复。"""
+        with self._lock:
+            self._last_end_ms = self._now()
+            self.phase = SESSION_THINKING if thinking else SESSION_IDLE
+        self.emit_state()
+        if not thinking:
+            self._schedule_resume()
+
+    def _after_response(self) -> None:
+        """播报结束（或中止）：回到 idle，再按防抖恢复 listening。"""
+        with self._lock:
+            if self.utt is not None:
+                # 打断时已经认领了新一轮：它本身就是 listening，不再排队开第二轮。
+                self.phase = SESSION_LISTENING
+                self._speaking_pass.clear()
+                self._speaking_rejected.clear()
+                return
+            self._last_end_ms = self._now()
+            self.phase = SESSION_IDLE
+            self._speaking_pass.clear()
+            self._speaking_rejected.clear()
+        self.emit_state()
+        self._schedule_resume()
+
+    def _schedule_resume(self) -> None:
+        """按 ``inter_utterance_ms`` 排**一次性**恢复；不是轮询。"""
+        if self._schedule_fn is None:
+            return
+        if not self._can_resume():
+            return
+        delay = self._debounce_remaining_ms()
+        if delay <= 0:
+            self._start_auto_utterance()
+            return
+        self._schedule_fn(delay, self._resume_if_due)
+
+    def _resume_if_due(self) -> None:
+        if not self._can_resume():
+            return
+        delay = self._debounce_remaining_ms()
+        if delay > 0:
+            if self._schedule_fn is not None:
+                self._schedule_fn(delay, self._resume_if_due)
+            return
+        self._start_auto_utterance()
+
+    def _start_auto_utterance(self) -> Utterance | None:
+        """runtime 驱动的自动续听：开一轮 ``trigger=auto`` 的 listen。"""
+        bridge = self.bridge
+        if bridge is None or not bridge.ready():
+            return None
+        with self._lock:
+            if not self._can_resume():
+                return None
+            utterance_id = f"utt-auto-{uuid.uuid4().hex[:8]}"
+            utt = Utterance(utterance_id=utterance_id, task_id=None, trigger="auto", confirmed=False)
+            self.utt = utt
+            self.phase = SESSION_LISTENING
+        cmd = {
+            "cmd": "listen",
+            "utterance_id": utterance_id,
+            "locale": "zh_CN",
+            "auto_endpoint": True,
+            "max_seconds": AUTO_MAX_SECONDS,
+            "idle_timeout_ms": self.auto_idle_timeout_ms,
+        }
+        bridge.send(cmd)
+        self._emit(
+            "speech.ready",
+            {
+                "utterance_id": utterance_id,
+                "task_id": None,
+                "trigger": "auto",
+                "locale": "zh_CN",
+                "auto_endpoint": True,
+            },
+        )
+        self.emit_state()
+        return utt
 
     # ------------------------------------------------------------ 静音
     def set_muted(self, muted: bool) -> dict[str, Any]:
         """静音期间不产生新的识别结果（R14）。当前这轮若在听，立刻取消。"""
         with self._lock:
             self.muted = muted
+            if not muted:
+                # 显式解除静音等于用户要求恢复常听。
+                self._halted = False
             bridge = self.bridge
         if bridge is not None and bridge.ready():
             bridge.send({"cmd": "mute" if muted else "unmute"}, best_effort=True)
         if muted:
             self._cancel_utterance(reason="muted")
+        else:
+            with self._lock:
+                if self.utt is None and self.response is None:
+                    self.phase = SESSION_IDLE
+            self._schedule_resume()
         self.emit_state()
         return self.state()
 
@@ -220,6 +399,8 @@ class AudioRuntime:
         requested_id = f"utt-{uuid.uuid4().hex[:8]}"
         rejected = False
         with self._lock:
+            # 显式 listen 是对「停止 / 静音」的重新授权；静音守门仍在下面。
+            self._halted = False
             # 静音期间**不允许开启新一轮识别**（R14：静音期间不产生新的识别结果）。
             # 早期缺陷：静音只拦住了自动切句，显式 `POST /v1/speech/listen` 照常执行，
             # 实测静音后仍产生了识别文本。守门必须放在 runtime——所有入口都经过这里，
@@ -231,12 +412,15 @@ class AudioRuntime:
                 # 不再发第二个 listen（桥会按 E_BUSY 拒绝，且会让两套 id 对不上）。
                 if self.utt.auto and self.utt.task_id is None:
                     self.utt.task_id = task_id
+                    self.utt.trigger = "api"
+                    self.phase = SESSION_LISTENING
                     return self.utt
                 rejected = True
                 utt = None
             else:
                 utt = Utterance(utterance_id=requested_id, task_id=task_id)
                 self.utt = utt
+                self.phase = SESSION_LISTENING
         if rejected:
             # 丢账要可见：robotd 侧的「拒绝」与 agentd 侧的「busy」必须在同一条时间线上。
             self._emit("speech.ignored", {"utterance_id": requested_id, "reason": "busy"})
@@ -254,6 +438,7 @@ class AudioRuntime:
             {
                 "utterance_id": utt.utterance_id,
                 "task_id": task_id,
+                "trigger": "api",
                 "locale": locale,
                 "auto_endpoint": auto_endpoint,
             },
@@ -261,9 +446,14 @@ class AudioRuntime:
         return utt
 
     def stop_listening(self, reason: str = "requested") -> None:
+        with self._lock:
+            self._halted = True
+            self._last_end_ms = self._now()
+            self.phase = SESSION_IDLE
         bridge = self.bridge
         if bridge is not None and bridge.ready():
             bridge.send({"cmd": "stop", "reason": reason}, best_effort=True)
+        self.emit_state()
 
     def _cancel_utterance(self, reason: str) -> None:
         with self._lock:
@@ -272,6 +462,8 @@ class AudioRuntime:
                 return
             utt.cancelled = True
             self.utt = None
+            self._last_end_ms = self._now()
+            self.phase = SESSION_IDLE
         # 取消也是终态，但要**明确标为取消**而不是「没说话」
         self._emit(
             "speech.final",
@@ -284,6 +476,7 @@ class AudioRuntime:
         )
         if self.on_utterance_done is not None:
             self.on_utterance_done(utt, "cancelled", reason)
+        self.emit_state()
 
     # ------------------------------------------------------------ 播报
     def new_response(
@@ -297,6 +490,10 @@ class AudioRuntime:
         if bridge is None or not bridge.ready():
             raise RuntimeError(f"语音桥不可用（{self.bridge_status.value}）：{self._last_error()}")
         with self._lock:
+            # 常听会一直持有一轮 listen。播报前必须把它停掉：桥只在 ``activeId == nil``
+            # 时跑 probe VAD，留着一轮会让播报期间完全看不到 VAD 上升，barge-in 失效。
+            in_flight = self.utt
+            self.utt = None
             resp = Response(
                 response_id=f"tts-{uuid.uuid4().hex[:8]}",
                 task_id=task_id,
@@ -304,6 +501,16 @@ class AudioRuntime:
                 kind=kind,
             )
             self.response = resp
+            self.phase = SESSION_SPEAKING
+            self._speaking_pass.clear()
+            self._speaking_rejected.clear()
+        if in_flight is not None:
+            # 这一轮不是「用户说完」，不产 final；桥稍后的 final 会因没有当前轮而被丢弃。
+            bridge.send({"cmd": "stop", "reason": "speaking"}, best_effort=True)
+            if self.on_utterance_done is not None:
+                # api 轮若还挂着任务，必须在任务表收尾，不能让它停在 running。
+                self.on_utterance_done(in_flight, "cancelled", "speaking")
+        self.emit_state()
         return resp
 
     def speak(
@@ -372,12 +579,17 @@ class AudioRuntime:
         )
         if self.on_response_done is not None:
             self.on_response_done(resp, "cancelled")
+        self._after_response()
 
     def clear_response(self, resp: Response) -> None:
         """只清理运行时引用，不发终态事件（调用方自己负责失败事件）。"""
+        cleared = False
         with self._lock:
             if self.response is resp:
                 self.response = None
+                cleared = True
+        if cleared:
+            self._after_response()
 
     # ------------------------------------------------------------ 桥事件翻译
     def handle_bridge_event(self, ev: dict[str, Any]) -> None:
@@ -387,6 +599,13 @@ class AudioRuntime:
             with self._lock:
                 self.mic_format = str(ev.get("asr_format") or "")
                 self.last_error = None
+                self._bridge_ready_seen = True
+                self._halted = False
+                if self.utt is None and self.response is None:
+                    self._last_end_ms = None
+                    self.phase = SESSION_IDLE
+            self._schedule_resume()
+            self.emit_state()
             return
         if name == "ready":
             self._adopt_auto_utterance(ev)
@@ -408,7 +627,7 @@ class AudioRuntime:
             if erle is not None:
                 with self._lock:
                     self.last_erle_db = erle
-                    self.last_erle_ms = now_ms()
+                    self.last_erle_ms = self._now()
                     render = _num(ev.get("render_db"))
                     if render is not None:
                         self.last_render_db = render
@@ -486,9 +705,21 @@ class AudioRuntime:
             self._on_bridge_exit(str(ev.get("reason") or "桥退出"))
             return
         if name == "error":
+            code = str(ev.get("code") or "")
+            retry = False
             with self._lock:
                 self.last_error = str(ev.get("message") or ev.get("code") or "桥报错")
+                utt = self.utt
+                if code == "E_BUSY" and utt is not None and utt.trigger == "auto" and not utt.confirmed:
+                    # runtime 主动开的轮次撞上桥自己的自动开轮：释放这一轮，防抖后重试。
+                    self.utt = None
+                    self._last_end_ms = self._now()
+                    self.phase = SESSION_IDLE
+                    retry = True
             log.warning("语音桥错误：%s", self.last_error)
+            if retry:
+                self.emit_state()
+                self._schedule_resume()
 
     def _utterance_for(self, ev: dict[str, Any]) -> Utterance | None:
         """只返回事件对应的一轮。
@@ -511,13 +742,20 @@ class AudioRuntime:
         没有这一步，``utt-auto-*`` 的 partial/final 会因为运行时没有当前轮而被丢掉——
         「一直在听」就只剩桥自己在听。
 
-        播报期间 probe VAD 的 ``speech_state`` 会先于 ``ready`` 到达；这条路径也用它认领，
-        否则「播报中有人开口」的第一个事实会被丢掉，打断永远不可能发生。
+        三条闸，顺序不能乱：
+
+        1. 静音：不认领（R14 硬闸）；
+        2. 播报中：只有 ``speech.gate`` 判 pass 的打断候选才认领（V02/V03 不能回归），
+           其余记 ``speech.ignored{speaking}``；
+        3. 防抖：上一轮结束后 ``inter_utterance_ms`` 内的桥自动轮不认领。
+
+        第 2 条**不能**简单写成「有 response 就拒绝」——那会把 barge-in 一起拒掉。
         """
         utterance_id = str(ev.get("utterance_id") or "")
         if not utterance_id:
             return None
         rejected = False
+        ignored_speaking = False
         with self._lock:
             if self.muted:
                 return None
@@ -526,12 +764,34 @@ class AudioRuntime:
                 # 显式 listen 会先创建同 id 的轮，再收到桥的 ready；自动轮则直接认领。
                 # 已经认领过的轮次（probe 事实先到）也在这里返回，不重复发 speech.ready。
                 if current.utterance_id == utterance_id:
+                    current.confirmed = True
                     return current
                 rejected = True
                 utt = None
+            elif self.response is not None:
+                # 播报中：只放行 gate 判 pass 的打断候选。
+                if utterance_id in self._speaking_pass:
+                    utt = Utterance(utterance_id=utterance_id, task_id=None, trigger="auto")
+                    self.utt = utt
+                    self.phase = SESSION_LISTENING
+                elif utterance_id in self._speaking_rejected:
+                    # 同一轮只记一次 ignored；probe 与随后的 ready 是同一件事。
+                    utt = None
+                else:
+                    self._speaking_rejected.add(utterance_id)
+                    ignored_speaking = True
+                    utt = None
+            elif self._debounce_remaining_ms() > 0:
+                # 两轮太近：桥又开了一阵，但这不是新话题。静默丢弃（契约不扩张原因）。
+                log.debug("忽略防抖窗口内的自动轮 %s", utterance_id)
+                utt = None
             else:
-                utt = Utterance(utterance_id=utterance_id, task_id=None, auto=True)
+                utt = Utterance(utterance_id=utterance_id, task_id=None, trigger="auto")
                 self.utt = utt
+                self.phase = SESSION_LISTENING
+        if ignored_speaking:
+            self._emit("speech.ignored", {"utterance_id": utterance_id, "reason": "speaking"})
+            return None
         if rejected:
             # 另一轮还在进行：这一轮**不认领**，但不能静默丢掉。
             # 只有桥真的开了一轮（``ready``）才记账；probe 的迟到 ``speech_state``
@@ -539,15 +799,19 @@ class AudioRuntime:
             if ev.get("ev") == "ready":
                 self._emit("speech.ignored", {"utterance_id": utterance_id, "reason": "busy"})
             return None
+        if utt is None:
+            return None
         self._emit(
             "speech.ready",
             {
                 "utterance_id": utt.utterance_id,
                 "task_id": None,
+                "trigger": "auto",
                 "locale": str(ev.get("locale") or "zh_CN"),
                 "auto_endpoint": bool(ev.get("auto_endpoint", True)),
             },
         )
+        self.emit_state()
         return utt
 
     # ------------------------------------------------------------ 打断门控（GH-5 / V02）
@@ -579,7 +843,7 @@ class AudioRuntime:
         """
         with self._lock:
             raw = self.last_erle_db
-            fresh = raw is not None and now_ms() - self.last_erle_ms <= BARGE_IN_ERLE_MAX_AGE_MS
+            fresh = raw is not None and self._now() - self.last_erle_ms <= BARGE_IN_ERLE_MAX_AGE_MS
             fresh_value = raw if fresh else None
             floor = self.barge_in_erle_floor_db
             usable = fresh_value if fresh_value is not None and fresh_value >= floor else None
@@ -608,17 +872,28 @@ class AudioRuntime:
         return "suppressed", "echo"
 
     def _on_vad_speech(self, ev: dict[str, Any]) -> None:
-        """VAD 上升 → 产 ``speech.gate`` → 发 ``speech.started`` → pass 才执行打断。"""
+        """VAD 上升 → 产 ``speech.gate`` → 发 ``speech.started`` → pass 才执行打断。
+
+        播报中的自动轮要先过 gate 再决定认不认领：``pass`` 是打断候选，必须认领；
+        ``suppressed`` 是回声/缺证据，不认领并记 ``speech.ignored{speaking}``。
+        **闸不能加在 gate 之前**，否则 V03 的 barge-in 被一起拒掉。
+        """
         with self._lock:
             utt = self._utterance_for(ev)
             current = self.utt
+            speaking = self.response is not None
         if utt is None:
             if current is not None:
+                return
+            if speaking:
+                self._on_speaking_vad(ev)
                 return
             utt = self._adopt_auto_utterance(ev)
         if utt is None:
             return
+        self._emit_gate_and_started(utt, ev, speaking=speaking)
 
+    def _emit_gate_and_started(self, utt: Utterance, ev: dict[str, Any], *, speaking: bool) -> None:
         with self._lock:
             if utt.saw_speech:
                 # B5：probe VAD 与随后 utterance VAD 是同一轮的两次上升，只判一次。
@@ -647,6 +922,7 @@ class AudioRuntime:
             started: dict[str, Any] = {
                 "utterance_id": utt.utterance_id,
                 "task_id": utt.task_id,
+                "trigger": utt.trigger,
                 "rms_db": None if db is None else round(db, 1),
             }
             if fresh_erle is not None:
@@ -659,6 +935,58 @@ class AudioRuntime:
         if decision == "pass" and speaking:
             # 打断是仲裁动作：本地立即中止并清桥的未播队列，不等桥回报。
             self.abort_response("barge_in")
+
+    def _on_speaking_vad(self, ev: dict[str, Any]) -> None:
+        """播报中的 VAD 上升：先判定，再决定是否认领（不是先拒后判）。"""
+        utterance_id = str(ev.get("utterance_id") or "")
+        if not utterance_id:
+            return
+        with self._lock:
+            if utterance_id in self._speaking_rejected:
+                # probe VAD 与 utterance VAD 是同一轮的两次上升；已记过的不再重复。
+                return
+            db = _num(ev.get("db"))
+            if db is None:
+                db = _num(ev.get("rms_db"))
+            raw_erle, fresh_erle, usable_erle = self._fresh_erle()
+            threshold = self.speech_db_barge_in
+            decision, reason = self._barge_in_verdict(
+                db=db, erle=usable_erle, threshold=threshold, speaking=True
+            )
+            gate: dict[str, Any] = {
+                "utterance_id": utterance_id,
+                "decision": decision,
+                "reason": reason,
+            }
+            if db is not None:
+                gate["db"] = round(db, 1)
+            if raw_erle is not None:
+                gate["aec_erle_db"] = round(raw_erle, 1)
+            if threshold is not None:
+                gate["threshold_db"] = round(threshold, 1)
+            started: dict[str, Any] = {
+                "utterance_id": utterance_id,
+                "task_id": None,
+                "trigger": "auto",
+                "rms_db": None if db is None else round(db, 1),
+            }
+            if fresh_erle is not None:
+                started["aec_erle_db"] = round(fresh_erle, 1)
+
+        self._emit("speech.gate", gate)
+        self._emit("speech.started", started)
+        if decision == "pass":
+            with self._lock:
+                self._speaking_pass.add(utterance_id)
+            utt = self._adopt_auto_utterance({**ev, "ev": "speech_state"})
+            if utt is not None:
+                with self._lock:
+                    utt.saw_speech = True
+                self.abort_response("barge_in")
+            return
+        with self._lock:
+            self._speaking_rejected.add(utterance_id)
+        self._emit("speech.ignored", {"utterance_id": utterance_id, "reason": "speaking"})
 
     # ------------------------------------------------------------ 各事件细节
     def _finish_utterance(self, ev: dict[str, Any]) -> None:
@@ -673,7 +1001,24 @@ class AudioRuntime:
         # 这种情况是失败，不是「用户没说话」。只在字段缺失时才按空文本推断。
         explicit_no_speech = ev.get("no_speech")
         no_speech = bool(explicit_no_speech) if explicit_no_speech is not None else not text
-        stop_reason = str(ev.get("stop_reason") or ("silence" if not utt.saw_speech else "endpoint"))
+        raw_stop_reason = str(ev.get("stop_reason") or ("silence" if not utt.saw_speech else "endpoint"))
+        if utt.trigger == "auto" and no_speech and raw_stop_reason in {"idle", "idle_timeout", "max_seconds"}:
+            # 自动轮在全程静音时只报 endpoint{idle_timeout}，**不发 final**：否则
+            # 「无人说话」的自动轮会按桥的空闲超时一直刷 no_speech final。
+            idle_endpoint: dict[str, Any] = {
+                "utterance_id": utt.utterance_id,
+                "reason": "idle_timeout",
+            }
+            if utt.speech_ms is not None:
+                idle_endpoint["speech_ms"] = utt.speech_ms
+            if utt.silence_ms is not None:
+                idle_endpoint["silence_ms"] = utt.silence_ms
+            self._emit("speech.endpoint", idle_endpoint)
+            if self.on_utterance_done is not None:
+                self.on_utterance_done(utt, "completed", None)
+            self._mark_round_end(thinking=False)
+            return
+        stop_reason = raw_stop_reason
         if no_speech and not utt.saw_speech and stop_reason not in {"engine_unavailable"}:
             stop_reason = "silence"
         if text:
@@ -690,7 +1035,12 @@ class AudioRuntime:
         )
         if self.on_utterance_done is not None:
             failed = stop_reason in {"engine_unavailable", "engine_error"}
+            if failed:
+                # 引擎不可用不会因重试自愈；停掉自动续听，等显式 listen 再恢复。
+                with self._lock:
+                    self._halted = True
             self.on_utterance_done(utt, "failed" if failed else "completed", stop_reason if failed else None)
+        self._mark_round_end(thinking=bool(text) and not no_speech)
 
     def _tts_started(self, ev: dict[str, Any]) -> None:
         resp = self.response
@@ -762,6 +1112,7 @@ class AudioRuntime:
             )
         if self.on_response_done is not None:
             self.on_response_done(resp, "cancelled" if cancelled else "completed")
+        self._after_response()
 
     def _on_bridge_exit(self, reason: str) -> None:
         """桥退出：**不伪装**。当前 utterance 判失败，播报判取消。"""
@@ -769,6 +1120,9 @@ class AudioRuntime:
             self.last_error = reason
             utt, self.utt = self.utt, None
             resp, self.response = self.response, None
+            self._halted = True
+            self._last_end_ms = self._now()
+            self.phase = SESSION_IDLE
         if utt is not None:
             self._emit(
                 "speech.final",
