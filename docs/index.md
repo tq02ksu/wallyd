@@ -91,6 +91,7 @@
 - [GH-18 审批拒绝侧设计](design/GH-18.md) - `X-Wally-Approval` 一次性凭据、共享秘密与已消费 nonce 账本
 - [GH-19：审批复述的系统播报路径](design/GH-19.md) - `robot_announce` 的契约、事件与确认窗口时序
 - [GH-11 语音确认通道设计](design/GH-11.md) - `waiting_confirmation` 的语音 settle、窗口/回声规则与凭据签发
+- [GH-36 macOS CI 门禁分档](design/macos-ci.md) - `apple` lane 的编译/纯逻辑测试/AEC3 fail-closed 口径，以及哪些真机判据永远留给人
 
 ## 8. 实测与评测（有时效）
 
