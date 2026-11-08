@@ -54,7 +54,8 @@ sh eval/voice/run_baseline.sh --out eval/voice/runs/run2.json
 采集器（`run_stream_file` / `run_tts_playback` / `run_stream_mic`）统一走 `run_streaming()`：
 `subprocess.Popen(..., bufsize=0)` 起进程拿裸管道，再用
 `io.TextIOWrapper(..., encoding="utf-8", errors="replace", newline="")` 自己包一层读侧。
-`read(8192)` 是一次 `read(2)`，有多少读多少，不会攒满 8 KiB 或等到 EOF 才把行交出来：
+读侧用 `readline()` 逐行取，裸管道上每次只做一次 `read(2)`，有多少读多少，
+不会攒满 8 KiB 或等到 EOF 才把行交出来：
 每读到一行就 ① 解析成事件 ② 原样追加写盘 ③ 交给回调（`on_event` 因此在子进程还在跑时就能拿到行）。
 stderr 同样逐行写 `*.stderr.log`（`--trace` 心跳靠它）。`speak-stream` 的 `text\nend\n`
 喂法由 `stdin_lines` 参数负责。

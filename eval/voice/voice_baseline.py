@@ -798,9 +798,10 @@ def run_streaming(
     ``first_event_ms`` 是首个事件到达的墙钟偏移，**只做诊断**，不参与任何指标：
     指标一律用事件自带的 ``ts_mono_ns`` / ``audio_ms`` / ``audio_end_ms``。
 
-    stdout/stderr 用裸管道（``bufsize=0``）再包 ``TextIOWrapper``，一次 ``read`` 有多少
-    就交多少行，不攒满 8 KiB 才触发 ``on_event``。如果读线程在 ``terminate_grace`` 内仍
-    没退出（子进程把 stdout 写端交给了孙进程，EOF 永远不来），本次样本会被明确标注：
+    stdout/stderr 用裸管道（``bufsize=0``）再包 ``TextIOWrapper``，读侧 ``readline()``
+    在裸管道上每次只做一次 ``read(2)``，有多少读多少，不攒满 8 KiB 才触发
+    ``on_event``。如果读线程在 ``terminate_grace`` 内仍未退出（子进程把 stdout 写端
+    交给了孙进程，EOF 永远不来），本次样本会被明确标注：
     结果带 ``truncated`` / ``dropped_tail``、``error.code = "E_TAIL_LOST"``，落盘文件尾部
     追加一行 ``{"truncated": true, "reason": "reader_alive_after_join"}``（只进文件，不进
     ``events``）。宁可报告「尾巴丢了」，也不让 ``ok: true`` 配一份悄悄少一截的事件流。
@@ -861,8 +862,13 @@ def run_streaming(
 
     def pump(stream, handler) -> None:
         try:
-            for raw in stream:
-                handler(raw)
+            while True:
+                # 裸管道上 ``readline()`` 每次只做一次 ``read(2)``：有多少读多少，
+                # 不依赖缓冲区策略，也不会攒满 8 KiB 才把行交出来。
+                line = stream.readline()
+                if not line:  # '' 只在 EOF 出现
+                    return
+                handler(line)
         except (OSError, ValueError):
             # 主线程因超时关闭了管道/文件；已经读到的行都已落盘。
             pass
@@ -875,8 +881,9 @@ def run_streaming(
             stdin=subprocess.PIPE if stdin_lines is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            # 裸管道：read(8192) 是一次 read(2)，有多少读多少。block-buffered 的
-            # 读侧会攒满 8 KiB 或等到 EOF 才把行交给 on_event（GH-45 评审 §1）。
+            # 裸管道 + TextIOWrapper.readline()：每次一次 read(2)，有多少读多少。
+            # block-buffered 的读侧会攒满 8 KiB 或等到 EOF 才把行交给 on_event
+            # （GH-45 评审 §1）。
             bufsize=0,
         )
     except OSError as exc:
