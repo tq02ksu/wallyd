@@ -16,6 +16,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from dataclasses import dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from typing import Any, Mapping
 
 DEFAULT_HTTP_PORT = 8787
@@ -88,6 +89,10 @@ class Config:
     # V03：AEC3 离线 P10 证据支持的暂定值；真机 30 分钟 0 误触发未验证。
     # 推导与回退条件见 docs/design/GH-6.md §4。
     barge_in_erle_margin_db: float = 15.0
+    #: ``aec_erle_db`` 能作为打断判据的可用性底线（dB）。低于它视为「AEC 没压住」，
+    #: ``speech.gate`` 落 ``no_erle``。默认 20 来自 AEC3 离线 P10 +31.2 dB 减约 11 dB；
+    #: 同样允许配置覆盖（真机复核后按 eval 数据调整，见 docs/design/GH-6.md §4）。
+    barge_in_erle_floor_db: float = 20.0
 
     # --- 工作区 ---
     #: 运行产物目录（日志、抓帧）。默认相对项目根的 work/，可覆盖。
@@ -125,6 +130,8 @@ class Config:
             raise ConfigError("state_push_hz", f"{self.state_push_hz} 超出 [0.1, 10]")
         if not (0.0 <= self.barge_in_erle_margin_db <= 120.0):
             raise ConfigError("barge_in_erle_margin_db", f"{self.barge_in_erle_margin_db} 超出 [0, 120] dB")
+        if not (0.0 <= self.barge_in_erle_floor_db <= 120.0):
+            raise ConfigError("barge_in_erle_floor_db", f"{self.barge_in_erle_floor_db} 超出 [0, 120] dB")
         if not self.modeld_url.startswith(("http://", "https://")):
             raise ConfigError("modeld_url", "必须是 http(s) URL")
         if not self.sim and not self.serial_port:
@@ -155,6 +162,7 @@ _ENV_MAP = {
     "ROBOTD_WORK_DIR": ("work_dir", "str"),
     "ROBOTD_LOG_JSON": ("log_json", "bool"),
     "ROBOTD_BARGE_IN_ERLE_MARGIN_DB": ("barge_in_erle_margin_db", "float"),
+    "ROBOTD_BARGE_IN_ERLE_FLOOR_DB": ("barge_in_erle_floor_db", "float"),
 }
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -184,6 +192,65 @@ def from_env(base: Config | None = None, env: Mapping[str, str] | None = None) -
         if key in env and env[key] != "":
             changes[field_name] = _coerce(env[key], kind, field_name)
     return cfg.with_overrides(**changes) if changes else cfg.validate()
+
+
+#: 配置文件可覆盖的字段类型。``from __future__ import annotations`` 让 ``field.type``
+#: 是字符串，这里显式列出支持的类型，其余（如 ``Mapping``）不在配置文件里开放。
+_FILE_KINDS = frozenset({"bool", "int", "float", "str"})
+
+
+def from_file(path: str, base: Config | None = None) -> Config:
+    """叠加 JSON 配置文件层。优先级：内置默认 → 配置文件 → 环境变量 → 命令行。
+
+    格式是扁平 JSON 对象，键即 ``Config`` 字段名，例如
+    ``{"barge_in_erle_margin_db": 30}``。**未知键直接拒绝**：把键拼错却静默沿用
+    默认值，会让「配置文件里写了 30」变成一句假话——真机排障时最贵的就是这种沉默。
+    类型也不做宽松转换（``"30"`` 字符串拒绝），错误带字段名。
+    """
+    import json
+    from pathlib import Path
+
+    p = Path(path).expanduser()
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ConfigError("config", f"配置文件不存在：{p}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError("config", f"配置文件无法解析：{p}（{exc}）") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError("config", "配置文件顶层必须是 JSON 对象")
+
+    specs = {f.name: f for f in dataclass_fields(Config)}
+    changes: dict[str, Any] = {}
+    for key, value in raw.items():
+        spec = specs.get(key)
+        if spec is None or key == "extras":
+            allowed = sorted(name for name in specs if name != "extras")
+            raise ConfigError(key, f"配置文件含未知键 {key!r}；可用键：{allowed}")
+        if str(spec.type) not in _FILE_KINDS:
+            raise ConfigError(key, f"配置文件不支持覆盖字段 {key!r}（类型 {spec.type}）")
+        changes[key] = _coerce_file_value(key, value, str(spec.type))
+    cfg = base or Config()
+    return cfg.with_overrides(**changes) if changes else cfg.validate()
+
+
+def _coerce_file_value(key: str, value: Any, kind: str) -> Any:
+    """JSON 值 → 配置字段值。类型不符就报错，不默默 cast。"""
+    if kind == "bool":
+        if not isinstance(value, bool):
+            raise ConfigError(key, f"配置文件里 {key!r} 必须是布尔值，实际 {type(value).__name__}")
+        return value
+    if kind == "int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(key, f"配置文件里 {key!r} 必须是整数，实际 {type(value).__name__}")
+        return value
+    if kind == "float":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(key, f"配置文件里 {key!r} 必须是数字，实际 {type(value).__name__}")
+        return float(value)
+    if not isinstance(value, str):
+        raise ConfigError(key, f"配置文件里 {key!r} 必须是字符串，实际 {type(value).__name__}")
+    return value
 
 
 def resolve_bind_address(bind: str, port: int) -> tuple[int, tuple[Any, ...]]:

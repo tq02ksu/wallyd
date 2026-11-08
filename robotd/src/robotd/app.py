@@ -32,7 +32,11 @@ from typing import Any, Protocol
 from . import SERVICE_NAME, __version__
 from .capabilities import Registry
 from .config import Config
-from .core.audio_runtime import AudioRuntime
+from .core.audio_runtime import (
+    DEFAULT_BARGE_IN_ERLE_FLOOR_DB,
+    DEFAULT_BARGE_IN_ERLE_MARGIN_DB,
+    AudioRuntime,
+)
 from .core.errors import ErrorCode, RobotdError
 from .core.kernel import EventKernel
 from .core.state import RobotStateStore
@@ -120,9 +124,21 @@ class App:
         self.transport: Any | None = None
 
         # 音频运行时（R14）：桥是可选的，没桥时语音能力如实报 unavailable
+        # 门限的生效值与「是否被显式覆盖」一起交给运行时：真机上直接看
+        # GET /v1/audio/state 就知道判据跑在什么门限下（GH-6 D2）。
+        overridden = tuple(
+            name
+            for name, value, default in (
+                ("margin", config.barge_in_erle_margin_db, DEFAULT_BARGE_IN_ERLE_MARGIN_DB),
+                ("floor", config.barge_in_erle_floor_db, DEFAULT_BARGE_IN_ERLE_FLOOR_DB),
+            )
+            if value != default
+        )
         self.audio = AudioRuntime(
             emit=self._audio_emit,
             barge_in_erle_margin_db=config.barge_in_erle_margin_db,
+            barge_in_erle_floor_db=config.barge_in_erle_floor_db,
+            barge_in_erle_overridden=overridden,
         )
         self.audio.on_utterance_done = self._on_utterance_done
         self.audio.on_response_done = self._on_response_done

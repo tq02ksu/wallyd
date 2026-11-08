@@ -12,23 +12,23 @@
 #   - 非 x86 平台排除 *_avx2.cc / *_sse2.cc / *_sse.cc
 #   - 保留 *_neon.cc（arm64 需要）
 #
-# 用法：sh work/verify/build_aec3.sh
+# 用法：sh eval/aec3/build_aec3.sh
 set -eu
 
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
-# 优先用**入库**源码，保证别人 clone 下来就能构建；work/ 只保留作本地离线实验回退。
+# 只认**入库**源码：别人 clone 下来就该能构建。缺源码时 fail-closed 并指向 vendor
+# 脚本——不静默退回 VPIO，也不读 work/ 下的临时目录（那会让 clone 后的构建静默坏掉）。
 SRC=${AEC3_SRC:-$HERE/third_party/webrtc-aec3}
-if [ ! -d "$SRC/src" ] && [ -d "$HERE/work/refs/webrtc-aec3/src" ]; then
-    SRC=$HERE/work/refs/webrtc-aec3
-fi
-OUT=$HERE/work/verify/build
-mkdir -p "$OUT/obj"
 
 [ -d "$SRC/src" ] || {
-    echo "缺源码：$SRC" >&2
-    echo "先运行：sh scripts/vendor-aec3.sh <commit-or-tag>（需要网络）" >&2
+    echo "缺 AEC3 源码：$SRC/src（third_party/webrtc-aec3 尚未入库）" >&2
+    echo "先运行：sh scripts/vendor-aec3.sh <commit-or-tag>（需要网络）；" >&2
+    echo "入库流程与许可证校验见 third_party/README.md" >&2
     exit 1
 }
+
+OUT=$HERE/work/verify/build
+mkdir -p "$OUT/obj"
 
 INC="-I$SRC/src -I$SRC/src/api -I$SRC/src/base/rtc_base -I$SRC/src/base \
  -I$SRC/src/base/system_wrappers/include -I$SRC/src/audio_processing \

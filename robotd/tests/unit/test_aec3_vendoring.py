@@ -7,6 +7,7 @@ AEC3 源码本身无法在无网络沙箱里下载，所以这里不声称「已
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -16,12 +17,28 @@ AB = ROOT / "eval" / "aec3" / "aec_ab2.sh"
 COMPARE = ROOT / "eval" / "aec3" / "compare_wav.py"
 
 
-def test_aec3_build_prefers_the_in_repo_third_party_tree():
+def test_aec3_build_reads_only_the_in_repo_third_party_tree():
     text = BUILD.read_text(encoding="utf-8")
     assert "third_party/webrtc-aec3" in text
     # 构建必须能在 clone 后的仓库内找到源码，而不是只认 work/ 下的临时目录。
     assert "AEC3_SRC" in text
-    assert "work/refs/webrtc-aec3" in text  # 保留本地离线实验的回退路径
+    # GH-6 D1：不许再退回 work/ 下的离线副本——那会让 fresh clone 静默构建出坏库。
+    assert "work/refs/webrtc-aec3" not in text
+
+
+def test_aec3_build_fails_closed_without_vendored_source(tmp_path):
+    """GH-6 D1 判据 1：源码缺失时非 0 退出，且 stderr 指向 vendor 脚本。"""
+    empty = tmp_path / "webrtc-aec3"
+    empty.mkdir()
+    proc = subprocess.run(
+        ["sh", str(BUILD)],
+        capture_output=True,
+        text=True,
+        env={"AEC3_SRC": str(empty), "PATH": "/usr/bin:/bin"},
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "vendor-aec3.sh" in proc.stderr
 
 
 def test_vendor_script_refuses_floating_refs_and_requires_an_explicit_one():
