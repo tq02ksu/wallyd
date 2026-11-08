@@ -161,6 +161,22 @@ struct EnergyVAD {
     private var lastSec: Double?
     private var above = 0
 
+    /// 构造入口（生产与测试共用）。
+    ///
+    /// 必须**显式声明**：全部存储属性都带默认值时，Swift 合成的 memberwise
+    /// initializer 是 `private` 的，`@testable import` 只放宽到 `internal`，
+    /// 抬不动 `private` —— 离线 XCTest（GH-36 `apple` lane）正是卡在这里。
+    /// 运行期内部状态（`speaking` / `speechSec` / `silenceSec` / `lastSec` /
+    /// `above`）刻意不进参数：测试不该能预置内部状态。
+    init(speechDb: Double, silenceDb: Double, minSpeechSec: Double,
+         endpointSilenceSec: Double, onsetFrames: Int = 3) {
+        self.speechDb = speechDb
+        self.silenceDb = silenceDb
+        self.minSpeechSec = minSpeechSec
+        self.endpointSilenceSec = endpointSilenceSec
+        self.onsetFrames = onsetFrames
+    }
+
     mutating func push(db: Double, tSec: Double) -> Action {
         let dt = lastSec.map { max(0.0, min(0.5, tSec - $0)) } ?? 0.02
         lastSec = tSec

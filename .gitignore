@@ -18,6 +18,11 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# macOS CI lane (GH-36): generated test source and SwiftPM build products
+/scripts/apple/.build/
+/scripts/apple/.swiftpm/
+/scripts/apple/Sources/BridgeCore/Generated.swift
+
 # Editors and OS files
 .idea/
 .vscode/

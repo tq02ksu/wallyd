@@ -94,6 +94,20 @@ jobs:
       - name: Run simulation integration
         run: bash scripts/ci/check-integration.sh
 
+  # macOS lane (GH-36): the Linux lanes cannot compile Swift, so before this
+  # job existed every `.swift` change was only grepped, never compiled. It runs
+  # on the official arm64 macOS runner and touches no audio device, camera, or
+  # TCC permission. `check-apple.sh` fails closed while the AEC3 sources are not
+  # vendored; that is intentional, never a skip.
+  apple:
+    name: apple
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Swift compile, XCTest, and AEC3 build gate
+        run: bash scripts/ci/check-apple.sh
+
   # Single required check for branch protection. It only passes when every
   # quality lane passes, and it still reports when an upstream lane fails.
   quality:
@@ -104,6 +118,7 @@ jobs:
       - robotd
       - agentd
       - integration
+      - apple
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -114,4 +129,5 @@ jobs:
           ROBOTD: ${{ needs.robotd.result }}
           AGENTD: ${{ needs.agentd.result }}
           INTEGRATION: ${{ needs.integration.result }}
+          APPLE: ${{ needs.apple.result }}
         run: node scripts/ci/verify-lanes.mjs

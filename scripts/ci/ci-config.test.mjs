@@ -117,7 +117,13 @@ console.log('— .github/workflows/quality.yml');
 const workflowPath = path.join(root, '.github', 'workflows', 'quality.yml');
 const workflow = YAML.parse(readFileSync(workflowPath, 'utf8'));
 const jobs = workflow?.jobs ?? {};
-const lanes = ['static', 'robotd', 'agentd', 'integration'];
+// Every lane the required `quality` check must see. `verify-lanes.mjs` owns the
+// list; the wiring block further down pins it against the workflow, so adding a
+// job without wiring it (or wiring it without adding it here) fails this file.
+const lanes = LANES;
+// Lanes that can run on a Linux workstation. `apple` needs Xcode, so it is
+// CI-only and intentionally absent from `run-gates.sh`.
+const linuxLanes = ['static', 'robotd', 'agentd', 'integration'];
 
 check('the workflow passes its own shape check', checkWorkflowShape('quality.yml', workflow).length === 0, checkWorkflowShape('quality.yml', workflow).join('; '));
 // A workflow with no usable trigger never runs, and a required check that never
@@ -179,6 +185,58 @@ check(
   'quality depends on every lane',
   JSON.stringify([...(jobs.quality?.needs ?? [])].sort()) === JSON.stringify([...lanes].sort()),
   JSON.stringify(jobs.quality?.needs ?? []),
+);
+// --- lane wiring must stay in lockstep -------------------------------------
+// Three places decide whether a lane can turn the required check red:
+// `verify-lanes.mjs` must read it (LANES), `quality.needs` must wait for it,
+// and the aggregate step's `env` must actually forward its result. Dropping any
+// one of them leaves branch protection green while a lane failed or never ran.
+const qualityEnv = Object.assign(
+  {},
+  ...(jobs.quality?.steps ?? []).map((step) => step.env ?? {}),
+);
+for (const lane of LANES) {
+  check(
+    `quality needs the "${lane}" lane`,
+    (jobs.quality?.needs ?? []).includes(lane),
+    JSON.stringify(jobs.quality?.needs ?? []),
+  );
+  check(
+    `quality forwards the "${lane}" result to verify-lanes`,
+    String(qualityEnv[lane.toUpperCase()] ?? '').replace(/\s+/g, '') ===
+      '${{needs.' + lane + '.result}}',
+    JSON.stringify(qualityEnv),
+  );
+}
+check(
+  'quality needs nothing outside LANES',
+  [...(jobs.quality?.needs ?? [])].every((lane) => LANES.includes(lane)),
+  JSON.stringify(jobs.quality?.needs ?? []),
+);
+check(
+  'quality env carries nothing outside LANES',
+  Object.keys(qualityEnv).every((key) => LANES.includes(key.toLowerCase())),
+  JSON.stringify(Object.keys(qualityEnv)),
+);
+// A `paths:` filter on the workflow would let a PR that touches no Swift file
+// merge without ever compiling Swift — the false green GH-36 exists to remove.
+check(
+  'the workflow is not path-filtered',
+  triggers.pull_request?.paths === undefined && triggers.push?.paths === undefined,
+  JSON.stringify(triggers),
+);
+// GH-36: the whole point of the `apple` lane is a macOS compiler. Pin the
+// official arm64 image (never `macos-13`/x86_64, never a self-hosted runner) and
+// the 15-minute budget the issue sets.
+check(
+  'the apple lane runs on the official macOS image',
+  jobs.apple?.['runs-on'] === 'macos-latest',
+  String(jobs.apple?.['runs-on']),
+);
+check(
+  'the apple lane is bounded to 15 minutes',
+  jobs.apple?.['timeout-minutes'] === 15,
+  String(jobs.apple?.['timeout-minutes']),
 );
 // The aggregate job is the only place a failing lane becomes a failing
 // required check. If its step stops evaluating the results (or loses the
@@ -264,7 +322,13 @@ for (const job of Object.values(jobs)) {
     }
   }
 }
-check('CI invokes at least the four lane scripts', referencedScripts.size >= 4, [...referencedScripts].join(', '));
+for (const lane of LANES) {
+  check(
+    `CI invokes scripts/ci/check-${lane}.sh`,
+    referencedScripts.has(`scripts/ci/check-${lane}.sh`),
+    [...referencedScripts].join(', '),
+  );
+}
 for (const script of referencedScripts) {
   check(`referenced script exists: ${script}`, existsSync(path.join(root, script)));
 }
@@ -294,12 +358,18 @@ check(
 
 // README promises that local `npm run gates` matches CI. Both entry points must
 // call the same lane scripts, otherwise one side can silently drop a check.
+// `apple` is the one deliberate exception: it needs Xcode and a macOS host, so
+// `run-gates.sh` stays Linux-only rather than pretending to run it.
 const gatesScript = readFileSync(path.join(root, 'scripts', 'ci', 'run-gates.sh'), 'utf8');
-for (const lane of lanes) {
+for (const lane of linuxLanes) {
   const script = `scripts/ci/check-${lane}.sh`;
-  check(`CI runs ${script}`, referencedScripts.has(script), [...referencedScripts].join(', '));
   check(`run-gates.sh runs ${script}`, gatesScript.includes(`bash ${script}`));
 }
+check(
+  'run-gates.sh stays Linux-only (the apple lane needs Xcode)',
+  !gatesScript.includes('check-apple.sh'),
+  gatesScript,
+);
 
 // The workflow decides *which* lane scripts run; the scripts decide *what*
 // runs. A lane script that drops `set -euo pipefail` runs its failing suite and
@@ -316,6 +386,7 @@ const laneCommands = {
   robotd: ['ruff format', 'ruff check', 'python -m pytest'],
   agentd: ['npm --prefix agentd test'],
   integration: ['--sim', '/v1/health', 'npm --prefix agentd run test:live'],
+  apple: ['swiftc -parse', 'swift test', 'eval/aec3/build_aec3.sh'],
 };
 const strictMode = /^set -euo pipefail$/m;
 for (const [lane, commands] of Object.entries(laneCommands)) {
@@ -327,6 +398,44 @@ for (const [lane, commands] of Object.entries(laneCommands)) {
 }
 check('run-gates.sh fails fast', strictMode.test(gatesScript), gatesScript.slice(0, 200));
 check('run-gates.sh checks diff hygiene', /git diff --check/.test(gatesScript), gatesScript);
+
+// GH-36: the apple lane exists so Swift is *compiled*. `|| true` (or a
+// continue-on-error added later) would turn a compile failure back into a
+// display-only check.
+const appleScript = readFileSync(path.join(root, 'scripts', 'ci', 'check-apple.sh'), 'utf8');
+check('the apple lane never masks a failure', !/\|\|\s*true\b/.test(appleScript), appleScript);
+// `eval/aec3/build_aec3.sh` (GH-6) is fail-closed on its own: with no vendored
+// sources it exits non-zero and points at `scripts/vendor-aec3.sh`. "The sources
+// are not vendored yet" is not a defect, so the lane turns exactly that cause
+// into a loud SKIP and stays red for every other failure. A silent skip, an
+// unconditional `exit 0`, or dropping the vendor hint would each make the step
+// unreadable when it really breaks.
+check(
+  'the apple lane keeps the AEC3 vendor hint',
+  /vendor-aec3\.sh/.test(appleScript),
+  appleScript,
+);
+check(
+  'the apple lane records absent AEC3 sources as an explicit SKIP',
+  appleScript.includes('SKIP: third_party/webrtc-aec3 empty'),
+  appleScript,
+);
+check(
+  'the apple lane skips AEC3 only when the sources are absent and build_aec3.sh said so',
+  appleScript.includes('[ "$aec3_absent" = 1 ] && grep -q') &&
+    appleScript.includes("grep -q 'vendor-aec3\\.sh'"),
+  appleScript,
+);
+// `EnergyVAD` gives every stored property a default value, so Swift synthesises
+// a *private* memberwise initializer and `@testable import` cannot reach it
+// (that already produced one red lane). The extracted core must keep an explicit
+// `init(speechDb: ...)`; without this assertion the diagnosis only shows up as a
+// puzzling compile error in the XCTest step.
+check(
+  'the apple lane asserts the extracted core keeps an explicit EnergyVAD init',
+  appleScript.includes("grep -q 'init(speechDb:'"),
+  appleScript,
+);
 
 // README documents `npm run lint` and `npm run gates`, and the static lane
 // calls `npm run lint` by name. Renaming a script in package.json would break

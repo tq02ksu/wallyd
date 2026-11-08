@@ -2,7 +2,7 @@
 /**
  * Aggregate result gate for the required `quality` check.
  *
- * The `quality` job only exists to turn four lane results into one branch
+ * The `quality` job only exists to turn every lane result into one branch
  * protection status. Inline shell in the workflow did that, but no test could
  * reach it: a typo that turned the comparison into a no-op would leave the
  * required check green while a lane failed. Keeping the logic here makes it
@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** Lane job ids, in the order the aggregate check reports them. */
-export const LANES = ['static', 'robotd', 'agentd', 'integration'];
+export const LANES = ['static', 'robotd', 'agentd', 'integration', 'apple'];
 
 /**
  * @param {Record<string, string | undefined>} results lane id -> GitHub job result
