@@ -35,6 +35,13 @@ export interface RunRequestInput {
   session_id?: string;
   source?: 'text' | 'asr';
   idempotency_key?: string;
+  /**
+   * 仅供 Harness 消歧的会话上下文块（GH-12）。
+   *
+   * **不落库、不进事件**：直接给 `executeHarness`，由 harness 格式化进发给模型的
+   * prompt。拼进 `prompt` 字段会同时污染 run 记录与事件正文。
+   */
+  context?: string | null;
 }
 
 export interface RunRequestDeps {
@@ -44,7 +51,7 @@ export interface RunRequestDeps {
   /** 命中可执行规则后启动执行。装配层注入，**不阻塞响应**。 */
   executeFast: (runId: string, capability: string, args: Record<string, unknown>) => void;
   /** `route: harness` 的 run 交给 Harness 执行器。装配层注入，**不阻塞响应**。 */
-  executeHarness: (runId: string) => void;
+  executeHarness: (runId: string, context?: string | null) => void;
   /** 测试可注入的规则表；生产使用 `FAST_RULES`。 */
   rules?: readonly FastRule[];
   /**
@@ -135,7 +142,7 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
   }
   // Harness 同理：建了 run 就要推进，否则它会永远停在 accepted。
   if (route === 'harness' && !result.duplicate) {
-    deps.executeHarness(result.run_id);
+    deps.executeHarness(result.run_id, input.context ?? null);
   }
 
   return {

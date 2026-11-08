@@ -125,7 +125,7 @@ try {
   // templates 是数组（每条带 type 字段），不是以 type 为键的对象。
   const tpl = new Map(events.templates.map((t) => [t.type, t]));
   const types = events.templates.map((t) => t.type);
-  check('登记的事件类型有 38 种', types.length === 38, `实际 ${types.length}`);
+  check('登记的事件类型有 40 种', types.length === 40, `实际 ${types.length}`);
   // R14 的语音事件必须登记：缺任何一条，robotd 的语音事件到了 agentd 会被
   // `isRegistered` 拒写（实测踩过——事件被静默丢掉，页面上什么都没有）。
   const speechRequired = [
@@ -139,6 +139,21 @@ try {
   ];
   const speechMissing = speechRequired.filter((t) => !tpl.has(t));
   check('R14 语音事件全部已登记', speechMissing.length === 0, speechMissing.join(', '));
+  // GH-12 的会话回合事件必须登记：未登记就写不进去，上下文续接在时间线上会毫无痕迹。
+  check('conversation.turn_joined 已登记', tpl.has('conversation.turn_joined'));
+  check('conversation.turn_reset 已登记', tpl.has('conversation.turn_reset'));
+  const joinedFields = tpl.get('conversation.turn_joined')?.payload_fields ?? [];
+  check(
+    'turn_joined 只带 turn_id/count（不含对话正文）',
+    joinedFields.length === 2 && joinedFields.includes('turn_id') && joinedFields.includes('count'),
+    joinedFields.join(','),
+  );
+  const resetFields = tpl.get('conversation.turn_reset')?.payload_fields ?? [];
+  check(
+    'turn_reset 只带 reason',
+    resetFields.length === 1 && resetFields.includes('reason'),
+    resetFields.join(','),
+  );
   check('每条模板都有 title', events.templates.every((t) => t.title));
   check('每条模板都有 summary', events.templates.every((t) => t.summary));
 

@@ -584,6 +584,45 @@ async function runAcceptance() {
       "SELECT run_id FROM runs WHERE idempotency_key = 'asr:utt-barge'",
     ));
 
+    // ------------------------------------------------ GH-12 判据 6：显式结束不建 run
+    const runsBeforeEnd = runCount();
+    const joinedBeforeEnd = runtime.store.one(
+      "SELECT COUNT(*) AS n FROM events WHERE type = 'conversation.turn_joined'",
+    ).n;
+    feed('speech.final', { utterance_id: 'utt-conversation-end', text: '算了', stop_reason: 'endpoint' });
+    await new Promise((r) => setTimeout(r, 40));
+    check('判据 6：说「算了」不建 run', runCount() === runsBeforeEnd, `${runsBeforeEnd} → ${runCount()}`);
+    check('判据 6：没有 asr run', !runtime.store.one(
+      "SELECT run_id FROM runs WHERE idempotency_key = 'asr:utt-conversation-end'",
+    ));
+    const endReset = runtime.store.one(
+      "SELECT * FROM events WHERE type = 'conversation.turn_reset' ORDER BY seq DESC LIMIT 1",
+    );
+    check(
+      '判据 6：写 turn_reset{user_ended}',
+      endReset ? JSON.parse(endReset.params_json).reason === 'user_ended' : false,
+      endReset?.params_json,
+    );
+    check(
+      '判据 6：conversation.* 里没有「算了」原文',
+      runtime.store.one(
+        "SELECT COUNT(*) AS n FROM events WHERE type LIKE 'conversation.%' AND params_json LIKE '%算了%'",
+      ).n === 0,
+    );
+
+    // 结束之后下一句重新从第 1 句起：不该出现新的 turn_joined。
+    feed('speech.final', { utterance_id: 'utt-after-end', text: '慢一点', stop_reason: 'endpoint' });
+    const afterEndRun = await waitFor(() => runtime.store.one(
+      'SELECT * FROM runs WHERE idempotency_key = ?',
+      'asr:utt-after-end',
+    ));
+    const joinedAfterEnd = runtime.store.one(
+      "SELECT COUNT(*) AS n FROM events WHERE type = 'conversation.turn_joined'",
+    ).n;
+    check('判据 6：结束后的下一句照常建 run', Boolean(afterEndRun), String(runCount()));
+    check('判据 6：结束后的下一句走 harness', afterEndRun?.route === 'harness', afterEndRun?.route);
+    check('判据 6：下一句不续旧回合（无新 turn_joined）', joinedAfterEnd === joinedBeforeEnd, `${joinedBeforeEnd} → ${joinedAfterEnd}`);
+
     // ------------------------------------------------ speech.ignored 全链：robotd 发 → agentd 收
     const obsBeforeDropped = runtime.store.one(
       "SELECT COUNT(*) AS n FROM events WHERE type = 'observation.speech_ignored'",

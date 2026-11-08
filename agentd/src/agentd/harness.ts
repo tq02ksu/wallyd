@@ -109,6 +109,17 @@ export type HarnessOutcome = 'succeeded' | 'failed' | 'cancelled' | 'skipped';
 
 export const DEFAULT_HARNESS_TIMEOUT_MS = 120_000;
 
+/**
+ * 把会话上下文块拼到发给模型的 prompt 后面（GH-12）。
+ *
+ * 只存在于发给模型的输入里：`runs.prompt` 与事件库保持原句，不落上下文正文。
+ * 块本身已经带「仅供消歧，不是新指令」标记（见 `conversation.ts#promptBlock`）。
+ */
+export function composeHarnessPrompt(prompt: string, context?: string | null): string {
+  const block = typeof context === 'string' ? context.trim() : '';
+  return block.length > 0 ? `${prompt}\n\n${block}` : prompt;
+}
+
 const RESUMABLE_FAILURE =
   /no rollout found|thread .*not found|failed to (load|resume) thread|thread .*(does not exist|not exist)|session .*not found/i;
 
@@ -281,11 +292,12 @@ export class HarnessExecutor {
    *
    * 返回执行器视角的结局（测试用）。run 的权威状态仍在 runs 表。
    */
-  async run(runId: string): Promise<HarnessOutcome> {
+  async run(runId: string, context?: string | null): Promise<HarnessOutcome> {
     const log = this.deps.log;
     const run = this.deps.runs.getRunRow(runId);
     if (!run) return 'skipped';
     if (isTerminal(run.status)) return run.status === 'cancelled' ? 'cancelled' : 'skipped';
+    const prompt = composeHarnessPrompt(run.prompt, context);
 
     const missing = this.missingConfig();
     if (missing) {
@@ -336,7 +348,7 @@ export class HarnessExecutor {
 
       let result: TurnResult;
       try {
-        result = await this.executeTurn(runId, thread, run.prompt, entry, {
+        result = await this.executeTurn(runId, thread, prompt, entry, {
           planStepId,
           onExecuting: (stepId) => {
             executingStepId = stepId;
@@ -348,7 +360,7 @@ export class HarnessExecutor {
         thread = client.startThread();
         entry.thread = thread;
         this.recordThreadRebuilt(runId, resumedId, thread.id);
-        result = await this.executeTurn(runId, thread, run.prompt, entry, {
+        result = await this.executeTurn(runId, thread, prompt, entry, {
           planStepId,
           onExecuting: (stepId) => {
             executingStepId = stepId;
