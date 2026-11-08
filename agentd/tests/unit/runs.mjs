@@ -243,6 +243,36 @@ const windowForR8 = store.one(
 check('被拒的直改没有开确认窗口', windowForR8 === 0);
 svc.cancelRun(r8.run_id, '清理');
 
+console.log('— 结论播报字段（GH-13）');
+const r9 = svc.submitRun({ prompt: '播报字段', route: 'fast' });
+check('narration 默认 null', svc.getRunDetail(r9.run_id).run.narration === null);
+check('result.summary 默认 null', svc.getRunDetail(r9.run_id).result.summary === null);
+svc.transition(r9.run_id, 'succeeded', { reason: 'fast_rule', detail: '已下发' });
+check('首次认领播报成功', svc.claimNarrationAttempt(r9.run_id) === true);
+check('重复认领被拒（同一 run 只播一次）', svc.claimNarrationAttempt(r9.run_id) === false);
+svc.setNarration(r9.run_id, 'interrupted');
+const d9 = svc.getRunDetail(r9.run_id);
+check('narration 落库', d9.run.narration === 'interrupted', d9.run.narration);
+check('narration 不改 run 状态', d9.run.status === 'succeeded', d9.run.status);
+const r10 = svc.submitRun({ prompt: '取消不播报', route: 'fast' });
+svc.cancelRun(r10.run_id, '测试');
+check('取消的 run 不认领播报', svc.claimNarrationAttempt(r10.run_id) === false);
+
+console.log('— 终态播报回调只触发一次且跳过 cancelled');
+const terminalHits = [];
+const svc2 = new RunService({
+  store,
+  events,
+  log,
+  onTerminal: (runId) => terminalHits.push(runId),
+});
+const r11 = svc2.submitRun({ prompt: '终态回调', route: 'fast' });
+svc2.transition(r11.run_id, 'succeeded', { reason: 'fast_rule', detail: '已下发' });
+check('succeeded 触发播报回调', terminalHits.length === 1 && terminalHits[0] === r11.run_id, JSON.stringify(terminalHits));
+const r12 = svc2.submitRun({ prompt: '取消不回调', route: 'fast' });
+svc2.cancelRun(r12.run_id, 'stop');
+check('cancelled 不触发播报回调', terminalHits.length === 1, JSON.stringify(terminalHits));
+
 console.log('— 不可写 fail-closed');
 store.markUnwritable('磁盘满（模拟）');
 check('写会话被拒 E_STORE', expectApi(() => svc.createSession('x'), 'E_STORE') === 'ok');

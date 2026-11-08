@@ -50,6 +50,7 @@
     "model.validated",
     "model.validation_failed",
     "observation.gap",
+    "observation.speech_ignored",
     "route.clarify",
     "route.matched",
     "run.accepted",
@@ -64,6 +65,7 @@
     "speech.audio_unavailable",
     "speech.no_speech",
     "speech.speak_cancelled",
+    "speech.speak_failed",
     "speech.spoken",
     "speech.utterance_heard",
     "store.recovered",
@@ -217,6 +219,23 @@
         "dependency",
         "from",
         "to",
+        "reason"
+      ]
+    },
+    {
+      "type": "observation.speech_ignored",
+      "category": "speech",
+      "severity": "info",
+      "title": "这句话没有被当成指令",
+      "summary": "语音被忽略（{reason}），没有创建任务。",
+      "impact": "机器人没有执行这句话；保留原因，便于区分「没听见」与「听见了但故意不执行」。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "reason",
+        "utterance_id"
+      ],
+      "required_fields": [
         "reason"
       ]
     },
@@ -803,6 +822,23 @@
         "response_id",
         "reason",
         "played"
+      ]
+    },
+    {
+      "type": "speech.speak_failed",
+      "category": "speech",
+      "severity": "warning",
+      "title": "结论没能播报",
+      "summary": "run 的结论没有播出来（{reason}）。",
+      "impact": "用户听不到这次结论；这不代表任务失败，run 状态不受影响。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "reason",
+        "detail"
+      ],
+      "required_fields": [
+        "reason"
       ]
     }
   ],

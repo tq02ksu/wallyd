@@ -125,7 +125,7 @@ try {
   // templates 是数组（每条带 type 字段），不是以 type 为键的对象。
   const tpl = new Map(events.templates.map((t) => [t.type, t]));
   const types = events.templates.map((t) => t.type);
-  check('登记的事件类型有 36 种', types.length === 36, `实际 ${types.length}`);
+  check('登记的事件类型有 38 种', types.length === 38, `实际 ${types.length}`);
   // R14 的语音事件必须登记：缺任何一条，robotd 的语音事件到了 agentd 会被
   // `isRegistered` 拒写（实测踩过——事件被静默丢掉，页面上什么都没有）。
   const speechRequired = [
@@ -135,6 +135,7 @@ try {
     'speech.audio_recovered',
     'speech.spoken',
     'speech.speak_cancelled',
+    'speech.speak_failed',
   ];
   const speechMissing = speechRequired.filter((t) => !tpl.has(t));
   check('R14 语音事件全部已登记', speechMissing.length === 0, speechMissing.join(', '));

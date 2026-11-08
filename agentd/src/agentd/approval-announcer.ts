@@ -36,7 +36,7 @@ export class ApprovalAnnouncer {
   private log: (msg: string, extra?: Record<string, unknown>) => void;
   private windowMs: number;
   private announceTimeoutMs: number;
-  private noteSpeak?: (taskId: string, text: string) => void;
+  private noteSpeak?: (taskId: string, text: string, runId?: string) => void;
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(opts: {
@@ -47,7 +47,7 @@ export class ApprovalAnnouncer {
     /** 受理后等 `speech.tts_finished`/`tts_cancelled` 的上限；超时按失败收尾。 */
     announceTimeoutMs?: number;
     /** 让事件桥把 response_id 关联到播报摘要（可选）。 */
-    noteSpeak?: (taskId: string, text: string) => void;
+    noteSpeak?: (taskId: string, text: string, runId?: string) => void;
   }) {
     this.runs = opts.runs;
     this.robotd = opts.robotd;

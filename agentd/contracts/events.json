@@ -195,6 +195,29 @@
       }
     },
     {
+      "type": "observation.speech_ignored",
+      "category": "speech",
+      "severity": "info",
+      "title": "这句话没有被当成指令",
+      "summary": "语音被忽略（{reason}），没有创建任务。",
+      "impact": "机器人没有执行这句话；保留原因，便于区分「没听见」与「听见了但故意不执行」。",
+      "payload": {
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "busy",
+            "echo",
+            "empty"
+          ]
+        },
+        "utterance_id": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    {
       "type": "run.accepted",
       "category": "run",
       "severity": "info",
@@ -915,6 +938,24 @@
         "played": {
           "type": "integer",
           "required": true
+        }
+      }
+    },
+    {
+      "type": "speech.speak_failed",
+      "category": "speech",
+      "severity": "warning",
+      "title": "结论没能播报",
+      "summary": "run 的结论没有播出来（{reason}）。",
+      "impact": "用户听不到这次结论；这不代表任务失败，run 状态不受影响。",
+      "payload": {
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "detail": {
+          "type": "string",
+          "required": false
         }
       }
     }

@@ -25,6 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mintApprovalCredential } from './approval-credential.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -142,6 +143,29 @@ export interface AnnounceAccepted {
   /** robotd 实际交给 TTS 的固定模板句子，供审计与界面展示。 */
   text: string;
 }
+
+export interface SpeakInput {
+  text: string;
+  voice?: string;
+  rate?: number;
+  interruptible?: boolean;
+}
+
+export interface SpeakAccepted {
+  /** robotd 受理后返回的任务 id；事件用它与 run 关联。 */
+  task_id: string | null;
+  /** 实际请求的正文（已修剪首尾空白），与凭据签名的 `text` 一致。 */
+  text: string;
+  body: unknown;
+}
+
+/** 播报能力名与契约 `x-requires-approval.params` 保持一致。 */
+const SPEAK_CAPABILITY = 'robot_speak';
+/**
+ * 播报凭据的有效期：一次播报 30 秒足够，且远短于 robotd 允许的 300 秒上限。
+ * 单次 nonce 由 robotd 消费，因此每个 run 的每次播报都必须重新签。
+ */
+export const SPEAK_CREDENTIAL_TTL_MS = 30_000;
 
 interface ObservationMeta {
   observed_at: string;
@@ -375,6 +399,48 @@ export class RobotdClient {
    */
   async announce(input: AnnounceInput): Promise<AnnounceAccepted> {
     return (await this.request('POST', '/v1/robot/announce', input)) as AnnounceAccepted;
+  }
+
+  /**
+   * 请求机器人播报一段自由文本（run 结论，GH-13）。
+   *
+   * 与 `announce()` 的区别是契约级的：`robot_speak` 声明了
+   * `x-requires-approval: {params: [text]}`，所以这里**每次现签一张一次性凭据**，
+   * `args_digest` 覆盖当次 `text`。这不是「用户批准了播报」——凭据的 `issuer`
+   * 恒为 agentd，是执行凭据；用户审批门与执行门是两件事（ADR-0007）。
+   */
+  async speak(input: SpeakInput): Promise<SpeakAccepted> {
+    const text = typeof input.text === 'string' ? input.text.trim() : '';
+    if (!text) {
+      throw new RobotdCallError({ code: 'E_VALIDATION', message: '播报文本不能为空' });
+    }
+    const args: Record<string, unknown> = { text };
+    if (input.voice) args.voice = input.voice;
+    if (typeof input.rate === 'number') args.rate = input.rate;
+    if (typeof input.interruptible === 'boolean') args.interruptible = input.interruptible;
+
+    let tools = this.capabilities.current;
+    if (!tools || this.capabilities.needsRefresh(null)) {
+      tools = await this.discoverCapabilities(null);
+    }
+    const tool = tools.find((t) => t.name === SPEAK_CAPABILITY);
+    if (!tool) {
+      throw new RobotdCallError({
+        code: 'E_NOT_FOUND',
+        message: `对端未提供能力 ${SPEAK_CAPABILITY}`,
+      });
+    }
+    const credential = mintApprovalCredential({
+      capability: SPEAK_CAPABILITY,
+      args,
+      // 摘要只覆盖契约声明的审批参数；缺字段按规则文件以 null 参与。
+      approvalParams: tool.approvalParams ?? ['text'],
+      ttlMs: SPEAK_CREDENTIAL_TTL_MS,
+    });
+    const res = await this.callCapability(SPEAK_CAPABILITY, args, {
+      approvalHeader: credential.header,
+    });
+    return { task_id: res.robot_task_id, text, body: res.body };
   }
 
   // ---------------------------------------------------------------- 能力调用

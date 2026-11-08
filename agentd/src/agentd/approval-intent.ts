@@ -36,6 +36,15 @@ const DENY_TOKENS: readonly string[] = [
 /** 明确肯定：只有动词本身算数。 */
 const APPROVE_PATTERN = /确认|执行/u;
 
+/**
+ * 「停」在确认窗口内是**拒绝**，不是新指令。
+ *
+ * 分发器把窗口期的 final 一律交给 settle（审批回答不能再建 run），所以这里必须认识
+ * 停止词；否则用户说「停」会被当成 unrecognized 吞掉。审批尚未通过，没有任何动作
+ * 在路上，拒绝就是安全的收尾。锚定整句，避免「别停」被误判成停止。
+ */
+const STOP_DENY_PATTERN = /^(停|停止|停下来|停一下|快停|立即停止|紧急停止)$/u;
+
 /** 疑问/不确定：不批准。 */
 const QUESTION_PATTERN = /吗|嘛|[\?？]/u;
 
@@ -58,6 +67,7 @@ export function classifyApprovalUtterance(raw: string): ApprovalIntentResult {
     if (text.includes(token)) return { intent: 'deny', matched: token };
   }
   if (/别(?:确认|执行|动)/u.test(text)) return { intent: 'deny', matched: '别…' };
+  if (STOP_DENY_PATTERN.test(text)) return { intent: 'deny', matched: '停' };
 
   // 2. 疑问句不批准（否定已在上面处理）。
   if (QUESTION_PATTERN.test(text)) return { intent: 'none' };

@@ -1035,6 +1035,14 @@ components:
         blocking_reason:
           type: string
           nullable: true
+        narration:
+          type: string
+          nullable: true
+          enum: [spoken, interrupted, failed]
+          description: |
+            结论播报的结果。null = 还没播（或不需要播：用户取消的 run 不播报）。
+            `interrupted` 表示话没说完（如 barge-in），**不代表任务失败**：`status` 仍是 succeeded。
+            `failed` 表示播报请求失败（如 robotd 不可达），同样不改 `status`。
     RunDetail:
       type: object
       required: [ok, run, steps, tool_calls, result]
@@ -1138,6 +1146,12 @@ components:
           description: |
             `outcome_unknown` 只在「工具已发出、结果未确认」时出现。
             它与 `failed` 不同：不能当作未执行而重试。
+        summary:
+          type: string
+          nullable: true
+          description: |
+            由执行步骤/工具结果归纳的「做了什么」。结论播报优先念它，缺失时回落到最后一步 note。
+            **不得**填入模型推理正文或原始 prompt。
         completed_steps:
           type: array
           items:

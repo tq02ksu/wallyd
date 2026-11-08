@@ -597,6 +597,13 @@ export interface components {
              */
             fast_rule?: string | null;
             blocking_reason?: string | null;
+            /**
+             * @description 结论播报的结果。null = 还没播（或不需要播：用户取消的 run 不播报）。
+             *     `interrupted` 表示话没说完（如 barge-in），**不代表任务失败**：`status` 仍是 succeeded。
+             *     `failed` 表示播报请求失败（如 robotd 不可达），同样不改 `status`。
+             * @enum {string|null}
+             */
+            narration?: "spoken" | "interrupted" | "failed" | null;
         };
         RunDetail: {
             ok: boolean;
@@ -649,6 +656,11 @@ export interface components {
              * @enum {string}
              */
             outcome: "succeeded" | "failed" | "cancelled" | "interrupted" | "outcome_unknown" | "in_progress";
+            /**
+             * @description 由执行步骤/工具结果归纳的「做了什么」。结论播报优先念它，缺失时回落到最后一步 note。
+             *     **不得**填入模型推理正文或原始 prompt。
+             */
+            summary?: string | null;
             completed_steps?: string[];
             incomplete_steps?: string[];
             reason?: string | null;

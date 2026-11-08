@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const MIGRATIONS: string[][] = [
   [
@@ -162,6 +162,15 @@ const MIGRATIONS: string[][] = [
     'CREATE INDEX idx_events_run ON events(run_id)',
     'CREATE INDEX idx_events_severity ON events(severity)',
     `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+  ],
+  // v2（GH-13）：run 结论播报。
+  // - result_summary：由执行步骤/工具结果归纳的「做了什么」，不是模型推理正文；
+  // - narration_requested_at：播报请求的原子认领时间，保证同一 run 至多播一次；
+  // - narration：播报结果 spoken/interrupted/failed，与 run.status 完全解耦。
+  [
+    'ALTER TABLE runs ADD COLUMN result_summary TEXT',
+    'ALTER TABLE runs ADD COLUMN narration_requested_at TEXT',
+    'ALTER TABLE runs ADD COLUMN narration TEXT',
   ],
 ];
 
