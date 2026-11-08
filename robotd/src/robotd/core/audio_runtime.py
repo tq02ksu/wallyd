@@ -33,16 +33,19 @@ from ..core.types import DeviceStatus, now_ms
 
 log = logging.getLogger("robotd.audio")
 
-#: 判定「AEC 真的在压回声」的 ERLE 底线（dB）。
+#: 判定「AEC 真的在压回声」的 ERLE 底线**默认值**（dB）。
 #:
 #: V03 由 6.0 → 20.0（见 ``docs/design/GH-6.md`` §4）：AEC3 两次真实录音的 P10 是
 #: +31.2 / +32.0 dB。20 dB 比 P10 低约 11 dB，仍能接纳实时抖动的较差帧；而 6 dB 会把
 #: 「几乎没压」的样本当成可用判据，在换 AEC3 后放进假收敛帧。**方向仍是保守**：
 #: 低于底线 → ``no_erle`` → 不打断。
 #:
+#: 生效值来自 ``Config.barge_in_erle_floor_db``（可配置文件 / 环境变量覆盖），
+#: 并通过 ``GET /v1/audio/state`` 回显——真机复核时不必翻代码。
+#:
 #: 注意：agentd 审批 settle 的 ``ECHO_ERLE_MAX_DB`` 仍是 6 dB，语义不同（那句话是不是
 #: 回声），不随本常量变化。
-BARGE_IN_ERLE_FLOOR_DB = 20.0
+DEFAULT_BARGE_IN_ERLE_FLOOR_DB = 20.0
 
 #: ``aec_echo_probe`` 的 ERLE 事实最多可用多久（ms）。更早的探测属于上一轮播报，
 #: 拿来判本轮的打断会误伤。
@@ -94,8 +97,12 @@ class Response:
     started_chunks: set[int] = field(default_factory=set)
     #: 收到 ``tts_chunk_finished`` 的块数。打断对账的 ``finished_n`` 就是它。
     finished_chunks: int = 0
-    #: 有界队列因满或取消而未播出的块数（桥上报，可选）。
-    dropped: int = 0
+    #: 桥 ``tts_played`` 事实里的块索引（**真的播完了**的块）。
+    played_chunks: set[int] = field(default_factory=set)
+    #: 桥是否上报过 ``tts_played``。老桥没有这个事实时退回「finished 即 played」的兼容口径。
+    saw_played: bool = False
+    #: 桥的有界队列因满丢弃的块数（背压事实）。**不计入** ``dropped``（GH-6 D3）。
+    queue_dropped: int = 0
     cancelled: bool = False
 
 
@@ -107,6 +114,8 @@ class AudioRuntime:
         *,
         emit: Callable[[str, dict[str, Any]], None],
         barge_in_erle_margin_db: float = DEFAULT_BARGE_IN_ERLE_MARGIN_DB,
+        barge_in_erle_floor_db: float = DEFAULT_BARGE_IN_ERLE_FLOOR_DB,
+        barge_in_erle_overridden: tuple[str, ...] | list[str] = (),
     ) -> None:
         self._emit = emit
         self._lock = threading.RLock()
@@ -128,6 +137,10 @@ class AudioRuntime:
         self.last_render_db: float | None = None
         #: 打断门限里「回声残余相对本底 + 安全余量」的可调项（dB）。
         self.barge_in_erle_margin_db = float(barge_in_erle_margin_db)
+        #: ``aec_erle_db`` 可作为判据的可用性底线（dB），同样来自配置。
+        self.barge_in_erle_floor_db = float(barge_in_erle_floor_db)
+        #: 哪几项门限被显式配置覆盖（``"margin"`` / ``"floor"``），用于状态回显。
+        self.barge_in_erle_overridden = tuple(barge_in_erle_overridden)
         #: 最近一次 utterance 的终态回调（由 app 注入，用于把任务表收尾）
         self.on_utterance_done: Callable[[Utterance, str, str | None], None] | None = None
         self.on_response_done: Callable[[Response, str], None] | None = None
@@ -168,6 +181,9 @@ class AudioRuntime:
                 "speech_db": self.speech_db,
                 "silence_db": self.silence_db,
                 "mic_format": self.mic_format,
+                "barge_in_erle_margin_db": self.barge_in_erle_margin_db,
+                "barge_in_erle_floor_db": self.barge_in_erle_floor_db,
+                "barge_in_erle_overridden": list(self.barge_in_erle_overridden),
                 "ts": now_ms(),
             }
 
@@ -339,14 +355,10 @@ class AudioRuntime:
         self.cancel_speaking(reason)
         if resp is None:
             return
+        played, dropped = self._settle_counts(resp)
         self._emit(
             "speech.tts_cancelled",
-            self._response_payload(
-                resp,
-                reason=reason,
-                played=self._bounded_played(resp, resp.played),
-                **({"dropped": resp.dropped} if resp.dropped else {}),
-            ),
+            self._response_payload(resp, reason=reason, played=played, **self._count_extra(dropped, resp)),
         )
         if self.on_response_done is not None:
             self.on_response_done(resp, "cancelled")
@@ -442,13 +454,20 @@ class AudioRuntime:
         if name == "tts_chunk_finished":
             self._tts_chunk(ev, started=False)
             return
+        if name == "tts_played":
+            self._tts_played(ev)
+            return
         if name == "tts_chunk_dropped":
-            # 桥的有界队列丢弃事实。契约不新增事件类型，只在 ``speech.tts_cancelled``
-            # / ``tts_finished`` 里带 ``dropped``；这里只累计，不伪造播报事件。
+            # 桥的有界队列背压事实。**不计入 ``dropped``**（GH-6 D3）：``dropped`` 是
+            # 「合成完成却未播出」（finished_n − played），队列满丢弃是桥的另一维事实，
+            # 单列在 ``queue_dropped``。取消时清队列产生的丢弃同理：它已经体现在
+            # finished_n − played 里，不重复计数。契约不新增事件类型。
+            if str(ev.get("reason") or "") != "queue_full":
+                return
             with self._lock:
                 resp = self.response
                 if resp is not None:
-                    resp.dropped += 1
+                    resp.queue_dropped += 1
             return
         if name in {"tts_finished", "tts_cancelled"}:
             self._tts_done(ev, cancelled=(name == "tts_cancelled"))
@@ -531,17 +550,17 @@ class AudioRuntime:
     def _fresh_erle(self) -> tuple[float | None, float | None, float | None]:
         """返回 ``(原始事实, 1 秒内的值, 可用于判定的值)``。
 
-        「可用于判定」= 有值、1 秒内、且不低于 6 dB 的底线。缺失、过期、明确为 0 都落在
-        ``None``：缺证据 ≠ 有证据（B4）。原始值仍然原样回传，供 ``speech.gate`` 如实记录。
+        「可用于判定」= 有值、1 秒内、且不低于生效的 ``barge_in_erle_floor_db``
+        （默认 20 dB）。缺失、过期、明确为 0 都落在 ``None``：缺证据 ≠ 有证据（B4）。
+        原始值仍然原样回传，供 ``speech.gate`` 如实记录。
         ``speech.started`` 只带 1 秒内的值（更早的探测属于上一轮播报，agentd 拿来判本轮回声会误伤）。
         """
         with self._lock:
             raw = self.last_erle_db
             fresh = raw is not None and now_ms() - self.last_erle_ms <= BARGE_IN_ERLE_MAX_AGE_MS
             fresh_value = raw if fresh else None
-            usable = (
-                fresh_value if fresh_value is not None and fresh_value >= BARGE_IN_ERLE_FLOOR_DB else None
-            )
+            floor = self.barge_in_erle_floor_db
+            usable = fresh_value if fresh_value is not None and fresh_value >= floor else None
         return raw, fresh_value, usable
 
     def _barge_in_verdict(
@@ -670,11 +689,25 @@ class AudioRuntime:
             resp.started_chunks.add(index)
         else:
             resp.finished_chunks += 1
-            resp.played = self._bounded_played(resp, resp.finished_chunks)
         self._emit(
             "speech.tts_chunk_started" if started else "speech.tts_chunk_finished",
             {"response_id": resp.response_id, "index": index},
         )
+
+    def _tts_played(self, ev: dict[str, Any]) -> None:
+        """桥的「这一块真的播完了」事实。``played`` 只从这类事实累计。
+
+        桥（``mac_speech_pipeline.swift``）在渲染完成后同时发 ``tts_chunk_finished``
+        与 ``tts_played``；两者不是同一个量：前者是合成完成，后者是播出完成。
+        ``played + dropped == finished_n`` 对账依赖这条区分。
+        """
+        resp = self.response
+        if resp is None:
+            return
+        index = int(ev.get("index") or 0)
+        resp.played_chunks.add(index)
+        resp.saw_played = True
+        resp.played = len(resp.played_chunks)
 
     def _tts_done(self, ev: dict[str, Any], *, cancelled: bool) -> None:
         with self._lock:
@@ -684,12 +717,12 @@ class AudioRuntime:
             return
         # 桥会自报 chunks/played；以桥为准（它才是数了句数的那一方）。
         chunks = int(ev.get("chunks") or resp.chunks)
-        played = int(ev.get("played") if ev.get("played") is not None else resp.played)
-        dropped = int(ev.get("dropped") or resp.dropped or 0)
         resp.chunks = chunks or resp.chunks
-        resp.dropped = dropped
-        played = self._bounded_played(resp, played)
-        extra: dict[str, Any] = {"dropped": dropped} if dropped else {}
+        hint = ev.get("played")
+        played, dropped = self._settle_counts(resp, None if hint is None else int(hint))
+        # 桥上报的 ``dropped`` 是**队列满**丢弃数，不是打断计数：归到 queue_dropped。
+        resp.queue_dropped = max(resp.queue_dropped, int(ev.get("dropped") or 0))
+        extra = self._count_extra(dropped, resp)
         if cancelled:
             self._emit(
                 "speech.tts_cancelled",
@@ -727,13 +760,14 @@ class AudioRuntime:
             if self.on_utterance_done is not None:
                 self.on_utterance_done(utt, "failed", "bridge_exit")
         if resp is not None:
+            played, dropped = self._settle_counts(resp)
             self._emit(
                 "speech.tts_cancelled",
                 self._response_payload(
                     resp,
                     reason="bridge_exit",
-                    played=self._bounded_played(resp, resp.played),
-                    **({"dropped": resp.dropped} if resp.dropped else {}),
+                    played=played,
+                    **self._count_extra(dropped, resp),
                 ),
             )
             if self.on_response_done is not None:
@@ -756,18 +790,44 @@ class AudioRuntime:
             payload["kind"] = resp.kind
         return payload
 
-    @staticmethod
-    def _bounded_played(resp: Response, played: int) -> int:
-        """``played ≤ chunks``：播出去的不可能多于计划的。
+    def _settle_counts(self, resp: Response, played_hint: int | None = None) -> tuple[int, int]:
+        """结算 ``(played, dropped)``，锁定 ``played + dropped == finished_n``（GH-6 D3）。
 
-        ``chunks`` 未知（桥没报）时只保证非负；已知时截到计划句数。这不是掩盖桥的
-         bug——超出的部分会在 ``finished_chunks > chunks`` 时暴露给测试与 eval，
-        事件里则不伪造「多播了一句」。
+        - ``finished_n``：``tts_chunk_finished`` 计数（合成完成），已知计划句数时截到
+          ``chunks``；
+        - ``played``：优先用桥的候选值（终态回报里的 ``played``，否则 ``tts_played``
+          计数）；老桥没有 ``tts_played`` 时退回「finished 即 played」的兼容口径，
+          此时 ``dropped == 0``（不是丢掉失败，而是桥没给这个事实）；
+        - ``dropped``：合成完成但因中止未播出的块数 = ``finished_n − played``。
+
+        截断不是掩盖桥的 bug：``finished_chunks > chunks`` 之类的异常会由单测与 eval
+        暴露；事件里则不伪造「多播了一句」或「多丢了一块」。
         """
-        value = max(0, int(played))
+        finished = max(0, int(resp.finished_chunks))
+        if played_hint is not None:
+            # 终态回报是桥的权威结算：它说播了 n 块，就说明这 n 块已合成完成。
+            # 兼容只发终态、不发逐块事件的桥，也避免出现「播了却没合成完成」的矛盾事实。
+            finished = max(finished, max(0, int(played_hint)))
         if resp.chunks > 0:
-            return min(value, resp.chunks)
-        return value
+            finished = min(finished, resp.chunks)
+        if played_hint is not None:
+            played = int(played_hint)
+        elif resp.saw_played:
+            played = len(resp.played_chunks)
+        else:
+            played = finished
+        played = max(0, min(played, finished))
+        return played, finished - played
+
+    @staticmethod
+    def _count_extra(dropped: int, resp: Response) -> dict[str, Any]:
+        """终态事件里的计数附加字段：只在真有时出现，避免下游多处理一种「恒 0 形状」。"""
+        extra: dict[str, Any] = {}
+        if dropped:
+            extra["dropped"] = dropped
+        if resp.queue_dropped:
+            extra["queue_dropped"] = resp.queue_dropped
+        return extra
 
     def _last_error(self) -> str:
         bridge = self.bridge

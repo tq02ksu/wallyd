@@ -185,7 +185,8 @@ export interface paths {
          * 中止当前播报（barge-in 的对外能力），幂等
          * @description **这是「停止播报」，不是「取消任务」**：barge-in 是正常结束，调用方不应把
          *     未播完的句子当成失败。无活动播报时同样返回 200（幂等），因为用户可能连说两次「停」。
-         *     终态以 `speech.tts_cancelled{reason, played, dropped}` 为准；本端点只表示请求已受理。
+         *     终态以 `speech.tts_cancelled{reason, played, dropped?, queue_dropped?}` 为准；
+         *     本端点只表示请求已受理。
          *     `response_id` 省略表示停掉当前所有播报；给了就只停对应那一轮。
          */
         post: operations["speech_abort"];
@@ -660,6 +661,23 @@ export interface components {
             silence_db?: number | null;
             /** @description 采集格式描述（如 `48000/1ch/float32`）；未知为空串 */
             mic_format?: string;
+            /**
+             * @description 打断门限 `max(ambient_db + 本值, speech_db)` 里**实际生效**的 ERLE 余量（dB）。
+             *     默认 15（推导见 `docs/design/GH-6.md` §4），可由配置文件
+             *     `barge_in_erle_margin_db` 或环境变量 `ROBOTD_BARGE_IN_ERLE_MARGIN_DB` 覆盖；
+             *     真机出现自听误触发时回退到 30。回显的是判定实际使用的值，不是默认值。
+             */
+            barge_in_erle_margin_db?: number;
+            /**
+             * @description `aec_erle_db` 能作为打断判据的**可用性底线**（dB），默认 20。
+             *     低于它视为「AEC 没压住」→ `speech.gate` 落 `no_erle`；可配置覆盖。
+             */
+            barge_in_erle_floor_db?: number;
+            /**
+             * @description 哪几项打断门限被显式配置覆盖（相对默认值）。空数组 = 两项都用默认值。
+             *     真机上据此确认判据跑在什么门限下，不必翻代码。
+             */
+            barge_in_erle_overridden?: ("margin" | "floor")[];
             ts?: number;
         };
         /** @description 服务端 → 客户端（UTF-8 JSON 文本帧），按 `type` 区分 */

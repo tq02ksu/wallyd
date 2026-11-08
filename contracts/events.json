@@ -301,6 +301,16 @@
         "task_id": {"type": "string", "required": false},
         "chunks": {"type": "integer", "required": false},
         "played": {"type": "integer", "required": false},
+        "dropped": {
+          "type": "integer",
+          "required": false,
+          "notes": "已被合成完成（finished_n）但未播出的块数；正常播完时通常为 0，只有桥在终态回报里给出不一致的 played 时才出现。对账式同 speech.tts_cancelled：played + dropped == finished_n。"
+        },
+        "queue_dropped": {
+          "type": "integer",
+          "required": false,
+          "notes": "桥的有界队列因满丢弃的块数（背压事实，非播放计数）。"
+        },
         "approval_id": {"type": "string", "required": false},
         "kind": {"type": "string", "required": false}
       }
@@ -334,7 +344,12 @@
         "dropped": {
           "type": "integer",
           "required": false,
-          "notes": "有界队列中因满或取消而未播出的块数；只在桥确实丢弃时出现。对账式（实现使用）：played + dropped ≤ chunks，且 played ≤ finished_n。"
+          "notes": "已被合成完成（finished_n）但因中止而未播出的块数。对账式（实现锁定）：played + dropped == finished_n，且 played ≤ chunks。队列满丢弃（桥侧 tts_chunk_dropped，见 queue_dropped）不计入本字段。"
+        },
+        "queue_dropped": {
+          "type": "integer",
+          "required": false,
+          "notes": "桥的有界队列因满而丢弃的块数（桥侧背压事实，非打断计数）。与 dropped 分开：不计入 played + dropped == finished_n。"
         },
         "approval_id": {"type": "string", "required": false},
         "kind": {"type": "string", "required": false}

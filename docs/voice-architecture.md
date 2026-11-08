@@ -560,8 +560,10 @@ macOS 按**责任进程**（responsible process）而不是「谁 spawn 了它�
   - 已改：桥删除 `suppressAuto`，播报期间**照常跑 VAD** 并如实上报 `rms_db` / `render_db` /
     `aec_erle_db`；判定收口到 robotd 的 `AudioRuntime`，每次 VAD 上升都产 `speech.gate`。
   - 仍不够：VPIO 实测只有 **12–14 dB** 抑制，回声残留相对本底 **+19.2 dB（中位）/ +26.9 dB（最坏）**。
-    因此默认 `erle_margin = 30 dB` 的门限在真机上仍高于常人声——**A1 的真实打断要等 V03
-    把参考信号换成 AEC3、收窄门限后再验**；当前单元测试证明的是判定逻辑与事件面。
+    V03（GH-6）已按 AEC3 离线证据把默认门限收窄为 `erle_margin = 15 dB`、ERLE 可用性底线
+    20 dB，并允许配置文件 / 环境变量覆盖（`GET /v1/audio/state` 回显生效值）——
+    **真实打断 P95、30 分钟误触发率与 AEC3 CPU 仍是 `pending-hardware`**；
+    当前单元测试证明的是判定逻辑、门限来源与事件面。
   - 契约已有「停止播报」路径（`stop_speak`）；打断由 `AudioRuntime` 在 gate pass 时立即执行。
   - 实测数据见 [`eval/r14-voice-bringup-2026-10-24.md`](../eval/r14-voice-bringup-2026-10-24.md) §5.6。
 - **说话人分段 / 声纹**（§7）未实现。
@@ -636,10 +638,10 @@ WebRTC 官方集成文档的表述与此一致：
 
 #### 依赖与构建
 
-- 源码 `work/refs/webrtc-aec3`（Enaium/webrtc-aec3，MIT，从 WebRTC 提取）。
-- 本机无 cmake/ninja，`work/verify/build_aec3.sh` 用 clang 直接复刻 CMakeLists 规则。
-- **远期需决定**：`work/` 被 gitignore，AEC3 源码与静态库都不入库。若要进主线，
-  需要把源码放到 `firmware/` 或 `third_party/` 并纳入版本管理，同时补许可声明。
+- 源码入库到 `third_party/webrtc-aec3/`（Enaium/webrtc-aec3，MIT，从 WebRTC 提取），
+  由维护者执行 `scripts/vendor-aec3.sh <commit-or-tag>` 后提交（见 `third_party/README.md`）。
+- 本机无 cmake/ninja，`eval/aec3/build_aec3.sh` 用 clang 直接复刻 CMakeLists 规则；源码缺失时
+  **fail-closed** 并指向 vendor 脚本，不退回 `work/` 副本、也不静默退回 VPIO。
 
 
 ## 附录 A · 与 2026-10-13 工程化重构的差异对照

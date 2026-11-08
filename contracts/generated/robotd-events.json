@@ -246,6 +246,9 @@
         "speech_db",
         "silence_db",
         "mic_format",
+        "barge_in_erle_margin_db",
+        "barge_in_erle_floor_db",
+        "barge_in_erle_overridden",
         "ts"
       ],
       "required_fields": [
@@ -435,6 +438,8 @@
         "task_id",
         "chunks",
         "played",
+        "dropped",
+        "queue_dropped",
         "approval_id",
         "kind"
       ],
@@ -453,6 +458,7 @@
         "reason",
         "played",
         "dropped",
+        "queue_dropped",
         "approval_id",
         "kind"
       ],
