@@ -1,0 +1,7 @@
+{"ev":"ready","locale":"zh_CN","source":"file","utterance_id":"a_single_zh_60s","auto_endpoint":true,"ts_mono_ns":0}
+{"ev":"vad_calibrated","ambient_db":-90.0,"speech_db":-36.0,"silence_db":-42.0,"ts_mono_ns":600000000}
+{"ev":"speech_state","state":"speech","utterance_id":"a_single_zh_60s","rms_db":-26.0,"audio_ms":600,"ts_mono_ns":1400000000}
+{"ev":"partial","text":"瓦力，请你","revision":1,"utterance_id":"a_single_zh_60s","audio_start_ms":300,"audio_end_ms":1100,"ts_mono_ns":1900000000}
+{"ev":"speech_state","state":"silence","utterance_id":"a_single_zh_60s","audio_ms":59800,"ts_mono_ns":2150000000}
+{"ev":"endpoint","reason":"silence","utterance_id":"a_single_zh_60s","speech_ms":59200,"silence_ms":700,"audio_ms":60500,"ts_mono_ns":2160000000}
+{"ev":"final","text":"瓦力，请你沿着客厅的墙边慢慢走一圈。","utterance_id":"a_single_zh_60s","stop_reason":"silence","ts_mono_ns":2510000000}

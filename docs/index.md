@@ -38,6 +38,7 @@
 - [GH-6 实时 AEC3 / speech_abort](design/GH-6.md) - 停止播报端点、打断计数对账、AEC3 离线证据驱动的门限取值与实时接入方案
 - [GH-7 语音 final 变成 run](design/GH-7.md) - `onUtteranceHeard` 走与 `POST /api/run` 同一路径；因果断言、审批/执行分层、中断 final 与 `speech.ignored` 窄事件
 - [GH-13 run 结论播报](design/GH-13.md) - run 终态经 `robot_speak` 播报；一次性凭据、run_id 幂等、barge-in 只标 `narration: interrupted` 不改 run 状态
+- [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
 - [模型选型](model-selection.md) - LLM / TTS / ASR 选型（苹果生态优先，2026-09-17 口径）
 - [产品定位与套件化约束](product-positioning.md) - 平台而非成品、套件化销售的口述决策
 - [可行性评估与技术风险清单](risk-assessment.md) - R1–R7 风险项与验证顺序
@@ -94,6 +95,7 @@
 - [GH-19：审批复述的系统播报路径](design/GH-19.md) - `robot_announce` 的契约、事件与确认窗口时序
 - [GH-11 语音确认通道设计](design/GH-11.md) - `waiting_confirmation` 的语音 settle、窗口/回声规则与凭据签发
 - [GH-36 macOS CI 门禁分档](design/macos-ci.md) - `apple` lane 的编译/纯逻辑测试/AEC3 fail-closed 口径，以及哪些真机判据永远留给人
+- [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
 
 ## 8. 实测与评测（有时效）
 

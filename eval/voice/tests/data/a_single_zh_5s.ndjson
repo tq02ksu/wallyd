@@ -1,0 +1,9 @@
+{"ev":"ready","locale":"zh_CN","source":"file","utterance_id":"a_single_zh_5s","auto_endpoint":true,"ts_mono_ns":0}
+{"ev":"vad_calibrated","ambient_db":-92.0,"speech_db":-36.0,"silence_db":-42.0,"ts_mono_ns":600000000}
+{"ev":"speech_state","state":"speech","utterance_id":"a_single_zh_5s","rms_db":-28.0,"audio_ms":600,"ts_mono_ns":1400000000}
+{"ev":"partial","text":"瓦力","revision":1,"utterance_id":"a_single_zh_5s","audio_start_ms":300,"audio_end_ms":1000,"ts_mono_ns":1900000000}
+{"ev":"partial","text":"瓦力，请告诉我","revision":2,"utterance_id":"a_single_zh_5s","audio_start_ms":300,"audio_end_ms":2200,"ts_mono_ns":2100000000}
+{"ev":"speech_state","state":"silence","utterance_id":"a_single_zh_5s","audio_ms":4800,"ts_mono_ns":2150000000}
+{"ev":"endpoint","reason":"silence","utterance_id":"a_single_zh_5s","speech_ms":4200,"silence_ms":700,"audio_ms":5500,"ts_mono_ns":2160000000}
+{"ev":"final_chunk","text":"瓦力，请告诉我今天外面的天气怎么样。","utterance_id":"a_single_zh_5s","audio_start_ms":300,"audio_end_ms":4600,"ts_mono_ns":2350000000}
+{"ev":"final","text":"瓦力，请告诉我今天外面的天气怎么样。","utterance_id":"a_single_zh_5s","stop_reason":"silence","ts_mono_ns":2460000000}

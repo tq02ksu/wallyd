@@ -1,0 +1,7 @@
+{"ev":"ready","locale":"zh_CN","source":"file","utterance_id":"b_two_speakers-2","auto_endpoint":true,"ts_mono_ns":0}
+{"ev":"vad_calibrated","ambient_db":-90.0,"speech_db":-36.0,"silence_db":-42.0,"ts_mono_ns":600000000}
+{"ev":"speech_state","state":"speech","utterance_id":"b_two_speakers-2","rms_db":-31.0,"audio_ms":600,"ts_mono_ns":1400000000}
+{"ev":"partial","text":"好的","revision":1,"utterance_id":"b_two_speakers-2","audio_start_ms":300,"audio_end_ms":1060,"ts_mono_ns":1900000000}
+{"ev":"speech_state","state":"silence","utterance_id":"b_two_speakers-2","audio_ms":4180,"ts_mono_ns":2150000000}
+{"ev":"endpoint","reason":"silence","utterance_id":"b_two_speakers-2","speech_ms":3580,"silence_ms":700,"audio_ms":4880,"ts_mono_ns":2160000000}
+{"ev":"final","text":"好的，我马上过去打开客厅的灯。","utterance_id":"b_two_speakers-2","stop_reason":"silence","ts_mono_ns":2470000000}

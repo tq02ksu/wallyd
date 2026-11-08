@@ -1,0 +1,9 @@
+{"ev":"ready","locale":"zh_CN","source":"mic","utterance_id":"utt-long","ts_mono_ns":0}
+{"ev":"vad_calibrated","ambient_db":-70.0,"ts_mono_ns":600000000}
+{"ev":"speech_state","state":"silence","utterance_id":"utt-long","audio_ms":0,"ts_mono_ns":1600000000}
+{"ev":"speech_state","state":"silence","utterance_id":"utt-long","audio_ms":0,"ts_mono_ns":2600000000}
+{"ev":"speech_state","state":"silence","utterance_id":"utt-long","audio_ms":0,"ts_mono_ns":3600000000}
+{"ev":"speech_state","state":"silence","utterance_id":"utt-long","audio_ms":0,"ts_mono_ns":4600000000}
+{"ev":"speech_state","state":"silence","utterance_id":"utt-long","audio_ms":0,"ts_mono_ns":5600000000}
+{"ev":"speech_state","state":"silence","utterance_id":"utt-long","audio_ms":0,"ts_mono_ns":6600000000}
+{"ev":"final","text":"","utterance_id":"utt-long","stop_reason":"stdin","ts_mono_ns":7200000000}

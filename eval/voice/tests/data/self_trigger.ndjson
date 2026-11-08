@@ -1,0 +1,3 @@
+{"ev":"tts_started","response_id":"tts-replay","dry_run":false,"ts_mono_ns":0}
+{"ev":"speech_state","state":"silence","utterance_id":"utt-replay","audio_ms":1500,"ts_mono_ns":1500000000}
+{"ev":"tts_finished","response_id":"tts-replay","chunks":2,"stop_reason":"eof","ts_mono_ns":2000000000}

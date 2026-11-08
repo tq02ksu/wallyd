@@ -1,0 +1,52 @@
+{
+  "fixture": "b_two_speakers",
+  "kind": "multi_speaker",
+  "duration_ms": 20000,
+  "source": "synthesized",
+  "expected": {
+    "utterances": 4,
+    "texts": [
+      "瓦力，帮我把客厅的灯打开。",
+      "好的，我马上过去打开客厅的灯。",
+      "顺便看一下窗户有没有关好。",
+      "窗户已经关好了，还需要我做别的事情吗？"
+    ]
+  },
+  "notes": "B 类两人轮流：两个不同的中文音色交替（voice_slot A/B，生成时从 mac_speech list 里取前两个 zh 音色，解析结果写进 .generated.json）。这是合成音，不是真人，说话人归属指标不在本轮覆盖范围内。轮流发生在 run 序列层面：四段各自是一段独立音频，按顺序跑完就是 A→B→A→B。",
+  "generate": {
+    "segments": [
+      {
+        "name": "b_two_speakers-1",
+        "text": "瓦力，帮我把客厅的灯打开。",
+        "voice_slot": "A",
+        "lead_ms": 900,
+        "tail_ms": 1400,
+        "rate": 0.5
+      },
+      {
+        "name": "b_two_speakers-2",
+        "text": "好的，我马上过去打开客厅的灯。",
+        "voice_slot": "B",
+        "lead_ms": 900,
+        "tail_ms": 1400,
+        "rate": 0.5
+      },
+      {
+        "name": "b_two_speakers-3",
+        "text": "顺便看一下窗户有没有关好。",
+        "voice_slot": "A",
+        "lead_ms": 900,
+        "tail_ms": 1400,
+        "rate": 0.5
+      },
+      {
+        "name": "b_two_speakers-4",
+        "text": "窗户已经关好了，还需要我做别的事情吗？",
+        "voice_slot": "B",
+        "lead_ms": 900,
+        "tail_ms": 1400,
+        "rate": 0.5
+      }
+    ]
+  }
+}
