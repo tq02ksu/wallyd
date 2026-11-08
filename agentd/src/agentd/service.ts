@@ -25,6 +25,13 @@ import { submitRunRequest, type RunRequestDeps } from './run-request.ts';
 import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
 import { codexHomePath } from './paths.ts';
+import {
+  HarnessExecutor,
+  JsonlHarnessSink,
+  computeHarnessStatus,
+  probeHarnessVersion,
+} from './harness.ts';
+import { createCodexHarnessClient } from './harness-codex.ts';
 import { ApprovalAnnouncer } from './approval-announcer.ts';
 import { executeApprovedCapability } from './approval-executor.ts';
 import { RunNarrator } from './run-narrator.ts';
@@ -197,31 +204,33 @@ export async function createRuntime(
     }
   });
 
-  // Harness 状态：首版没有托管二进制时如实报 not_configured
+  // Harness 状态：未配置时如实报 not_configured；配置后探测版本，
+  // 只有二进制真的可用才报 ready（models.ts 的 harness_bridge 靠这个版本转 pass）。
+  const harnessHome = codexHomePath();
+  let harnessVersionCache: { binary: string; version: string | null } | null = null;
+  const harnessVersion = (binary: string): string | null => {
+    if (harnessVersionCache?.binary === binary) return harnessVersionCache.version;
+    const version = probeHarnessVersion(binary, { codexHome: harnessHome });
+    harnessVersionCache = { binary, version };
+    return version;
+  };
   const harnessInfo = (): HarnessInfo => {
     // 无论 Harness 是否配置，都把隔离目录报出来：
     // 用户要能确认 agentd 没有在用主机 ~/.codex。
-    const home = codexHomePath();
-    if (!config.harnessBinary) {
-      return {
-        state: 'not_configured',
-        binary: null,
-        version: null,
-        approval_mode: config.allowManualApprove ? 'manual_test' : 'voice',
-        codex_home: home,
-        last_error: null,
-      };
-    }
-    const exists = fs.existsSync(config.harnessBinary);
-    return {
-      state: exists ? 'ready' : 'error',
-      binary: config.harnessBinary,
-      version: null,
-      approval_mode: config.allowManualApprove ? 'manual_test' : 'voice',
-      codex_home: home,
-      last_error: exists ? null : `找不到可执行文件 ${config.harnessBinary}`,
-    };
+    const binary = config.harnessBinary;
+    return computeHarnessStatus({
+      binary,
+      exists: binary ? fs.existsSync(binary) : false,
+      version: binary ? harnessVersion(binary) : null,
+      active: harnessExecutorRef?.activeCount() ?? 0,
+      approvalMode: config.allowManualApprove ? 'manual_test' : 'voice',
+      codexHome: harnessHome,
+    });
   };
+
+  // 执行器在 runs 之后创建；onCancel 钩子通过 ref 取到它。
+  let harnessExecutorRef: HarnessExecutor | null = null;
+  const harnessDataDir = path.join(config.dataDir, 'harness');
 
   // 事件提交后 → 广播给 WS 订阅者
   let hubRef: LiveHub | null = null;
@@ -244,6 +253,8 @@ export async function createRuntime(
     onTerminal: (runId) => {
       void narratorRef?.narrate(runId);
     },
+    // 取消先落库为 cancelled，再由执行器 abort 真正的 thread。
+    onCancel: (runId) => harnessExecutorRef?.abort(runId),
     // 语音 final 走与 POST /api/run 同一条路径；幂等键用 utterance_id，
     // 断线重连补发同一条 final 不会产生第二个 run。
     submitUtterance: ({ text, utterance_id }): { run_id?: string } =>
@@ -253,6 +264,23 @@ export async function createRuntime(
         idempotency_key: `asr:${utterance_id}`,
       }),
   });
+  const harnessExecutor = new HarnessExecutor({
+    runs,
+    store,
+    events,
+    log,
+    config: {
+      binary: config.harnessBinary,
+      codexHome: harnessHome,
+      workingDirectory: path.join(harnessDataDir, 'workspace'),
+    },
+    clientFactory: createCodexHarnessClient,
+    sink: new JsonlHarnessSink(harnessDataDir),
+    credentials: () => ({
+      apiKey: process.env.CODEX_API_KEY ?? process.env.OPENAI_API_KEY ?? null,
+    }),
+  });
+  harnessExecutorRef = harnessExecutor;
   const approvalAnnouncer = new ApprovalAnnouncer({
     runs,
     robotd,
@@ -312,6 +340,17 @@ export async function createRuntime(
       // 失败如实记录，不把未执行过的动作显示成「已停止」。
       executeFast: (runId: string, capability: string, args: Record<string, unknown>) => {
         void executeFastRun(runId, capability, args);
+      },
+      // 复杂指令交给 Harness：不阻塞响应，失败/取消都写在 run 上。
+      executeHarness: (runId: string) => {
+        // 执行器内部已经把业务失败写成 run.failed；这里只兜住「连状态都没写成」的
+        // 意外异常，绝不让它变成进程级 unhandledRejection。
+        void harnessExecutor.run(runId).catch((e: unknown) => {
+          log('harness executor crashed', {
+            run_id: runId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
       },
     };
   }
@@ -914,6 +953,7 @@ export async function createRuntime(
   robotdEvents.start();
 
   const close = async (): Promise<void> => {
+    harnessExecutor.dispose();
     runs.dispose();
     robotdEvents.stop();
     hub.shutdown();

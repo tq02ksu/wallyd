@@ -79,6 +79,8 @@ interface SessionRow {
   session_id: string;
   title: string;
   status: string;
+  /** Harness thread：同一会话复用同一个 thread；未跑过 Harness 时为空。 */
+  thread_id: string | null;
   last_run_id: string | null;
   created_at: string;
   updated_at: string;
@@ -255,6 +257,14 @@ export interface RunServiceOptions {
   /** 事件提交后回调（用于 WS 广播）。只在事务已提交时调用。 */
   onEvent?: (seq: number) => void;
   /**
+   * run 被取消后回调（装配层用来真正中断 Harness thread）。
+   *
+   * 状态与事件已经在事务里提交，这里只负责「让外部执行体停下来」。
+   * 不在 RunService 里持有 AbortController：runs.ts 是纯状态机 + SQLite，
+   * 引入执行细节会让它无法在无模型 SDK 的环境里测试。
+   */
+  onCancel?: (runId: string) => void;
+  /**
    * run 进入终态且值得播报时回调（结论播报，GH-13）。
    *
    * 在事务提交之后调用；`cancelled` 不回调——用户停止/取消是安全旁路，
@@ -358,6 +368,7 @@ export class RunService {
   private log: (msg: string, extra?: Record<string, unknown>) => void;
   private onEvent: ((seq: number) => void) | undefined;
   private onTerminal: ((runId: string) => void) | undefined;
+  private onCancel: ((runId: string) => void) | undefined;
   private submitUtterance:
     | ((input: { text: string; utterance_id: string }) => { run_id?: string } | void)
     | undefined;
@@ -370,6 +381,7 @@ export class RunService {
     this.log = opts.log;
     this.onEvent = opts.onEvent;
     this.onTerminal = opts.onTerminal;
+    this.onCancel = opts.onCancel;
     this.submitUtterance = opts.submitUtterance;
   }
 
@@ -436,6 +448,33 @@ export class RunService {
     return sessionView(
       this.store.one<SessionRow>('SELECT *, 0 AS message_count FROM sessions WHERE session_id = ?', sid)!,
     );
+  }
+
+  /** 该会话已绑定的 Harness thread；没有则 null。 */
+  getSessionThreadId(sessionId: string): string | null {
+    const row = this.store.one<{ thread_id: string | null }>(
+      'SELECT thread_id FROM sessions WHERE session_id = ?',
+      sessionId,
+    );
+    return row?.thread_id ?? null;
+  }
+
+  /**
+   * 绑定/解绑会话的 Harness thread。
+   *
+   * 只改 sessions 表，不写事件：thread_id 是执行器的复用键，不是用户可解释的
+   * 业务状态变化；真正需要让用户看见的「重建」由执行器写 run.step_changed。
+   */
+  setSessionThreadId(sessionId: string, threadId: string | null): void {
+    this.store.requireWritable();
+    this.store.transaction((tx) => {
+      tx.run(
+        'UPDATE sessions SET thread_id = ?, updated_at = ? WHERE session_id = ?',
+        threadId,
+        nowIso(),
+        sessionId,
+      );
+    });
   }
 
   getSession(sessionId: string, cursor: string | null, limit: number): Record<string, unknown> {
@@ -725,7 +764,11 @@ export class RunService {
    * 只允许在非终态上推进；终态不可改写（除了 crash 恢复把它们标为 interrupted）。
    * 每次推进都写事件，事件里带上旧状态，便于历史回放。
    */
-  transition(runId: string, next: RunStatus, opts: { reason?: string; detail?: string } = {}): void {
+  transition(
+    runId: string,
+    next: RunStatus,
+    opts: { reason?: string; detail?: string; summary?: string } = {},
+  ): void {
     this.store.requireWritable();
     if (next === 'waiting_confirmation') {
       // 有审批记录的 run 必须由播报完成事件开启确认窗口；transition 直改会绕过
@@ -759,12 +802,13 @@ export class RunService {
     const seq = this.store.transaction((tx) => {
       tx.run(
         `UPDATE runs SET status = ?, finished_at = COALESCE(?, finished_at),
-           updated_at = ?, blocking_reason = ?
+           updated_at = ?, blocking_reason = ?, result_summary = COALESCE(?, result_summary)
          WHERE run_id = ?`,
         next,
         finished,
         ts,
         opts.reason ?? null,
+        opts.summary ?? null,
         runId,
       );
       // 契约只登记了 run.finished 一条「终结」事件：它承载 succeeded/failed/
@@ -866,7 +910,19 @@ export class RunService {
     });
     for (const id of cleared) this.clearWindowTimer(id);
     this.notify(seq);
+    // 状态已是 cancelled 之后才中断执行体：即使 abort 抛错/慢半拍，
+    // 终态也不会被覆盖成 failed。取消是安全旁路，不能反过来被执行器劫持。
+    this.runCancelHook(runId);
     return { detail: this.getRunDetail(runId), changed: true, voidedApprovals: voided };
+  }
+
+  private runCancelHook(runId: string): void {
+    if (!this.onCancel) return;
+    try {
+      this.onCancel(runId);
+    } catch (e: any) {
+      this.log('run cancel hook failed', { run_id: runId, error: e.message });
+    }
   }
 
   // ---------------------------------------------------------------- 审批与确认窗口
