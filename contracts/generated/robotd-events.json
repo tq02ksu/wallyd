@@ -369,6 +369,21 @@
       ]
     },
     {
+      "type": "speech.ignored",
+      "category": "speech",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "utterance_id",
+        "reason",
+        "run_id"
+      ],
+      "required_fields": [
+        "utterance_id",
+        "reason"
+      ]
+    },
+    {
       "type": "speech.interrupted",
       "category": "speech",
       "no_state": true,

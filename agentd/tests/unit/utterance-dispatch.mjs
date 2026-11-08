@@ -8,11 +8,15 @@
  *   不能新建 run，也不能记 speech_ignored。
  */
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Store, nowIso } from '../../src/agentd/store.ts';
 import { EventLog, loadRegistry } from '../../src/agentd/events.ts';
 import { RunService } from '../../src/agentd/runs.ts';
 import { RobotdEventBridge } from '../../src/agentd/robotd-event-bridge.ts';
+import { createRuntime, defaultConfig } from '../../src/agentd/service.ts';
+import { ensureApprovalSigningKey } from '../../src/agentd/approval-key.ts';
 
 const root = new URL('../../../work/agentd-utterance-test', import.meta.url).pathname;
 fs.rmSync(root, { recursive: true, force: true });
@@ -321,6 +325,292 @@ console.log('— 窗口过期后：迟到的「确认」记账为 expired，「�
   svc.cancelRun(run.run_id, '清理');
 }
 
+
+// ---------------------------------------------------------------------------
+// 判据 1–5：语音 final 走与 POST /api/run 完全相同的路径（真实装配层）。
+//
+// 这里不再用桩替代 submitUtterance：真 SQLite + 真 RunService + 真路由 + 真审批门，
+// robotd 用本地假 HTTP 服务替身。回环 bind 被沙箱拒绝时，用仓库既有的内存传输
+// （agentd/tests/manual/in-memory-http.mjs）复核同一份用例；真实 HTTP 传输由 CI 覆盖。
+// ---------------------------------------------------------------------------
+const acceptanceRoot = new URL('../../../work/agentd-utterance-acceptance', import.meta.url).pathname;
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+async function canBindLoopback() {
+  return await new Promise((resolve) => {
+    const probe = http.createServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(0, '127.0.0.1', () => probe.close(() => resolve(true)));
+  });
+}
+
+async function waitFor(fn, { timeoutMs = 6000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = fn();
+    if (value) return value;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return fn();
+}
+
+async function runAcceptance() {
+  console.log('\n— 判据 1–5：语音 final 与 POST /api/run 同一条路径');
+
+  if (!(await canBindLoopback())) {
+    console.log('  NOTE 回环 bind 被环境拒绝（EPERM）；改用内存传输复核同一份用例（真实 HTTP 由 CI 覆盖）');
+    await import('../manual/in-memory-http.mjs');
+  }
+
+  fs.rmSync(acceptanceRoot, { recursive: true, force: true });
+  fs.mkdirSync(acceptanceRoot, { recursive: true });
+  process.env.WALLY_APP_DATA_DIR = path.join(acceptanceRoot, 'appdata');
+  ensureApprovalSigningKey();
+
+  const robotdCalls = [];
+  const fakeRobotd = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (d) => { raw += d; });
+    req.on('end', () => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      let body = {};
+      try { body = raw ? JSON.parse(raw) : {}; } catch { body = {}; }
+      const call = {
+        method: req.method,
+        path: url.pathname,
+        body,
+        approvalHeader: req.headers['x-wally-approval'] ?? null,
+      };
+      robotdCalls.push(call);
+      const json = (code, obj) => {
+        res.writeHead(code, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(obj));
+      };
+      if (req.method === 'GET' && url.pathname === '/v1/health') {
+        return json(200, { ok: true, instance_id: 'fake-robotd', version: 'test' });
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/robot/announce') {
+        return json(200, {
+          ok: true,
+          task_id: `ann-${robotdCalls.length}`,
+          status: 'accepted',
+          approval_id: body.approval_id,
+          kind: body.kind,
+          text: '请确认：走到我这儿来。确认请说“确认”。',
+        });
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/robot/stop') {
+        return json(200, { ok: true, task_id: 'task-stop', state: 'accepted', board_ack: true });
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/robot/follow') {
+        return json(200, { ok: true, task_id: 'task-follow', state: 'accepted' });
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/robot/speak') {
+        return json(200, { ok: true, task_id: `speak-${robotdCalls.length}`, status: 'accepted' });
+      }
+      return json(404, { ok: false, error: { code: 'E_NOT_FOUND', message: 'no route' } });
+    });
+  });
+  fakeRobotd.on('upgrade', (_req, socket) => socket.destroy());
+  await new Promise((resolve) => fakeRobotd.listen(0, '127.0.0.1', resolve));
+  const robotdPort = fakeRobotd.address().port;
+
+  const logs = [];
+  const runtime = await createRuntime(
+    {
+      ...defaultConfig(),
+      httpPort: 0,
+      dataDir: path.join(acceptanceRoot, 'agentd'),
+      staticDir: null,
+      logLevel: 'error',
+      robotdUrl: `http://127.0.0.1:${robotdPort}`,
+    },
+    { log: (msg, extra) => logs.push({ msg, extra }) },
+  );
+
+  let evtSeq = 0;
+  function feed(type, payload, timestamp = new Date().toISOString()) {
+    evtSeq += 1;
+    runtime.robotdBridge.handle({
+      version: 1,
+      type,
+      event_id: `evt-acc-${evtSeq}`,
+      seq: evtSeq,
+      timestamp,
+      payload,
+    });
+  }
+  const runCount = () => runtime.store.one('SELECT COUNT(*) AS n FROM runs').n;
+  const runRow = (id) => (id ? runtime.store.one('SELECT * FROM runs WHERE run_id = ?', id) : null);
+  const callsTo = (p) => robotdCalls.filter((c) => c.path === p);
+  const eventsFor = (utteranceId) => runtime.store.all(
+    "SELECT type, params_json, source FROM events WHERE params_json LIKE ? ORDER BY seq",
+    `%${utteranceId}%`,
+  );
+
+  try {
+    // ------------------------------------------------ 判据 1：停止 → 真 run + 真 stop
+    feed('speech.started', { utterance_id: 'utt-stop', aec_erle_db: 30 });
+    feed('speech.final', { utterance_id: 'utt-stop', text: '停止', stop_reason: 'endpoint' });
+
+    const stopRun = await waitFor(() => runtime.store.one(
+      'SELECT * FROM runs WHERE idempotency_key = ?',
+      'asr:utt-stop',
+    ));
+    check('判据 1：建了且只建了一条 asr run', Boolean(stopRun) && runCount() === 1, String(runCount()));
+    check('判据 1：source=asr', stopRun?.source === 'asr', stopRun?.source);
+    check('判据 1：route=fast', stopRun?.route === 'fast', stopRun?.route);
+    check('判据 1：fast_rule=stop_robot@1', stopRun?.fast_rule === 'stop_robot@1', stopRun?.fast_rule);
+    check('判据 1：幂等键 asr:<utterance_id>', stopRun?.idempotency_key === 'asr:utt-stop', stopRun?.idempotency_key);
+    const stopCall = await waitFor(() => (callsTo('/v1/robot/stop').length > 0 ? callsTo('/v1/robot/stop')[0] : null));
+    check('判据 1：robotd 真的收到 POST /v1/robot/stop', Boolean(stopCall), JSON.stringify(robotdCalls.map((c) => c.path)));
+    check('判据 1：stop 请求是 POST（不是只记了状态）', stopCall?.method === 'POST', JSON.stringify(stopCall));
+    const succeeded = await waitFor(() => (runRow(stopRun?.run_id)?.status === 'succeeded' ? true : null));
+    check('判据 1：run 走到 succeeded', succeeded === true, runRow(stopRun?.run_id)?.status);
+    check('判据 1：事件库有 speech.utterance_heard', eventsFor('utt-stop').some((e) => e.type === 'speech.utterance_heard'));
+
+    // ------------------------------------------------ 判据 2：同一 final 重放
+    const runsBeforeReplay = runCount();
+    const stopsBeforeReplay = callsTo('/v1/robot/stop').length;
+    feed('speech.final', { utterance_id: 'utt-stop', text: '停止', stop_reason: 'endpoint' });
+    await new Promise((r) => setTimeout(r, 60));
+    check('判据 2：重放不新增 run', runCount() === runsBeforeReplay, `${runsBeforeReplay} → ${runCount()}`);
+    check('判据 2：重放不重复执行 stop', callsTo('/v1/robot/stop').length === stopsBeforeReplay, String(callsTo('/v1/robot/stop').length));
+
+    // ------------------------------------------------ 判据 3：no_speech
+    const runsBeforeNoSpeech = runCount();
+    feed('speech.final', { utterance_id: 'utt-no-speech', text: '', no_speech: true, stop_reason: 'silence' });
+    await new Promise((r) => setTimeout(r, 40));
+    check('判据 3：no_speech 不建 run', runCount() === runsBeforeNoSpeech, `${runsBeforeNoSpeech} → ${runCount()}`);
+    const noSpeechEvents = eventsFor('utt-no-speech');
+    check(
+      '判据 3：事件库里只有 speech.no_speech',
+      noSpeechEvents.length === 1 && noSpeechEvents[0].type === 'speech.no_speech',
+      JSON.stringify(noSpeechEvents),
+    );
+    check('判据 3：没有 observation.speech_ignored', !noSpeechEvents.some((e) => e.type === 'observation.speech_ignored'));
+
+    // ------------------------------------------------ 判据 4：忙 → 记账，不建 run
+    const active = runtime.runs.submitRun({ prompt: '正在执行的任务', route: 'harness' });
+    runtime.runs.transition(active.run_id, 'executing');
+    const runsBeforeBusy = runCount();
+    feed('speech.final', { utterance_id: 'utt-busy', text: '往前走一步', stop_reason: 'endpoint' });
+    await new Promise((r) => setTimeout(r, 40));
+    check('判据 4：忙时不新建 run', runCount() === runsBeforeBusy, `${runsBeforeBusy} → ${runCount()}`);
+    const busyEvents = eventsFor('utt-busy');
+    const busyObs = busyEvents.find((e) => e.type === 'observation.speech_ignored');
+    check('判据 4：写了 observation.speech_ignored', Boolean(busyObs), JSON.stringify(busyEvents));
+    check(
+      '判据 4：忽略原因 reason=busy',
+      busyObs ? JSON.parse(busyObs.params_json).reason === 'busy' : false,
+      busyObs?.params_json,
+    );
+    check('判据 4：没有变成 asr run', !runtime.store.one(
+      "SELECT run_id FROM runs WHERE idempotency_key = 'asr:utt-busy'",
+    ));
+    runtime.runs.cancelRun(active.run_id, '清理');
+
+    // ------------------------------------------------ 判据 5：审批层 + 执行层
+    const followBefore = callsTo('/v1/robot/follow').length;
+    const speakBefore = callsTo('/v1/robot/speak').length;
+    feed('speech.started', { utterance_id: 'utt-follow', aec_erle_db: 30 });
+    feed('speech.final', { utterance_id: 'utt-follow', text: '过来 track:abc', stop_reason: 'endpoint' });
+
+    const approval = await waitFor(() => runtime.store.one(
+      'SELECT * FROM approvals ORDER BY rowid DESC LIMIT 1',
+    ));
+    check('判据 5：能力契约要求审批 → 建了审批', Boolean(approval), JSON.stringify(approval));
+    check('判据 5：审批绑定 robot_follow', approval?.capability === 'robot_follow', approval?.capability);
+    const announced = await waitFor(() => runtime.store.one(
+      "SELECT * FROM approvals WHERE approval_id = ? AND status = 'announced'",
+      approval?.approval_id ?? '\u0000none',
+    ));
+    check('判据 5：复述已受理（status=announced）', Boolean(announced), approval?.status);
+
+    // 复述播完才开窗（GH-11 的因果顺序）。
+    feed('speech.tts_started', {
+      response_id: 'tts-approval',
+      approval_id: approval?.approval_id,
+      kind: 'approval_repeat',
+    });
+    feed('speech.tts_finished', {
+      response_id: 'tts-approval',
+      approval_id: approval?.approval_id,
+      kind: 'approval_repeat',
+      chunks: 1,
+      played: 1,
+    });
+    const waiting = await waitFor(() => {
+      const row = runRow(approval?.run_id);
+      const appr = runtime.store.one(
+        'SELECT * FROM approvals WHERE approval_id = ?',
+        approval?.approval_id ?? '\u0000none',
+      );
+      return row?.status === 'waiting_confirmation' && appr?.status === 'waiting' ? { row, appr } : null;
+    });
+    check('判据 5：审批层 run=waiting_confirmation', waiting?.row.status === 'waiting_confirmation', waiting?.row.status);
+    check('判据 5：审批层 approvals.status=waiting', waiting?.appr.status === 'waiting', waiting?.appr.status);
+    check('判据 5：执行层 robot_follow 计数为 0', callsTo('/v1/robot/follow').length === followBefore, String(callsTo('/v1/robot/follow').length));
+    check('判据 5：执行层没有结论播报', callsTo('/v1/robot/speak').length === speakBefore, String(callsTo('/v1/robot/speak').length));
+
+    // 「确认」之后才执行：不确认 = 永远不执行，两者在测试上必须分得开。
+    const windowOpensAt = Date.parse(waiting?.appr.window_opens_at ?? '0');
+    const confirmAt = new Date(windowOpensAt + 10).toISOString();
+    feed('speech.started', { utterance_id: 'utt-confirm' }, confirmAt);
+    feed('speech.final', { utterance_id: 'utt-confirm', text: '确认', stop_reason: 'endpoint' }, confirmAt);
+    const followCall = await waitFor(() => {
+      const calls = callsTo('/v1/robot/follow');
+      return calls.length > followBefore ? calls.at(-1) : null;
+    });
+    check('判据 5：确认后才执行 robot_follow', Boolean(followCall), String(callsTo('/v1/robot/follow').length));
+    check('判据 5：执行带一次性审批凭据', typeof followCall?.approvalHeader === 'string' && followCall.approvalHeader.includes('.'), String(followCall?.approvalHeader));
+    check('判据 5：参数来自那句话（target_track_id=abc）', followCall?.body?.target_track_id === 'abc', JSON.stringify(followCall?.body));
+    const followedRun = await waitFor(() => (runRow(approval?.run_id)?.status === 'succeeded' ? true : null));
+    check('判据 5：确认后 run 走到 succeeded', followedRun === true, runRow(approval?.run_id)?.status);
+
+    // ------------------------------------------------ 中断的 final 不算一句话
+    const runsBeforeInterrupted = runCount();
+    feed('speech.started', { utterance_id: 'utt-barge', aec_erle_db: 30 });
+    feed('speech.final', { utterance_id: 'utt-barge', text: '往前', stop_reason: 'barge_in' });
+    await new Promise((r) => setTimeout(r, 40));
+    check('中断 final 不建 run', runCount() === runsBeforeInterrupted, `${runsBeforeInterrupted} → ${runCount()}`);
+    const interruptedEvents = eventsFor('utt-barge');
+    check(
+      '中断 final 只落 speech.no_speech',
+      interruptedEvents.length === 1 && interruptedEvents[0].type === 'speech.no_speech',
+      JSON.stringify(interruptedEvents),
+    );
+    check('中断 final 没有被当成指令提交', !runtime.store.one(
+      "SELECT run_id FROM runs WHERE idempotency_key = 'asr:utt-barge'",
+    ));
+
+    // ------------------------------------------------ speech.ignored 全链：robotd 发 → agentd 收
+    const obsBeforeDropped = runtime.store.one(
+      "SELECT COUNT(*) AS n FROM events WHERE type = 'observation.speech_ignored'",
+    ).n;
+    feed('speech.ignored', { utterance_id: 'utt-dropped-by-robotd', reason: 'busy' });
+    const droppedObs = await waitFor(() => runtime.store.one(
+      "SELECT * FROM events WHERE type = 'observation.speech_ignored' AND params_json LIKE ? ORDER BY seq DESC LIMIT 1",
+      '%utt-dropped-by-robotd%',
+    ));
+    check('speech.ignored → observation.speech_ignored', Boolean(droppedObs), String(obsBeforeDropped));
+    check(
+      'speech.ignored 保留 reason/utterance_id',
+      droppedObs ? JSON.parse(droppedObs.params_json).reason === 'busy' && JSON.parse(droppedObs.params_json).utterance_id === 'utt-dropped-by-robotd' : false,
+      droppedObs?.params_json,
+    );
+    check('speech.ignored 的来源是 robotd', droppedObs?.source === 'robotd', droppedObs?.source);
+    check('speech.ignored 也写了日志', logs.some((l) => l.msg.includes('丢弃')), JSON.stringify(logs.slice(-3)));
+  } finally {
+    await runtime.close();
+    runtime.runs.dispose();
+    await new Promise((resolve) => fakeRobotd.close(resolve));
+    fs.rmSync(acceptanceRoot, { recursive: true, force: true });
+    delete process.env.WALLY_APP_DATA_DIR;
+  }
+}
+
 store.close();
+await runAcceptance();
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

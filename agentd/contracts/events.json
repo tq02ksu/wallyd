@@ -208,7 +208,8 @@
           "enum": [
             "busy",
             "echo",
-            "empty"
+            "empty",
+            "speaking"
           ]
         },
         "utterance_id": {

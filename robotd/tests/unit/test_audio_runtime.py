@@ -201,6 +201,8 @@ def test_events_for_other_utterance_are_ignored():
     assert rt.utt is not None and rt.utt.utterance_id == "utt-auto-2"
     assert not [p for t, p in emitted if t == "speech.partial"]
     assert not [p for t, p in emitted if t == "speech.started"]
+    # probe 的迟到 speech_state 不是一轮语音：不能记成 speech.ignored。
+    assert not [p for t, p in emitted if t == "speech.ignored"]
 
 
 def test_explicit_listen_reuses_in_flight_auto_utterance():
@@ -660,3 +662,36 @@ def test_state_echo_matches_the_threshold_the_gate_uses():
     vad_rise(rt, utterance_id="utt-auto-2", db=-5.0)
     assert gates(emitted)[-1]["decision"] == "pass"
     assert [p for t, p in emitted if t == "speech.tts_cancelled"][-1]["reason"] == "barge_in"
+
+
+# ---------------------------------------------------------------- 被丢弃的轮次要有分母（GH-7）
+def test_busy_new_utterance_emits_speech_ignored():
+    """显式 listen 撞上未结束的轮次：拒绝，但必须留下 speech.ignored{busy}。
+
+    否则用户在时间线上只看到「我说了，机器没反应」，robotd 侧没有分母。
+    """
+    rt, emitted = make_runtime()
+    first = rt.new_utterance(task_id="t-first")
+
+    with pytest.raises(RuntimeError, match="上一轮听还没结束"):
+        rt.new_utterance(task_id="t-second")
+
+    ignored = [p for t, p in emitted if t == "speech.ignored"]
+    assert len(ignored) == 1
+    assert ignored[0]["reason"] == "busy"
+    # 身份指向**被丢弃的那次请求**，不是已经在听的那一轮。
+    assert ignored[0]["utterance_id"] != first.utterance_id
+    assert ignored[0]["utterance_id"].startswith("utt-")
+    assert rt.utt is first
+
+
+def test_rejected_late_auto_utterance_emits_speech_ignored():
+    """桥在另一轮进行中送来新自动轮：不认领，但要记下这一轮被丢了。"""
+    rt, emitted = make_runtime()
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-1"})
+
+    rt.handle_bridge_event({"ev": "ready", "utterance_id": "utt-auto-2"})
+
+    assert rt.utt is not None and rt.utt.utterance_id == "utt-auto-1"
+    ignored = [p for t, p in emitted if t == "speech.ignored"]
+    assert ignored == [{"utterance_id": "utt-auto-2", "reason": "busy"}]
