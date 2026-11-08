@@ -41,6 +41,20 @@ FAKE_ENV = {
     "asr": {},
 }
 
+# 一台「能跑离线 ASR 车道」的 Mac：用于 collect() 级别的接线测试。
+MAC_ENV = {
+    "platform": "Darwin",
+    "machine": "arm64",
+    "macos_version": "26.1",
+    "swift": "/usr/bin/swift",
+    "probe_error": None,
+    "mic_authorization": "authorized",
+    "mic_name": "Mac mini Microphone",
+    "speaker_name": "Mac mini Speakers",
+    "zh_voices": [],
+    "asr": {"is_available": True, "zh_asset_status": "installed"},
+}
+
 
 def stream_events(
     *,
@@ -167,12 +181,13 @@ class AnalysisTests(unittest.TestCase):
     def test_mic_long_run_disables_idle_timeout_and_enables_trace(self):
         captured = {}
 
-        def fake_run(command, timeout):
+        def fake_stream(command, timeout, **kwargs):
             captured["command"] = command
             captured["timeout"] = timeout
+            captured["kwargs"] = kwargs
             return {"ok": True, "events": [], "error": None, "stderr": "", "stderr_full": ""}
 
-        with mock.patch.object(vb, "run_command", side_effect=fake_run):
+        with mock.patch.object(vb, "run_streaming", side_effect=fake_stream):
             vb.run_stream_mic(1800)
         command = captured["command"]
         self.assertIn("--trace", command)
@@ -183,6 +198,194 @@ class AnalysisTests(unittest.TestCase):
     def test_voice_resolution_prefers_mandarin(self):
         env = {"zh_voices": [{"identifier": "hk", "language": "zh-HK"}, {"identifier": "cn", "language": "zh-CN"}]}
         self.assertEqual(vb.resolve_voices(env), ["cn", "hk"])
+
+
+# ---------------------------------------------------------------- GH-45 流式采集
+
+# 计时口径的冻结点：改动前后必须逐字相同（issue 判据 4）。任何「顺手改成墙钟」
+# 的改动都会让这个字面量比较变红。
+FROZEN_BASIS = {
+    "first_token": "音频时间轴：首个 partial 的 audio_end_ms - VAD 判开口的 audio_ms",
+    "asr_final": "file: endpoint.silence_ms + (final.ts_mono_ns - endpoint.ts_mono_ns)；mic: 墙钟 final - 静音起点",
+    "tts_first_chunk": "进程内单调时钟：tts_chunk_started(第 0 块) - tts_started",
+    "barge_in": "墙钟：用户开口 - 停止播放（需 serve 桥单进程同时产出两侧事件）",
+    "self_trigger": "播放期 VAD 判开口的次数（§11: 应为 0）",
+    "capture_continuity": "真机：--trace 的 feed 心跳最大间隔；replay：事件间隔（桥不吐帧序号）",
+}
+
+# 一份固定的「文件口径」+ TTS 事件流：首字 400ms、final 1000ms（700 静音 + 300 尾巴）、
+# TTS 首包 250ms。三个数都是常量，流式读进来后必须原样算出来。
+TIMING_EVENTS = [
+    {"ev": "ready", "ts_mono_ns": 0},
+    {"ev": "vad_calibrated", "ts_mono_ns": 600_000_000},
+    {"ev": "speech_state", "state": "speech", "audio_ms": 600, "ts_mono_ns": 1_400_000_000},
+    {"ev": "partial", "text": "你好", "audio_start_ms": 300, "audio_end_ms": 1000, "ts_mono_ns": 1_500_000_000},
+    {"ev": "speech_state", "state": "silence", "audio_ms": 4800, "ts_mono_ns": 2_000_000_000},
+    {"ev": "endpoint", "reason": "silence", "audio_ms": 5500, "silence_ms": 700, "ts_mono_ns": 2_000_000_000},
+    {"ev": "final", "text": "你好", "stop_reason": "silence", "ts_mono_ns": 2_300_000_000},
+    {"ev": "tts_started", "dry_run": False, "ts_mono_ns": 5_000_000_000},
+    {"ev": "tts_chunk_started", "index": 0, "ts_mono_ns": 5_250_000_000},
+]
+
+EMIT_THREE_THEN_HANG = """
+import json, sys, time
+for index in range(3):
+    print(json.dumps({"ev": "partial", "index": index, "audio_end_ms": 900 + index,
+                      "ts_mono_ns": 1_000_000_000 + index}), flush=True)
+sys.stderr.write("[mac_speech] feed #25 in=2048 t=1000ms\\n")
+sys.stderr.flush()
+time.sleep(600)
+"""
+
+EMIT_TWO_THEN_FAIL = """
+import json, sys
+for index in range(2):
+    print(json.dumps({"ev": "partial", "index": index, "ts_mono_ns": 1_000_000_000 + index}), flush=True)
+sys.stderr.write("boom: asr crashed\\n")
+sys.stderr.flush()
+sys.exit(1)
+"""
+
+
+def fake_command(source: str, *argv: str) -> list[str]:
+    return [sys.executable, "-u", "-c", source, *argv]
+
+
+def stream_ndjson_text(events: list[dict]) -> str:
+    return "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events)
+
+
+class StreamingTests(unittest.TestCase):
+    """判据 2：超时/崩溃不再丢事件，且每次采集都落盘。"""
+
+    def setUp(self):
+        self.runs = Path(tempfile.mkdtemp(prefix="voice-runs-"))
+        self.addCleanup(shutil.rmtree, self.runs, True)
+
+    def test_timeout_keeps_events_and_writes_them(self):
+        result = vb.run_streaming(
+            fake_command(EMIT_THREE_THEN_HANG), timeout=1.0, runs_dir=self.runs, stem="a_zh_5s.clip.run1"
+        )
+        self.assertFalse(result["ok"])  # 半截数据不能当成功
+        self.assertEqual(result["error"]["code"], "E_TIMEOUT")
+        self.assertEqual(len(result["events"]), 3)
+        self.assertEqual([event["index"] for event in result["events"]], [0, 1, 2])
+        path = Path(result["events_path"])
+        self.assertTrue(path.exists())
+        written = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(written), 3)
+        self.assertEqual([json.loads(line)["index"] for line in written], [0, 1, 2])
+        self.assertEqual(path.name, "a_zh_5s.clip.run1.ndjson")
+
+    def test_crash_keeps_events_and_reports_exit_code(self):
+        result = vb.run_streaming(
+            fake_command(EMIT_TWO_THEN_FAIL), timeout=30.0, runs_dir=self.runs, stem="a_zh_5s.clip.run1"
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "E_EXIT_1")
+        self.assertEqual(len(result["events"]), 2)
+        self.assertEqual(result["exit_code"], 1)
+        self.assertEqual(len(Path(result["events_path"]).read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_successful_run_writes_events_and_stderr_log(self):
+        source = "import json, sys\nprint(json.dumps({'ev': 'ready'}))\nsys.stderr.write('noise\\n')"
+        result = vb.run_streaming(fake_command(source), timeout=30.0, runs_dir=self.runs)
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(len(result["events"]), 1)
+        self.assertIsInstance(result["first_event_ms"], float)
+        self.assertGreaterEqual(result["first_event_ms"], 0.0)
+        self.assertIsInstance(result["started_at"], str)
+        # 不带 stem 时用 issue 约定的默认文件名。
+        self.assertEqual(Path(result["events_path"]).name, "events.ndjson")
+        self.assertEqual(Path(result["stderr_path"]).name, "stderr.log")
+        self.assertIn("noise", Path(result["stderr_path"]).read_text(encoding="utf-8"))
+        self.assertIn("noise", result["stderr_full"])
+
+    def test_stdin_lines_are_fed_to_the_child(self):
+        source = (
+            "import json, sys\n"
+            "lines = [line.strip() for line in sys.stdin if line.strip()]\n"
+            "print(json.dumps({'ev': 'final', 'text': ','.join(lines)}), flush=True)\n"
+        )
+        result = vb.run_streaming(
+            fake_command(source), timeout=30.0, runs_dir=self.runs, stdin_lines=["你好", "end"]
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["events"][0]["text"], "你好,end")
+
+    def test_callback_sees_each_event_in_order(self):
+        seen: list[dict] = []
+        source = stream_ndjson_text([{"ev": "partial", "index": index} for index in range(3)])
+        result = vb.run_streaming(
+            fake_command(f"import sys\nsys.stdout.write({source!r})\nsys.stdout.flush()"),
+            timeout=30.0,
+            runs_dir=self.runs,
+            on_event=seen.append,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual([event["index"] for event in seen], [0, 1, 2])
+        self.assertEqual(seen, result["events"])
+
+    def test_malformed_and_bridge_error_lines_are_counted_not_events(self):
+        source = (
+            "import sys\n"
+            "sys.stdout.write('not json\\n')\n"
+            "sys.stdout.write('{\"ev\": \"ready\"}\\n')\n"
+            "sys.stdout.write('{\"ok\": false, \"error\": {\"code\": \"E_MIC_PERM\", \"message\": \"x\"}}\\n')\n"
+        )
+        result = vb.run_streaming(fake_command(source), timeout=30.0, runs_dir=self.runs, stem="mixed")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["malformed"], 1)
+        self.assertEqual(result["error"]["code"], "E_MIC_PERM")
+        self.assertEqual(len(result["events"]), 1)
+        # 落盘文件只收事件行：每行都能 json.loads，行数 == len(events)。
+        lines = Path(result["events_path"]).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {"ev": "ready"})
+        # 坏行 / 桥错误原样进 stderr 日志，崩溃现场不丢。
+        stderr_log = Path(result["stderr_path"]).read_text(encoding="utf-8")
+        self.assertIn("not json", stderr_log)
+        self.assertIn("E_MIC_PERM", stderr_log)
+
+    def test_spawn_failure_is_reported_without_files(self):
+        result = vb.run_streaming(["/definitely/not/a/binary"], timeout=5.0, runs_dir=self.runs)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "E_SPAWN")
+        self.assertEqual(result["events"], [])
+        self.assertIsNone(result["events_path"])
+
+
+class TimingBasisFrozenTests(unittest.TestCase):
+    """判据 4：流式读只改「什么时候拿到事件」，不改「事件里自带的时间戳」。"""
+
+    def setUp(self):
+        self.runs = Path(tempfile.mkdtemp(prefix="voice-runs-"))
+        self.addCleanup(shutil.rmtree, self.runs, True)
+
+    def test_basis_dict_is_byte_identical(self):
+        self.assertEqual(vb.BASIS, FROZEN_BASIS)
+
+    def test_metrics_from_streamed_events_match_frozen_constants(self):
+        source = self.runs / "timing-source.ndjson"
+        source.write_text(stream_ndjson_text(TIMING_EVENTS), encoding="utf-8")
+        script = "import sys\nsys.stdout.write(open(sys.argv[1], encoding='utf-8').read())\nsys.stdout.flush()"
+        result = vb.run_streaming(
+            fake_command(script, str(source)), timeout=30.0, runs_dir=self.runs, stem="timing"
+        )
+        self.assertTrue(result["ok"])
+        events = result["events"]
+        self.assertEqual(len(events), len(TIMING_EVENTS))
+        # 音频时间轴：1000 - 600；不是墙钟（墙钟首字只有 ~几 ms）。
+        self.assertEqual(vb.first_token_ms(events), 400.0)
+        # file 口径：700ms 静音 + (2300 - 2000)ms finalize 尾巴。
+        self.assertEqual(vb.asr_final_ms(events, "file"), 1000.0)
+        # 进程内单调钟：5250 - 5000。
+        self.assertEqual(vb.tts_first_chunk_ms(events), 250.0)
+        # 事件里的时间戳必须原样落盘（逐字段可比的前提）。
+        written = [json.loads(line) for line in Path(result["events_path"]).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(written, TIMING_EVENTS)
 
 
 def fixture(**overrides) -> dict:
@@ -481,6 +684,132 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(data["seeded"])
         self.assertEqual([m["metric"] for m in data["metrics"]], list(vb.METRICS))
         self.assertTrue(all(vb.baseline_p95(data, metric) is None for metric in vb.METRICS))
+
+
+class CollectionPlumbingTests(unittest.TestCase):
+    """采集器接线：stdin 喂法不变、runs 目录可定位、失败运行也留证据。"""
+
+    def test_tts_playback_feeds_text_and_end_over_stdin(self):
+        captured = {}
+
+        def fake_stream(command, timeout, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            return {"ok": False, "events": [], "error": None, "stderr": "", "stderr_full": ""}
+
+        with mock.patch.object(vb, "run_streaming", side_effect=fake_stream):
+            result = vb.run_tts_playback("你好")
+        self.assertEqual(captured["command"][2], "speak-stream")
+        self.assertEqual(captured["kwargs"]["stdin_lines"], ["你好", "end"])
+        # 沿用 run_tts_playback 的旧语义：进程没报错就是 ok，空事件交给 no-sample 判。
+        self.assertTrue(result["ok"])
+
+    def test_new_runs_dir_is_under_base_and_unique(self):
+        base = Path(tempfile.mkdtemp(prefix="voice-runs-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        first = vb.new_runs_dir(base)
+        self.assertEqual(first.parent, base)
+        self.assertRegex(first.name, r"^\d{8}T\d{6}Z(-\d+)?$")
+        first.mkdir(parents=True)
+        second = vb.new_runs_dir(base)
+        self.assertNotEqual(second, first)
+        self.assertEqual(second.parent, base)
+
+    def test_stem_cannot_escape_the_runs_dir(self):
+        # 夹具名来自仓库 JSON；就算写成 ../.. 也只能得到 runs/ 下的一个平铺文件名。
+        self.assertEqual(vb.safe_stem("../../etc/passwd", "run1"), "etc_passwd.run1")
+        self.assertNotIn("/", vb.safe_stem("a b/c", "run1"))
+        self.assertEqual(vb.safe_stem("///", "run1"), "run1")
+
+    def test_report_records_runs_dir_and_partial_run_counts(self):
+        runs = Path(tempfile.mkdtemp(prefix="voice-runs-"))
+        self.addCleanup(shutil.rmtree, runs, True)
+        timeout_result = {
+            "ok": False,
+            "events": [{"ev": "partial"}, {"ev": "partial"}],
+            "error": {"code": "E_TIMEOUT", "message": "超时 5s"},
+            "events_path": str(runs / "a_single_zh_5s.clip.run1.ndjson"),
+            "stderr_path": str(runs / "a_single_zh_5s.clip.run1.stderr.log"),
+            "first_event_ms": 12.5,
+            "exit_code": -15,
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            vb, "probe_environment", return_value=dict(MAC_ENV)
+        ), mock.patch.object(vb, "run_stream_file", return_value=timeout_result):
+            root = Path(tmp)
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            data = fixture(fixture="a_single_zh_5s")
+            (fixtures / "a.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            (fixtures / "a_single_zh_5s.caf").write_bytes(b"caff")
+            args = vb.parse_args(
+                [
+                    "--fixtures-dir",
+                    str(fixtures),
+                    "--out",
+                    str(root / "report.json"),
+                    "--baseline",
+                    str(root / "baseline.json"),
+                    "--no-playback",
+                    "--repeat",
+                    "1",
+                    "--runs-dir",
+                    str(runs),
+                ]
+            )
+            collected = vb.collect(args)
+            report = vb.build_report(collected, {"schema": vb.SCHEMA, "seeded": False, "metrics": {}}, 1)
+
+        self.assertEqual(report["runs_dir"], str(runs))
+        self.assertEqual(len(report["failed_runs"]), 1)
+        failed = report["failed_runs"][0]
+        self.assertEqual(failed["error_code"], "E_TIMEOUT")
+        self.assertEqual(failed["events"], 2)
+        self.assertEqual(failed["events_path"], timeout_result["events_path"])
+        self.assertEqual(report["exit_code"], 3)
+
+    def test_repeat_runs_use_distinct_event_file_stems(self):
+        # 两轮不能写同一个文件名，否则后一轮把前一轮的原始事件覆盖掉。
+        stems: list[str] = []
+        events, _, _ = vb.parse_ndjson((DATA / "a_single_zh_5s.ndjson").read_text(encoding="utf-8").splitlines())
+
+        def fake_stream(*args, **kwargs):
+            stems.append(kwargs["stem"])
+            return {"ok": True, "events": events, "error": None, "events_path": None, "first_event_ms": 1.0}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            vb, "probe_environment", return_value=dict(MAC_ENV)
+        ), mock.patch.object(vb, "run_stream_file", side_effect=fake_stream):
+            root = Path(tmp)
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            (fixtures / "a.json").write_text(
+                json.dumps(fixture(fixture="a_single_zh_5s"), ensure_ascii=False), encoding="utf-8"
+            )
+            (fixtures / "a_single_zh_5s.caf").write_bytes(b"caff")
+            args = vb.parse_args(
+                [
+                    "--fixtures-dir",
+                    str(fixtures),
+                    "--out",
+                    str(root / "report.json"),
+                    "--baseline",
+                    str(root / "baseline.json"),
+                    "--no-playback",
+                    "--repeat",
+                    "2",
+                    "--runs-dir",
+                    str(root / "runs"),
+                ]
+            )
+            collected = vb.collect(args)
+
+        self.assertEqual(
+            stems,
+            ["a_single_zh_5s.a_single_zh_5s.run1", "a_single_zh_5s.a_single_zh_5s.run2"],
+        )
+        self.assertEqual(len({stem for stem in stems}), 2)
+        self.assertEqual([run["run"] for run in collected["runs"]], [1, 2])
 
 
 class CliTests(unittest.TestCase):

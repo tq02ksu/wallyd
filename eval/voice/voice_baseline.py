@@ -31,6 +31,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import wave
 from pathlib import Path
 
@@ -124,6 +126,22 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def new_runs_dir(base: Path | None = None) -> Path:
+    """本次运行的落盘目录 ``runs/<UTC 时间戳>/``（GH-45）。
+
+    只算路径、不建目录：目录在第一次真正采集时由 ``run_streaming`` 创建，
+    所以 replay 运行（没有子进程事件）不会留下一堆空目录。
+    """
+    root = Path(base) if base is not None else DEFAULT_OUT_DIR
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = root / stamp
+    suffix = 1
+    while candidate.exists():
+        candidate = root / f"{stamp}-{suffix}"
+        suffix += 1
+    return candidate
+
+
 # ---------------------------------------------------------------- 统计
 def percentile(values: list[float], quantile: float) -> float:
     """最近秩百分位（nearest-rank）。
@@ -147,6 +165,26 @@ def delta_pct(a: float, b: float) -> float:
 
 
 # ---------------------------------------------------------------- NDJSON
+def _classify_line(raw: str) -> tuple[str, dict | None]:
+    """把一行 stdout 分类成事件 / 桥错误 / 坏行 / 空行。
+
+    流式读时每读一行就要立刻下判断，所以单行分类单独抽出来；
+    ``parse_ndjson`` 与 ``run_streaming`` 共用它，语义只有一处。
+    """
+    line = raw.strip()
+    if not line:
+        return "blank", None
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return "malformed", None
+    if not isinstance(obj, dict):
+        return "malformed", None
+    if obj.get("ok") is False and "error" in obj:
+        return "error", obj["error"] if isinstance(obj["error"], dict) else {"message": str(obj["error"])}
+    return "event", obj
+
+
 def parse_ndjson(lines: list[str]) -> tuple[list[dict], dict | None, int]:
     """解析桥的 NDJSON。返回 (事件, 桥错误, 坏行数)。
 
@@ -156,21 +194,13 @@ def parse_ndjson(lines: list[str]) -> tuple[list[dict], dict | None, int]:
     error: dict | None = None
     malformed = 0
     for raw in lines:
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
+        kind, value = _classify_line(raw)
+        if kind == "malformed":
             malformed += 1
-            continue
-        if not isinstance(obj, dict):
-            malformed += 1
-            continue
-        if obj.get("ok") is False and "error" in obj:
-            error = obj["error"] if isinstance(obj["error"], dict) else {"message": str(obj["error"])}
-            continue
-        events.append(obj)
+        elif kind == "error":
+            error = value
+        elif kind == "event" and value is not None:
+            events.append(value)
     return events, error, malformed
 
 
@@ -579,6 +609,7 @@ def generate_clip(fixture: Fixture, clip: dict, env: dict, timeout: float = 180.
             if voice and voice in ("zh-CN", "zh_CN"):
                 voice = voices[0] if voices else voice
             command = speech_fixture_command(clip, out_path, voice)
+            # 非采集用途：这里合成夹具音频，一次性拿生成参数即可（GH-45 只改测量采集层）。
             proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
             parsed, error, malformed = parse_ndjson(proc.stdout.splitlines())
             if proc.returncode != 0 or error is not None or malformed:
@@ -609,6 +640,7 @@ def generate_clip(fixture: Fixture, clip: dict, env: dict, timeout: float = 180.
 
 # ---------------------------------------------------------------- 环境
 def _run_probe(args: list[str], timeout: float = 30.0) -> dict:
+    # 非采集用途：环境探测（short-lived probe），不产生待测量的事件流。
     try:
         proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -627,6 +659,7 @@ def speaker_name() -> str:
     if platform.system() != "Darwin" or not shutil.which("system_profiler"):
         return "unknown"
     try:
+        # 非采集用途：读取系统音频设备名，不产生事件流。
         proc = subprocess.run(
             ["system_profiler", "SPAudioDataType"], capture_output=True, text=True, timeout=30
         )
@@ -727,27 +760,197 @@ def continuity_skip_reason(env: dict, with_long_run: bool) -> str | None:
 
 
 # ---------------------------------------------------------------- 执行
-def run_command(command: list[str], timeout: float) -> dict:
+def safe_stem(*parts: str) -> str:
+    """`<fixture>.<clip>.run<N>` 之类的文件名前缀；不许把路径分隔符带进 runs/。"""
+    joined = ".".join(str(part) for part in parts)
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", joined).strip("._") or "run"
+
+
+def _append_line(handle, text: str) -> None:
+    """读完一行立刻落盘；读线程可能在主线程关文件之后才收到最后一行，忽略即可。"""
     try:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "events": [], "error": {"code": "E_TIMEOUT", "message": f"超时 {timeout:.0f}s"}, "stderr": ""}
+        handle.write(text)
+        handle.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def run_streaming(
+    command: list[str],
+    timeout: float,
+    *,
+    runs_dir: Path | None = None,
+    stem: str | None = None,
+    stdin_lines: list[str] | None = None,
+    on_event=None,
+    terminate_grace: float = 5.0,
+) -> dict:
+    """逐行实时读子进程的 NDJSON，边读边落盘（GH-45，替代 ``subprocess.run`` 一次性 dump）。
+
+    返回结构与旧 ``run_command()`` 同构（``ok`` / ``events`` / ``error`` /
+    ``malformed`` / ``stderr`` / ``stderr_full``），只多几个诊断/落盘字段：
+    ``events_path`` / ``stderr_path`` / ``started_at`` / ``first_event_ms`` / ``exit_code``。
+
+    超时或非零退出都**保留已经读到的事件**：崩溃前的事件和崩溃原因必须同时可见
+    （旧实现超时直接 ``events: []``，几百条事件全丢）。
+
+    ``first_event_ms`` 是首个事件到达的墙钟偏移，**只做诊断**，不参与任何指标：
+    指标一律用事件自带的 ``ts_mono_ns`` / ``audio_ms`` / ``audio_end_ms``。
+
+    ``ok`` 沿用旧定义 ``error is None and bool(events)``：超时后即使有事件，
+    也不是成功（半截数据不能被当成完整样本）。
+    """
+    started_at = now_iso()
+    start_mono = time.monotonic()
+    base = Path(runs_dir) if runs_dir is not None else DEFAULT_OUT_DIR
+    base.mkdir(parents=True, exist_ok=True)
+    events_path = base / (f"{stem}.ndjson" if stem else "events.ndjson")
+    stderr_path = base / (f"{stem}.stderr.log" if stem else "stderr.log")
+
+    events: list[dict] = []
+    stderr_chunks: list[str] = []
+    state: dict = {"malformed": 0, "bridge_error": None, "first_event_ms": None}
+
+    def on_stdout(raw: str) -> None:
+        kind, value = _classify_line(raw)
+        if kind == "event" and value is not None:
+            if state["first_event_ms"] is None:
+                state["first_event_ms"] = round((time.monotonic() - start_mono) * 1000.0, 3)
+            events.append(value)
+            # 原样落盘（只去掉行尾换行），保证改动前后的 ndjson 可逐字段比。
+            _append_line(events_handle, raw.rstrip("\r\n") + "\n")
+            if on_event is not None:
+                on_event(value)
+            return
+        if kind == "malformed":
+            state["malformed"] += 1
+        elif kind == "error":
+            state["bridge_error"] = value
+        if kind in ("malformed", "error"):
+            # 坏行 / 桥 fail() 输出不丢：原样记进 stderr 日志，崩溃现场还能查。
+            _append_line(stderr_handle, f"[stdout] {raw.rstrip()}\n")
+
+    def on_stderr(raw: str) -> None:
+        stderr_chunks.append(raw)
+        _append_line(stderr_handle, raw if raw.endswith("\n") else raw + "\n")
+
+    def pump(stream, handler) -> None:
+        try:
+            for raw in stream:
+                handler(raw)
+        except (OSError, ValueError):
+            # 主线程因超时关闭了管道/文件；已经读到的行都已落盘。
+            pass
+
+    events_handle = events_path.open("w", encoding="utf-8", buffering=1)
+    stderr_handle = stderr_path.open("w", encoding="utf-8", buffering=1)
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE if stdin_lines is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+            text=True,
+        )
     except OSError as exc:
-        return {"ok": False, "events": [], "error": {"code": "E_SPAWN", "message": f"{type(exc).__name__}: {exc}"}, "stderr": ""}
-    events, error, malformed = parse_ndjson(proc.stdout.splitlines())
-    if error is None and proc.returncode != 0:
-        error = {"code": f"E_EXIT_{proc.returncode}", "message": proc.stderr.strip()[-300:] or "no stderr"}
+        events_handle.close()
+        stderr_handle.close()
+        return {
+            "ok": False,
+            "events": [],
+            "error": {"code": "E_SPAWN", "message": f"{type(exc).__name__}: {exc}"},
+            "malformed": 0,
+            "stderr": "",
+            "stderr_full": "",
+            "events_path": None,
+            "stderr_path": None,
+            "started_at": started_at,
+            "first_event_ms": None,
+            "exit_code": None,
+        }
+
+    readers = [
+        threading.Thread(target=pump, args=(proc.stdout, on_stdout), daemon=True),
+        threading.Thread(target=pump, args=(proc.stderr, on_stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    if stdin_lines is not None and proc.stdin is not None:
+        def feed() -> None:
+            # 喂 stdin 放到独立线程：子进程不读 stdin 时不会把主线程卡在写管道上，
+            # 超时依旧生效。speak-stream 是 ``text\nend\n`` 喂法。
+            try:
+                for line in stdin_lines:
+                    proc.stdin.write(f"{line}\n")
+                proc.stdin.flush()
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+        threading.Thread(target=feed, daemon=True).start()
+
+    timed_out = False
+    try:
+        exit_code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.terminate()
+        try:
+            exit_code = proc.wait(timeout=terminate_grace)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                exit_code = proc.wait(timeout=terminate_grace)
+            except subprocess.TimeoutExpired:
+                exit_code = None
+
+    for reader in readers:
+        reader.join(timeout=terminate_grace)
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+    events_handle.close()
+    stderr_handle.close()
+
+    stderr_full = "".join(stderr_chunks)
+    if timed_out:
+        error: dict | None = {
+            "code": "E_TIMEOUT",
+            "message": f"超时 {timeout:.0f}s；保留已读到的 {len(events)} 条事件（见 {events_path}）",
+        }
+    elif state["bridge_error"] is not None:
+        error = state["bridge_error"]
+    elif exit_code not in (0, None):
+        error = {"code": f"E_EXIT_{exit_code}", "message": stderr_full.strip()[-300:] or "no stderr"}
+    else:
+        error = None
     return {
         "ok": error is None and bool(events),
         "events": events,
         "error": error,
-        "malformed": malformed,
-        "stderr": proc.stderr.strip()[-300:],
-        "stderr_full": proc.stderr,
+        "malformed": state["malformed"],
+        "stderr": stderr_full.strip()[-300:],
+        "stderr_full": stderr_full,
+        "events_path": str(events_path),
+        "stderr_path": str(stderr_path),
+        "started_at": started_at,
+        "first_event_ms": state["first_event_ms"],
+        "exit_code": exit_code,
     }
 
 
-def run_stream_file(audio: Path, duration_ms: int, utterance: str) -> dict:
+def run_stream_file(
+    audio: Path,
+    duration_ms: int,
+    utterance: str,
+    *,
+    runs_dir: Path | None = None,
+    stem: str | None = None,
+) -> dict:
     seconds = max(60, int(duration_ms / 1000) + 60)
     command = [
         "swift",
@@ -762,24 +965,40 @@ def run_stream_file(audio: Path, duration_ms: int, utterance: str) -> dict:
         "--max-seconds",
         str(seconds),
     ]
-    return run_command(command, timeout=max(120, seconds * 2.0 + 120))
+    return run_streaming(
+        command, timeout=max(120, seconds * 2.0 + 120), runs_dir=runs_dir, stem=stem
+    )
 
 
-def run_tts_playback(text: str, voice: str | None = None) -> dict:
+def run_tts_playback(
+    text: str,
+    voice: str | None = None,
+    *,
+    runs_dir: Path | None = None,
+    stem: str | None = None,
+) -> dict:
     command = ["swift", str(SPEECH_SCRIPT), "speak-stream"]
     if voice:
         command += ["--voice", voice]
-    try:
-        proc = subprocess.run(command, input=text + "\nend\n", capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"ok": False, "events": [], "error": {"code": "E_SPAWN", "message": f"{type(exc).__name__}: {exc}"}}
-    events, error, _ = parse_ndjson(proc.stdout.splitlines())
-    if error is None and proc.returncode != 0:
-        error = {"code": f"E_EXIT_{proc.returncode}", "message": proc.stderr.strip()[-300:] or "no stderr"}
-    return {"ok": error is None, "events": events, "error": error, "stderr": proc.stderr.strip()[-300:]}
+    result = run_streaming(
+        command,
+        timeout=120,
+        runs_dir=runs_dir,
+        stem=stem,
+        stdin_lines=[text, "end"],
+    )
+    # 语义保持：TTS 车道原来只把「进程没报错」当 ok，空事件由 tts_first_chunk_ms
+    # 判 no-sample；不能因为换成流式读就把它改成 run-failed。
+    result["ok"] = result["error"] is None
+    return result
 
 
-def run_stream_mic(seconds: int) -> dict:
+def run_stream_mic(
+    seconds: int,
+    *,
+    runs_dir: Path | None = None,
+    stem: str | None = None,
+) -> dict:
     command = [
         "swift",
         str(SPEECH_SCRIPT),
@@ -794,7 +1013,22 @@ def run_stream_mic(seconds: int) -> dict:
         # 心跳：每 ~1s 一行 stderr，用来判采集是否还在走。
         "--trace",
     ]
-    return run_command(command, timeout=seconds + 180.0)
+    return run_streaming(command, timeout=seconds + 180.0, runs_dir=runs_dir, stem=stem)
+
+
+def failed_run_record(result: dict, fixture: str, clip: str, run_index: int) -> dict:
+    """失败/超时的采集也要留证据：跑到第几个事件才停、原始文件在哪（GH-45）。"""
+    return {
+        "fixture": fixture,
+        "clip": clip,
+        "run": run_index,
+        "error_code": (result.get("error") or {}).get("code"),
+        "events": len(result.get("events") or []),
+        "events_path": result.get("events_path"),
+        "stderr_path": result.get("stderr_path"),
+        "first_event_ms": result.get("first_event_ms"),
+        "exit_code": result.get("exit_code"),
+    }
 
 
 def replay_events(replay_dir: Path, name: str) -> dict:
@@ -1044,6 +1278,8 @@ def render_summary(report: dict, out_path: Path, baseline_path: Path) -> str:
         f" · 退出码 {report['exit_code']}"
     )
     lines.append(f"JSON: {out_path}")
+    if report.get("runs_dir"):
+        lines.append(f"原始事件: {report['runs_dir']}")
     if not report["baseline"]["seeded"]:
         lines.append(
             f"基线: {baseline_path} 未播种 —— 目前只按 §11 绝对值判定；"
@@ -1121,9 +1357,18 @@ def collect(args) -> dict:
         env = probe_environment()
         replay_dir = None
 
+    # GH-45：本次运行一个落盘目录 runs/<UTC 时间戳>/；replay 没有子进程事件，不建目录。
+    if replay_dir is not None:
+        runs_dir: Path | None = None
+    elif getattr(args, "runs_dir", None):
+        runs_dir = Path(args.runs_dir)
+    else:
+        runs_dir = new_runs_dir()
+
     warnings: list[str] = []
     clips_state: list[dict] = []
     runs: list[dict] = []
+    failed_runs: list[dict] = []
     samples: list[dict] = []
     lane_skip: dict[str, str] = {}
     hard_failures: dict[str, list[str]] = {}
@@ -1153,7 +1398,8 @@ def collect(args) -> dict:
 
     if args.generate_only:
         return {"fixtures": fixtures, "clips_state": clips_state, "runs": runs, "samples": samples,
-                "env": env, "warnings": warnings, "generate_only": True}
+                "env": env, "warnings": warnings, "runs_dir": runs_dir, "failed_runs": failed_runs,
+                "generate_only": True}
 
     # ---- ASR（离线 --file）
     asr_reason = asr_skip_reason(env)
@@ -1174,9 +1420,16 @@ def collect(args) -> dict:
                     if replay_dir is not None:
                         result = replay_events(replay_dir, clip["name"])
                     else:
-                        result = run_stream_file(fixture.audio_path(clip), clip.get("silence_ms") or fixture.duration_ms, clip["name"])
+                        result = run_stream_file(
+                            fixture.audio_path(clip),
+                            clip.get("silence_ms") or fixture.duration_ms,
+                            clip["name"],
+                            runs_dir=runs_dir,
+                            stem=safe_stem(fixture.name, clip["name"], f"run{run_index}"),
+                        )
                     if not result["ok"]:
                         error = result.get("error") or {}
+                        failed_runs.append(failed_run_record(result, fixture.name, clip["name"], run_index))
                         errors.append(f"{fixture.name}/{clip['name']}: {error.get('code')}: {error.get('message')}")
                         continue
                     events = result["events"]
@@ -1190,6 +1443,8 @@ def collect(args) -> dict:
                             "speech_finals": speech_finals(events),
                             "partials": partial_count(events),
                             "speech_onsets": speech_onset_count(events),
+                            "events_path": result.get("events_path"),
+                            "first_event_ms": result.get("first_event_ms"),
                         }
                     )
                     endpoint = _first(events, lambda e: e.get("ev") == "endpoint")
@@ -1234,9 +1489,14 @@ def collect(args) -> dict:
             if replay_dir is not None:
                 result = replay_events(replay_dir, "tts")
             else:
-                result = run_tts_playback(args.tts_text)
+                result = run_tts_playback(
+                    args.tts_text,
+                    runs_dir=runs_dir,
+                    stem=safe_stem("tts", "tts", f"run{run_index}"),
+                )
             if not result["ok"]:
                 error = result.get("error") or {}
+                failed_runs.append(failed_run_record(result, "tts", "tts", run_index))
                 reason = f"run-failed: {error.get('code')}: {error.get('message')}"
                 if any(s["metric"] == "tts_first_chunk" for s in samples):
                     warnings.append(f"TTS 有一轮失败（其余样本照常统计）：{reason}")
@@ -1298,9 +1558,14 @@ def collect(args) -> dict:
         if replay_dir is not None:
             result = replay_events(replay_dir, "capture_continuity")
         else:
-            result = run_stream_mic(args.long_run_seconds)
+            result = run_stream_mic(
+                args.long_run_seconds,
+                runs_dir=runs_dir,
+                stem=safe_stem("mic", f"{args.long_run_seconds}s", "run1"),
+            )
         if not result["ok"]:
             error = result.get("error") or {}
+            failed_runs.append(failed_run_record(result, "mic", f"{args.long_run_seconds}s", 1))
             lane_skip["capture_continuity"] = f"run-failed: {error.get('code')}: {error.get('message')}"
         else:
             entries = parse_capture_trace(result.get("stderr_full", ""))
@@ -1337,6 +1602,8 @@ def collect(args) -> dict:
         "fixtures": fixtures,
         "clips_state": clips_state,
         "runs": runs,
+        "runs_dir": runs_dir,
+        "failed_runs": failed_runs,
         "samples": samples,
         "env": env,
         "warnings": warnings,
@@ -1413,6 +1680,9 @@ def build_report(collected: dict, baseline: dict, repeat: int) -> dict:
             "note": "环境噪声未测：本轮不跑声学标定（issue 明确不做实验室级标定）",
         },
         "fixtures": fixture_rows,
+        # GH-45：拿着报告能直接回去看原始事件（runs/<ts>/<fixture>.<clip>.run<N>.ndjson）。
+        "runs_dir": None if collected.get("runs_dir") is None else str(collected["runs_dir"]),
+        "failed_runs": collected.get("failed_runs", []),
         "metrics": metrics,
         "stability": stability,
         "summary": counts,
@@ -1433,6 +1703,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--fixtures-dir", default=str(DEFAULT_FIXTURES))
     parser.add_argument("--baseline", default=str(DEFAULT_BASELINE))
     parser.add_argument("--out", default=None, help="输出 JSON 路径（默认 eval/voice/runs/baseline-YYYYMMDD.json）")
+    parser.add_argument(
+        "--runs-dir",
+        default=None,
+        help="本次运行的事件落盘目录（默认 eval/voice/runs/<UTC 时间戳>/；replay 模式不落盘）",
+    )
     parser.add_argument("--repeat", type=int, default=2, help="同一会话内连跑次数（默认 2，判据 3 需要）")
     parser.add_argument("--seed-baseline", action="store_true", help="把本轮 measured 的 p95 写入 baseline.json")
     parser.add_argument("--generate-only", action="store_true", help="只生成夹具，不测量")
