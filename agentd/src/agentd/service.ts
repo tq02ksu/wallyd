@@ -21,12 +21,13 @@ import { RobotdEventSubscriber } from './robotd-events.ts';
 import { RobotdEventBridge } from './robotd-event-bridge.ts';
 import { RobotdClient } from './robotd-client.ts';
 import { RunService, RUN_STATUSES, approvalView } from './runs.ts';
-import { submitRunRequest } from './run-request.ts';
+import { submitRunRequest, type RunRequestDeps } from './run-request.ts';
 import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
 import { codexHomePath } from './paths.ts';
 import { ApprovalAnnouncer } from './approval-announcer.ts';
 import { executeApprovedCapability } from './approval-executor.ts';
+import { RunNarrator } from './run-narrator.ts';
 import { FAST_RULES } from './router.ts';
 import {
   ApiError,
@@ -142,8 +143,9 @@ export async function createRuntime(
     log: (m, x) => log(m, x),
   });
   let announcerRef: ApprovalAnnouncer | null = null;
-  // 语音确认通道：桥收到 final 后交给 runs 做 settle。V04 落地后同一条入口继续扩展。
-  let approvalVoiceHandler:
+  let narratorRef: RunNarrator | null = null;
+  // 语音分发入口：桥收到 final 后交给 runs.dispatchUtterance（审批 → 忙 → 提交）。
+  let utteranceDispatchRef:
     | ((input: { utterance_id: string; text: string; started_at?: string; echo: boolean }) => void)
     | null = null;
   const robotdBridge = new RobotdEventBridge({
@@ -152,7 +154,8 @@ export async function createRuntime(
     hooks: {
       log: (m, x) => log(m, x),
       onAnnouncementFinished: (outcome) => announcerRef?.onFinished(outcome),
-      onUtteranceHeard: (input) => approvalVoiceHandler?.(input),
+      onUtteranceHeard: (input) => utteranceDispatchRef?.(input),
+      onSpeechOutcome: (outcome) => narratorRef?.onSpeechOutcome(outcome),
     },
   });
   robotdEvents.on('event', (ev) => robotdBridge.handle(ev));
@@ -232,39 +235,86 @@ export async function createRuntime(
     if (view) hubRef.broadcast(view);
   };
 
-  const runs = new RunService({ store, events, log, onEvent: broadcastByseq });
+  const runs: RunService = new RunService({
+    store,
+    events,
+    log,
+    onEvent: broadcastByseq,
+    // run 进入终态（cancelled 除外）→ 结论播报。异步执行，不阻塞状态推进。
+    onTerminal: (runId) => {
+      void narratorRef?.narrate(runId);
+    },
+    // 语音 final 走与 POST /api/run 同一条路径；幂等键用 utterance_id，
+    // 断线重连补发同一条 final 不会产生第二个 run。
+    submitUtterance: ({ text, utterance_id }): { run_id?: string } =>
+      submitRunRequest(buildRunRequestDeps(), {
+        prompt: text,
+        source: 'asr',
+        idempotency_key: `asr:${utterance_id}`,
+      }),
+  });
   const approvalAnnouncer = new ApprovalAnnouncer({
     runs,
     robotd,
     log,
-    noteSpeak: (taskId, text) => robotdBridge.noteSpeak(taskId, text),
+    noteSpeak: (taskId, text, runId) => robotdBridge.noteSpeak(taskId, text, runId),
   });
   announcerRef = approvalAnnouncer;
+  const runNarrator = new RunNarrator({
+    runs,
+    robotd,
+    events,
+    log,
+    noteSpeak: (taskId, text, runId) => robotdBridge.noteSpeak(taskId, text, runId),
+  });
+  narratorRef = runNarrator;
 
-  // 语音确认：只有存在待确认审批时才消费 final；其它语音留给 V04 的通用路由。
-  approvalVoiceHandler = (input) => {
-    const latest = runs.latestApprovalForVoice();
-    if (!latest) return;
-    const result = runs.settleApproval({
-      approvalId: latest.approval_id,
+  // 语音分发：顺序在 runs.dispatchUtterance 里钉死，这里只消费结果。
+  // 审批通过后的执行仍由 approval-executor 负责（携带 #11 签发的一次性凭据）。
+  utteranceDispatchRef = (input) => {
+    const dispatched = runs.dispatchUtterance({
+      utterance_id: input.utterance_id,
       text: input.text,
-      utteranceId: input.utterance_id,
-      startedAt: input.started_at ?? null,
       echo: input.echo,
+      started_at: input.started_at ?? null,
     });
-    if (result.outcome === 'approved' && result.run_id && result.capability) {
+    const approved = dispatched.approval;
+    if (dispatched.action === 'approval' && approved?.outcome === 'approved') {
+      if (!approved.run_id || !approved.capability) return;
       void executeApprovedCapability(
         { runs, robotd, store, log },
         {
-          approvalId: result.approval_id,
-          runId: result.run_id,
-          capability: result.capability,
-          args: result.args ?? {},
-          actionLabel: result.action_label ?? result.capability,
+          approvalId: approved.approval_id,
+          runId: approved.run_id,
+          capability: approved.capability,
+          args: approved.args ?? {},
+          actionLabel: approved.action_label ?? approved.capability,
         },
       );
     }
   };
+
+  /**
+   * 「一句话 → run / 澄清」的依赖，POST /api/run 与语音 final 共用同一份。
+   * 两条入口若各写一套，路由、审批门与忙判定迟早会漂移。
+   */
+  function buildRunRequestDeps(): RunRequestDeps {
+    return {
+      runs,
+      availableCapabilities: () =>
+        robotd.capabilities.current
+          ? new Set(robotd.capabilities.current.map((c) => c.name))
+          : null,
+      // 守卫拦下的命中要能在日志里解释原因（否定 / 疑问 / 词边界）。
+      log: (m: string, x?: Record<string, unknown>) => log(m, x),
+      // 快速路由必须**真的执行**：规则命中后启动执行，不阻塞响应。
+      // 纪律：同样过审批门（executeFastRun 从能力契约取审批要求）；
+      // 失败如实记录，不把未执行过的动作显示成「已停止」。
+      executeFast: (runId: string, capability: string, args: Record<string, unknown>) => {
+        void executeFastRun(runId, capability, args);
+      },
+    };
+  }
 
   const models = new ModelService({
     store,
@@ -386,24 +436,12 @@ export async function createRuntime(
 
       // 「一句话 → run 还是澄清」的决策在 run-request.ts：
       // 澄清不建 run（否则会留下永不推进的活动任务），受保护的 STOP 不受忙限制。
-      return submitRunRequest(
-        {
-          runs,
-          availableCapabilities: () =>
-            robotd.capabilities.current
-              ? new Set(robotd.capabilities.current.map((c) => c.name))
-              : null,
-          // 守卫拦下的命中要能在日志里解释原因（否定 / 疑问 / 词边界）。
-          log: (m, x) => log(m, x),
-          // 快速路由必须**真的执行**：规则命中后启动执行，不阻塞响应。
-          // 纪律：同样过审批门（executeFastRun 从能力契约取审批要求）；
-          // 失败如实记录，不把未执行过的动作显示成「已停止」。
-          executeFast: (runId, capability, args) => {
-            void executeFastRun(runId, capability, args);
-          },
-        },
-        { prompt, session_id: sessionId, source, idempotency_key: idem },
-      );
+      return submitRunRequest(buildRunRequestDeps(), {
+        prompt,
+        session_id: sessionId,
+        source,
+        idempotency_key: idem,
+      });
     }),
   );
 

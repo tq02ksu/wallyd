@@ -24,6 +24,7 @@ import type { EventLog } from './events.ts';
 import { encodeCursor, decodeCursor } from './events.ts';
 import { ApiError } from './http.ts';
 import { classifyApprovalUtterance } from './approval-intent.ts';
+import { isProtectedUtterance } from './router.ts';
 
 export type RunStatus =
   | 'accepted'
@@ -61,6 +62,9 @@ export const RUN_STATUSES: readonly RunStatus[] = [
 ];
 
 export type Route = 'fast' | 'harness' | 'clarified';
+
+/** 结论播报的结果。**与 run 状态无关**：被打断不等于任务失败。 */
+export type NarrationOutcome = 'spoken' | 'interrupted' | 'failed';
 
 export function isTerminal(status: string): boolean {
   return TERMINAL_STATUSES.has(status as RunStatus);
@@ -105,6 +109,12 @@ interface RunRow {
   blocking_reason: string | null;
   error_code: string | null;
   harness_exit: number | null;
+  /** 由执行步骤/工具结果归纳的「做了什么」；不是模型推理正文。 */
+  result_summary: string | null;
+  /** 播报请求的原子认领时间；非空 = 已经请求过播报，重放必须跳过。 */
+  narration_requested_at: string | null;
+  /** 播报结果；运行状态不受它影响。 */
+  narration: string | null;
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -205,6 +215,7 @@ export function runSummaryView(row: RunRow): Record<string, unknown> {
     model_revision: row.model_revision ?? null,
     fast_rule: row.fast_rule ?? null,
     blocking_reason: row.blocking_reason ?? null,
+    narration: row.narration ?? null,
   };
 }
 
@@ -243,6 +254,20 @@ export interface RunServiceOptions {
   log: (msg: string, extra?: Record<string, unknown>) => void;
   /** 事件提交后回调（用于 WS 广播）。只在事务已提交时调用。 */
   onEvent?: (seq: number) => void;
+  /**
+   * run 进入终态且值得播报时回调（结论播报，GH-13）。
+   *
+   * 在事务提交之后调用；`cancelled` 不回调——用户停止/取消是安全旁路，
+   * 停止后紧接着念一句「没做成」既吵又危险。回调里的异常不影响主流程。
+   */
+  onTerminal?: (runId: string) => void;
+  /**
+   * 把一条 ASR final 提交到**与 `POST /api/run` 相同的路径**（装配层注入）。
+   *
+   * 分发器本身只判定「这句话该不该变成一次 run」；路由、审批、幂等仍由
+   * `submitRunRequest` 负责。未注入时 dispatcher 只做忽略判定（单测用）。
+   */
+  submitUtterance?: (input: { text: string; utterance_id: string }) => { run_id?: string } | void;
 }
 
 export interface SubmitRunInput {
@@ -300,11 +325,42 @@ export interface ApprovalSettleResult {
   args?: Record<string, unknown>;
 }
 
+/** 一条 ASR final 的分发输入（由事件桥提供事实，不做意图解析）。 */
+export interface UtteranceDispatchInput {
+  utterance_id: string;
+  text: string;
+  /** 事件桥判定的自听（回声）。为 true 时不得建 run，也不得 settle 审批。 */
+  echo?: boolean;
+  /** 该轮 `speech.started` 的 robotd 时间戳（审批窗口因果判断用）。 */
+  started_at?: string | null;
+}
+
+export type UtteranceDispatchAction =
+  | 'ignored_empty'
+  | 'ignored_echo'
+  | 'ignored_busy'
+  | 'approval'
+  | 'submitted'
+  | 'submit_failed';
+
+export interface UtteranceDispatchResult {
+  action: UtteranceDispatchAction;
+  reason?: string;
+  /** 走了审批分支时的 settle 结果（approved/denied/ignored/expired/none）。 */
+  approval?: ApprovalSettleResult;
+  /** 活动 run（busy）或新建 run（submitted）的 id。 */
+  run_id?: string;
+}
+
 export class RunService {
   private store: Store;
   private events: EventLog;
   private log: (msg: string, extra?: Record<string, unknown>) => void;
   private onEvent: ((seq: number) => void) | undefined;
+  private onTerminal: ((runId: string) => void) | undefined;
+  private submitUtterance:
+    | ((input: { text: string; utterance_id: string }) => { run_id?: string } | void)
+    | undefined;
   /** 确认窗口的过期定时器；unref 过，不拖住进程退出。 */
   private windowTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -313,6 +369,8 @@ export class RunService {
     this.events = opts.events;
     this.log = opts.log;
     this.onEvent = opts.onEvent;
+    this.onTerminal = opts.onTerminal;
+    this.submitUtterance = opts.submitUtterance;
   }
 
   /** 释放定时器（进程关闭 / 测试结束）。 */
@@ -329,6 +387,30 @@ export class RunService {
       } catch (e: any) {
         this.log('event notify failed', { error: e.message });
       }
+    }
+    this.notifyTerminal(seq);
+  }
+
+  /**
+   * 从「已提交的事件」识别 run 终态并回调。
+   *
+   * 集中在这里而不是散在 transition/cancel/expire/deny/abort 五处：
+   * 这些实时终态路径都会先 `events.emit` 再 `notify(seq)`，漏一处就会漏播。
+   * 启动对账（`reconcileOnStartup`）**故意不经过这里**：重启时把历史结论念一遍，
+   * 会让用户分不清「刚做完」还是「上次没做完的旧账」。
+   */
+  private notifyTerminal(seq: number): void {
+    if (!this.onTerminal) return;
+    const row = this.events.get(seq);
+    if (!row || typeof row.run_id !== 'string' || !row.run_id) return;
+    // run.cancelled 也看一眼：它虽然随后还会写 run.finished，但 cancelled 不播报。
+    if (row.type !== 'run.finished' && row.type !== 'run.cancelled') return;
+    const run = this.getRunRow(row.run_id);
+    if (!run || !isTerminal(run.status) || run.status === 'cancelled') return;
+    try {
+      this.onTerminal(run.run_id);
+    } catch (e: any) {
+      this.log('run terminal callback failed', { run_id: run.run_id, error: e.message });
     }
   }
 
@@ -623,6 +705,7 @@ export class RunService {
       approvals: approvals.map(approvalView),
       result: {
         outcome,
+        summary: run.result_summary ?? null,
         completed_steps: completed,
         incomplete_steps: incomplete,
         reason: run.blocking_reason ?? null,
@@ -1383,6 +1466,135 @@ export class RunService {
       `SELECT * FROM runs WHERE status IN (${placeholders}) ORDER BY rowid DESC LIMIT 1`,
       ...RUN_STATUSES.filter((s) => !isTerminal(s)),
     );
+  }
+
+  // ---------------------------------------------------------------- 语音分发
+  /**
+   * 一条 ASR final 该不该变成一次 run（#13 验收判据 7/8，口径见 #7）。
+   *
+   * 固定顺序，**不许改**：
+   * 0. 空文本 / 回声：只记 `observation.speech_ignored`，不建 run、不 settle 审批
+   *    （自听可能包含「确认」，拿去 settle 等于让机器人批准自己念的内容）；
+   * 1. 有 `waiting_confirmation` 窗口：这是回答，交给 settle 并**吞掉**这条 final；
+   * 2. 有活动 run：记 `observation.speech_ignored {reason:"busy"}`，不排队、不建 run；
+   * 3. 兜底：交给装配层注入的 `submitUtterance`（走 `submitRunRequest`，与
+   *    `POST /api/run` 同一条路由/审批/幂等路径）。
+   *
+   * 先建 run 再问审批，会把「确认」当成一次新指令再执行一遍。
+   */
+  dispatchUtterance(input: UtteranceDispatchInput): UtteranceDispatchResult {
+    const text = typeof input.text === 'string' ? input.text.trim() : '';
+    if (!text) {
+      this.recordSpeechIgnored('empty', input.utterance_id);
+      return { action: 'ignored_empty', reason: 'empty' };
+    }
+    if (input.echo === true) {
+      this.recordSpeechIgnored('echo', input.utterance_id);
+      return { action: 'ignored_echo', reason: 'echo' };
+    }
+
+    // 1. 审批优先：窗口开着时，这句话是回答，不是新指令。
+    const approval = this.latestApprovalForVoice();
+    if (approval && approval.status === 'waiting') {
+      const settled = this.settleApproval({
+        approvalId: approval.approval_id,
+        text,
+        utteranceId: input.utterance_id,
+        startedAt: input.started_at ?? null,
+        // 回声已在上面拦掉；走到这里的事实是「不是自听」。
+        echo: false,
+      });
+      return { action: 'approval', approval: settled, run_id: settled.run_id ?? undefined };
+    }
+
+    // 2. 忙：语音侧不排队，也不静默丢弃。
+    //    例外是受保护规则（停止）：停止是安全旁路，语音不能比 POST /api/run 更弱。
+    const busy = this.activeRun();
+    if (busy && !isProtectedUtterance(text)) {
+      this.recordSpeechIgnored('busy', input.utterance_id, busy.run_id);
+      return { action: 'ignored_busy', reason: 'busy', run_id: busy.run_id };
+    }
+
+    // 3. 兜底：真正的路由在 submitRunRequest；这里只负责「该提交了」。
+    if (!this.submitUtterance) {
+      return { action: 'submit_failed', reason: 'no_submitter' };
+    }
+    try {
+      const res = this.submitUtterance({ text, utterance_id: input.utterance_id });
+      return { action: 'submitted', run_id: res?.run_id };
+    } catch (e: any) {
+      // 竞态：判定空闲之后、提交之前刚好有 run 变活动。按忙处理，不把异常丢给事件桥。
+      if (e?.code === 'E_BUSY') {
+        const active = this.activeRun();
+        this.recordSpeechIgnored('busy', input.utterance_id, active?.run_id);
+        return { action: 'ignored_busy', reason: 'busy', run_id: active?.run_id };
+      }
+      this.log('语音提交失败', { utterance_id: input.utterance_id, error: e?.message ?? String(e) });
+      return { action: 'submit_failed', reason: 'submit_error' };
+    }
+  }
+
+  /** 记一条 `observation.speech_ignored`；不改任何 run 状态。 */
+  private recordSpeechIgnored(
+    reason: 'busy' | 'echo' | 'empty',
+    utteranceId?: string,
+    runId?: string,
+  ): void {
+    try {
+      const res = this.events.emitStandalone({
+        type: 'observation.speech_ignored',
+        run_id: runId ?? null,
+        params: {
+          reason,
+          utterance_id: utteranceId ? utteranceId : undefined,
+        },
+      });
+      this.notify(res.seq);
+    } catch (e: any) {
+      this.log('写 observation.speech_ignored 失败', {
+        reason,
+        utterance_id: utteranceId,
+        error: e?.message ?? String(e),
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------- 结论播报
+  /**
+   * 原子认领「这个 run 要播报一次」。
+   *
+   * 幂等键就是 run_id：`narration_requested_at` 为 NULL 时才认领成功，
+   * 并发/重放/进程重启后的再次触发都会拿到 false，因此至多播一次。
+   * `cancelled` 的 run 不播报（停止是安全旁路，见 RunServiceOptions.onTerminal）。
+   */
+  claimNarrationAttempt(runId: string): boolean {
+    this.store.requireWritable();
+    const run = this.getRunRow(runId);
+    if (!run || !isTerminal(run.status) || run.status === 'cancelled') return false;
+    const ts = nowIso();
+    return this.store.transaction((tx) => {
+      const res = tx.run(
+        `UPDATE runs SET narration_requested_at = ?, updated_at = ?
+         WHERE run_id = ? AND narration_requested_at IS NULL`,
+        ts,
+        ts,
+        runId,
+      );
+      return res.changes === 1;
+    });
+  }
+
+  /** 记录播报结果。**只写 narration，不改 run.status**。 */
+  setNarration(runId: string, outcome: NarrationOutcome): void {
+    this.store.requireWritable();
+    this.store.transaction((tx) => {
+      tx.run(
+        'UPDATE runs SET narration = ?, updated_at = ? WHERE run_id = ?',
+        outcome,
+        nowIso(),
+        runId,
+      );
+    });
   }
 
   /**

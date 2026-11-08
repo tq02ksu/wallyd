@@ -315,6 +315,17 @@ export function matchRoute(rawText: string, ctx: RouteContext, rules: readonly F
   return resolve(rest[0].rule, ctx, text);
 }
 
+/**
+ * 这句话是否命中受保护规则（当前只有 STOP）。
+ *
+ * 语音分发器用它把「停止」从忙判定里放行：停止是安全旁路，语音不能比
+ * `POST /api/run` 更弱。判断复用同一张规则表，不另写一份停止词表。
+ */
+export function isProtectedUtterance(rawText: string): boolean {
+  const matched = matchRoute(rawText, { available: null, busy: true, speaking: false }, FAST_RULES);
+  return matched.kind === 'matched' && matched.rule.protected === true;
+}
+
 function resolve(rule: FastRule, ctx: RouteContext, text: string): MatchResult {
   // 目标能力必须已发布：规则映射到不存在的能力 → 澄清并说明缺什么
   if (ctx.available && !ctx.available.has(rule.capability)) {

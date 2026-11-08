@@ -167,6 +167,16 @@ console.log('— 判据 2/5：不用 / 确认不用 → cancelled(denied)');
   check('审批 denied', runs.getApproval(approvalId).status === 'denied');
 }
 
+console.log('— 安全停止词在确认窗口内按拒绝处理（不能被吞掉）');
+{
+  const { runId, approvalId } = await pending();
+  finishAnnouncement(approvalId);
+  say('u-stop-word', '停');
+  check('「停」settle 为 denied', settled.at(-1)?.outcome === 'denied', JSON.stringify(settled.at(-1)));
+  check('run 已取消（没有动作在路上）', runOf(runId).status === 'cancelled', runOf(runId).status);
+  check('审批 denied', runs.getApproval(approvalId).status === 'denied');
+}
+
 console.log('— 判据 7：窗口外开口 → before_window');
 {
   const { runId, approvalId } = await pending();

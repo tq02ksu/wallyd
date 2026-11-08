@@ -74,6 +74,20 @@ export interface SpeechRouterHooks {
     task_id?: string;
     played?: number;
   }) => void;
+  /**
+   * 任一播报（不限于审批复述）的真实终态。
+   *
+   * 结论播报用它把 `tts_finished` / `tts_cancelled` 关联回 run：
+   * `ok:false` 只表示**话没说完**（如 barge-in），不能据此改 run 状态。
+   */
+  onSpeechOutcome?: (input: {
+    response_id: string;
+    task_id?: string;
+    ok: boolean;
+    reason?: string;
+    chunks?: number;
+    played?: number;
+  }) => void;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -85,6 +99,8 @@ export class RobotdEventBridge {
   private speakText = new Map<string, string>();
   /** 待播报文本（按 task_id 存，等 tts_started 到达后转成 response_id 关联） */
   private pendingSpeak = new Map<string, string>();
+  /** task_id → run_id：让播报事件能挂到发起它的 run 上（结论播报 GH-13）。 */
+  private taskRun = new Map<string, string>();
   /** 上一次音频可用性，避免重复写同一状态 */
   private audioAvailable: boolean | null = null;
   /** 每一轮 `speech.started` 的事实，供确认窗口判断「窗口开启之后才开始」。 */
@@ -127,13 +143,22 @@ export class RobotdEventBridge {
         if (typeof p.response_id === 'string' && p.response_id) this.activeResponses.add(p.response_id);
         return;
 
-      case 'speech.tts_finished':
+      case 'speech.tts_finished': {
+        const finishedTask = typeof p.task_id === 'string' ? p.task_id : undefined;
         this.emit('speech.spoken', {
           response_id: String(p.response_id ?? ''),
           chunks: int(p.chunks),
           played: int(p.played),
           excerpt: this.speakText.get(String(p.response_id ?? '')),
+        }, finishedTask ? this.taskRun.get(finishedTask) : undefined);
+        this.hooks.onSpeechOutcome?.({
+          response_id: String(p.response_id ?? ''),
+          task_id: finishedTask,
+          ok: true,
+          chunks: int(p.chunks),
+          played: int(p.played),
         });
+        if (finishedTask) this.taskRun.delete(finishedTask);
         this.speakText.delete(String(p.response_id ?? ''));
         if (typeof p.response_id === 'string') this.activeResponses.delete(p.response_id);
         if (typeof p.approval_id === 'string' && p.approval_id) {
@@ -147,13 +172,23 @@ export class RobotdEventBridge {
           });
         }
         return;
+      }
 
-      case 'speech.tts_cancelled':
+      case 'speech.tts_cancelled': {
+        const cancelledTask = typeof p.task_id === 'string' ? p.task_id : undefined;
         this.emit('speech.speak_cancelled', {
           response_id: String(p.response_id ?? ''),
           reason: normCancelReason(p.reason),
           played: int(p.played),
+        }, cancelledTask ? this.taskRun.get(cancelledTask) : undefined);
+        this.hooks.onSpeechOutcome?.({
+          response_id: String(p.response_id ?? ''),
+          task_id: cancelledTask,
+          ok: false,
+          reason: normCancelReason(p.reason),
+          played: int(p.played),
         });
+        if (cancelledTask) this.taskRun.delete(cancelledTask);
         this.speakText.delete(String(p.response_id ?? ''));
         if (typeof p.response_id === 'string') this.activeResponses.delete(p.response_id);
         if (typeof p.approval_id === 'string' && p.approval_id) {
@@ -168,6 +203,7 @@ export class RobotdEventBridge {
           });
         }
         return;
+      }
 
       case 'speech.announce_failed':
         if (typeof p.approval_id === 'string' && p.approval_id) {
@@ -296,8 +332,15 @@ export class RobotdEventBridge {
    * 由发出播报请求的入口在请求前调用——事件里只有 task_id/response_id，
    * 没有文本（robotd 不回显），所以要在这里留底。
    */
-  noteSpeak(taskId: string, text: string): void {
+  noteSpeak(taskId: string, text: string, runId?: string): void {
     this.pendingSpeak.set(taskId, excerpt(text));
+    if (runId) {
+      this.taskRun.set(taskId, runId);
+      if (this.taskRun.size > 200) {
+        const first = this.taskRun.keys().next().value;
+        if (first !== undefined) this.taskRun.delete(first);
+      }
+    }
     // 防止长会话无限增长
     if (this.pendingSpeak.size > 200) {
       const first = this.pendingSpeak.keys().next().value;
@@ -306,7 +349,7 @@ export class RobotdEventBridge {
   }
 
   // ---------------------------------------------------------------- 写库
-  private emit(type: string, params: Record<string, unknown>): void {
+  private emit(type: string, params: Record<string, unknown>, runId?: string | null): void {
     if (!this.events.isRegistered(type)) {
       this.hooks.log?.('未登记的事件类型，拒绝写入', { type });
       return;
@@ -319,6 +362,7 @@ export class RobotdEventBridge {
     this.events.emitStandalone({
       type,
       source: 'robotd',
+      ...(runId ? { run_id: runId } : {}),
       params: clean,
     });
   }
