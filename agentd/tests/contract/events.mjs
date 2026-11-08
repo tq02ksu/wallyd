@@ -144,8 +144,8 @@ try {
   check('conversation.turn_reset 已登记', tpl.has('conversation.turn_reset'));
   const joinedFields = tpl.get('conversation.turn_joined')?.payload_fields ?? [];
   check(
-    'turn_joined 只带 turn_id/count（不含对话正文）',
-    joinedFields.length === 2 && joinedFields.includes('turn_id') && joinedFields.includes('count'),
+    'turn_joined 只带 turn_id/index（不含对话正文）',
+    joinedFields.length === 2 && joinedFields.includes('turn_id') && joinedFields.includes('index'),
     joinedFields.join(','),
   );
   const resetFields = tpl.get('conversation.turn_reset')?.payload_fields ?? [];

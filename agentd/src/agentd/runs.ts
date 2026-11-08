@@ -25,7 +25,11 @@ import { encodeCursor, decodeCursor } from './events.ts';
 import { ApiError } from './http.ts';
 import { classifyApprovalUtterance } from './approval-intent.ts';
 import { isProtectedUtterance } from './router.ts';
-import type { ConversationContext } from './conversation.ts';
+import type {
+  ConversationAttribution,
+  ConversationContext,
+  ConversationPeek,
+} from './conversation.ts';
 
 export type RunStatus =
   | 'accepted'
@@ -362,6 +366,7 @@ export type UtteranceDispatchAction =
   | 'ignored_empty'
   | 'ignored_echo'
   | 'ignored_busy'
+  | 'conversation_ended'
   | 'approval'
   | 'submitted'
   | 'submit_failed';
@@ -1618,30 +1623,19 @@ export class RunService {
       return { action: 'approval', approval: settled, run_id: settled.run_id ?? undefined };
     }
 
-    // 1.5 对话回合记账（GH-12）：在「审批优先」之后、「忙判定」之前。
+    // 1.5 对话回合（GH-12）：审批之后。显式结束先处理；其余**只做只读探测**——
+    //     被「忙/空」吞掉的句子没有变成 run，就不能计数，更不能写「接上了上一句」。
+    //     真正的记账挪到忙判定通过、确定要提交之后（见下面的 advance()）。
     //     上下文只影响 Harness 的消歧提示，不参与路由——matchRoute 仍是纯函数。
-    let turnId: string | undefined;
+    let probe: ConversationPeek | null = null;
     if (this.conversation) {
-      const now = this.clock();
       if (CONVERSATION_END_UTTERANCES.has(text)) {
         // 显式结束：清空并开新回合。这句本身不建 run。
-        this.conversation.reset(now);
+        this.conversation.reset(this.clock());
         this.emitConversationEvent('conversation.turn_reset', { reason: 'user_ended' });
-        return { action: 'ignored_empty', reason: 'conversation_ended' };
+        return { action: 'conversation_ended', reason: 'user_ended' };
       }
-      const turn = this.conversation.attribute(now);
-      turnId = turn.turn_id;
-      // 过期/满员时 attribute 已经开了新回合；单独记一条原因，惰性判定不设定时器。
-      if (turn.reset) {
-        this.emitConversationEvent('conversation.turn_reset', { reason: turn.reset });
-      }
-      // count 只是「本回合第几句」，绝不写文本；turn_id 只用于事件内关联。
-      if (turn.joined && turn.index > 1) {
-        this.emitConversationEvent('conversation.turn_joined', {
-          turn_id: turn.turn_id,
-          count: turn.index,
-        });
-      }
+      probe = this.conversation.peek(this.clock());
     }
 
     // 2. 忙：语音侧不排队，也不静默丢弃。
@@ -1649,30 +1643,61 @@ export class RunService {
     const busy = this.activeRun();
     if (busy && !isProtectedUtterance(text)) {
       this.recordSpeechIgnored('busy', input.utterance_id, busy.run_id);
-      return { action: 'ignored_busy', reason: 'busy', run_id: busy.run_id, turn_id: turnId };
+      // 这句没有建 run：不记账、不写 conversation.* 事件；turn_id 只是只读探测的归属线索。
+      return { action: 'ignored_busy', reason: 'busy', run_id: busy.run_id, turn_id: probe?.turn_id ?? undefined };
     }
 
     // 3. 兜底：真正的路由在 submitRunRequest；这里只负责「该提交了」。
     if (!this.submitUtterance) {
       return { action: 'submit_failed', reason: 'no_submitter' };
     }
+    // 到这里才确定这句话要变成一次 run，开始回合记账。
+    const turn = this.conversation ? this.conversation.advance(this.clock()) : undefined;
+    const turnId = turn?.turn_id;
     try {
       const res = this.submitUtterance({ text, utterance_id: input.utterance_id, turn_id: turnId });
+      if (turn && !res?.run_id) {
+        // 提交入口没给出 run_id（没建成 run）：退回这一句的计数，别在时间线上留下影子。
+        this.conversation?.release(turn);
+      } else if (turn) {
+        this.recordTurn(turn);
+      }
       return { action: 'submitted', run_id: res?.run_id, turn_id: turnId };
     } catch (e: any) {
       // 竞态：判定空闲之后、提交之前刚好有 run 变活动。按忙处理，不把异常丢给事件桥。
       if (e?.code === 'E_BUSY') {
+        if (turn) this.conversation?.release(turn);
         const active = this.activeRun();
         this.recordSpeechIgnored('busy', input.utterance_id, active?.run_id);
-        return { action: 'ignored_busy', reason: 'busy', run_id: active?.run_id, turn_id: turnId };
+        return { action: 'ignored_busy', reason: 'busy', run_id: active?.run_id, turn_id: probe?.turn_id ?? undefined };
       }
+      if (turn) this.conversation?.release(turn);
       this.log('语音提交失败', { utterance_id: input.utterance_id, error: e?.message ?? String(e) });
       return { action: 'submit_failed', reason: 'submit_error' };
     }
   }
 
   /**
-   * 记一条 conversation.* 事件。参数只有 turn_id / count / reason；
+   * 一句真的变成 run 之后才写回合事件。
+   *
+   * `turn_joined` 只在**真的接上了上一句**（`index ≥ 2`）时写——事件名说的就是
+   * 「接上了」，第一句没有可接的东西。`index` 是本回合第几句（1 起），只有计数、没有文本。
+   */
+  private recordTurn(turn: ConversationAttribution): void {
+    // 过期/满员时 advance 已经开了新回合；单独记一条原因，惰性判定不设定时器。
+    if (turn.reset) {
+      this.emitConversationEvent('conversation.turn_reset', { reason: turn.reset });
+    }
+    if (turn.joined) {
+      this.emitConversationEvent('conversation.turn_joined', {
+        turn_id: turn.turn_id,
+        index: turn.index,
+      });
+    }
+  }
+
+  /**
+   * 记一条 conversation.* 事件。参数只有 turn_id / index / reason；
    * 用户原文不进事件库（隐私红线见 events.json 的 forbidden_payload_keys）。
    */
   private emitConversationEvent(

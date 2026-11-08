@@ -15,6 +15,7 @@ import { Store, nowIso } from '../../src/agentd/store.ts';
 import { EventLog, loadRegistry } from '../../src/agentd/events.ts';
 import { RunService } from '../../src/agentd/runs.ts';
 import { RobotdEventBridge } from '../../src/agentd/robotd-event-bridge.ts';
+import { ConversationContext } from '../../src/agentd/conversation.ts';
 import { createRuntime, defaultConfig } from '../../src/agentd/service.ts';
 import { ensureApprovalSigningKey } from '../../src/agentd/approval-key.ts';
 
@@ -199,6 +200,39 @@ console.log('— 空文本不建 run');
   const res = svc.dispatchUtterance({ utterance_id: 'u-empty', text: '   ', echo: false });
   check('动作为 ignored_empty', res.action === 'ignored_empty', res.action);
   check('没有提交', submitted.length === 0);
+}
+
+console.log('— GH-12：显式结束语有自己的 action，不与空文本混用');
+{
+  const conversation = new ConversationContext();
+  const submitted = [];
+  const svc = new RunService({
+    store,
+    events,
+    log,
+    conversation,
+    submitUtterance: (input) => {
+      submitted.push(input);
+      return { run_id: 'run-should-not-exist' };
+    },
+  });
+  const before = runCount();
+  const res = svc.dispatchUtterance({ utterance_id: 'u-conversation-ended', text: '算了', echo: false });
+  check('动作为 conversation_ended', res.action === 'conversation_ended', res.action);
+  check('原因 user_ended', res.reason === 'user_ended', res.reason);
+  check('没有提交', submitted.length === 0, JSON.stringify(submitted));
+  check('没有新建 run', runCount() === before, String(runCount()));
+  const reset = store.one(
+    "SELECT * FROM events WHERE type = 'conversation.turn_reset' ORDER BY seq DESC LIMIT 1",
+  );
+  check(
+    '写了 turn_reset{user_ended}',
+    reset ? JSON.parse(reset.params_json).reason === 'user_ended' : false,
+    reset?.params_json,
+  );
+  check('结束语之后本回合计数归零', conversation.snapshot().utterances === 0, JSON.stringify(conversation.snapshot()));
+  const next = conversation.advance(1_000);
+  check('结束语之后下一句是回合第 1 句', next.index === 1 && next.joined === false, JSON.stringify(next));
 }
 
 console.log('— 事件桥把 echo 事实交给分发器（播报期间听到的 final 不算指令）');

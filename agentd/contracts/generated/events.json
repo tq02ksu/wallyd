@@ -849,17 +849,17 @@
       "category": "conversation",
       "severity": "info",
       "title": "接上了上一句",
-      "summary": "本回合第 {count} 句，接在第 {turn_id} 回合上。",
+      "summary": "本回合第 {index} 句，接在第 {turn_id} 回合上。",
       "impact": "上下文只用于消歧，不会替用户执行新动作。",
       "advice": null,
       "is_recovery": false,
       "payload_fields": [
         "turn_id",
-        "count"
+        "index"
       ],
       "required_fields": [
         "turn_id",
-        "count"
+        "index"
       ]
     },
     {

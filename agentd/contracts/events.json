@@ -965,7 +965,7 @@
       "category": "conversation",
       "severity": "info",
       "title": "接上了上一句",
-      "summary": "本回合第 {count} 句，接在第 {turn_id} 回合上。",
+      "summary": "本回合第 {index} 句，接在第 {turn_id} 回合上。",
       "impact": "上下文只用于消歧，不会替用户执行新动作。",
       "payload": {
         "turn_id": {
@@ -973,10 +973,10 @@
           "required": true,
           "note": "内存里的回合标识，不入库、重启即失效；不含用户原文"
         },
-        "count": {
+        "index": {
           "type": "integer",
           "required": true,
-          "note": "本回合的第几句（1 起），只是计数"
+          "note": "本句是本回合第几句（1 起），只是计数。该事件只在真的接上上一句时写，因此恒 >= 2；第一句没有可接的东西，不写此事件。"
         }
       }
     },

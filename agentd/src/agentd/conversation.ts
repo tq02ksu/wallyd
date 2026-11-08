@@ -47,6 +47,16 @@ export interface ConversationAttribution {
   reset: ConversationResetReason | null;
 }
 
+/** `peek()` 的只读探测结果：不改回合、不计数。 */
+export interface ConversationPeek {
+  /** 若现在提交，会归属的回合；尚未开始/已过期/已满员时为 null（提交时会开新回合）。 */
+  turn_id: string | null;
+  /** 回合已因静默超时过期。 */
+  stale: boolean;
+  /** 回合已满 `maxTurns` 句。 */
+  full: boolean;
+}
+
 export interface ConversationSnapshot {
   turn_id: string | null;
   utterances: number;
@@ -88,8 +98,25 @@ export class ConversationContext {
     return this.turnId !== null && now - this.lastAt > this.idleMs;
   }
 
-  /** 这句话进来时该归到哪个回合。过期/满员会就地开新回合并报告原因。 */
-  attribute(now: number): ConversationAttribution {
+  /**
+   * 只读探测：这句话若提交会落到哪个回合。**不改状态、不计数。**
+   *
+   * 分发器先用它判「被忙/空吞掉的句子不该记账」，再在确定要建 run 之后调 `advance()`。
+   */
+  peek(now: number): ConversationPeek {
+    if (this.turnId === null) return { turn_id: null, stale: false, full: false };
+    const stale = now - this.lastAt > this.idleMs;
+    const full = this.utterances >= this.maxTurns;
+    return { turn_id: stale || full ? null : this.turnId, stale, full };
+  }
+
+  /**
+   * 记账：这句话真的会变成一次 run 时调用。过期/满员会就地开新回合并报告原因。
+   *
+   * 只该在「忙/空/回声都判定通过」之后调用；否则会像评审指出的那样，
+   * 让一句根本没被听见的话写出「接上了上一句」。
+   */
+  advance(now: number): ConversationAttribution {
     let reset: ConversationResetReason | null = null;
     if (this.turnId === null) {
       this.begin(now);
@@ -108,6 +135,23 @@ export class ConversationContext {
       joined: this.utterances > 1,
       reset,
     };
+  }
+
+  /**
+   * 回滚一次 `advance()`：提交最终没建成 run（竞态 E_BUSY / 提交失败）时调用。
+   *
+   * 只认当前回合、且必须是最后记的那一句；重复调用不会把计数扣成负数。
+   * 回滚掉回合的第一句（且没有已记录的结论）时，整个回合一并撤销——
+   * 相当于这句话从未发生，下一句会重新开回合。
+   */
+  release(turn: ConversationAttribution): void {
+    if (this.turnId === null || this.turnId !== turn.turn_id) return;
+    if (this.utterances !== turn.index) return;
+    this.utterances = Math.max(0, this.utterances - 1);
+    if (this.utterances === 0 && this.runs.length === 0) {
+      this.turnId = null;
+      this.lastAt = 0;
+    }
   }
 
   /** 记下这一轮的产出。只认当前回合，迟到的旧回合结论直接丢弃。 */

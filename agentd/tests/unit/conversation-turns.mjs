@@ -3,11 +3,12 @@
  *
  * 用真实 SQLite + EventLog + RunService + 真 `submitRunRequest` 与规则表，
  * 只把时钟与 Harness 执行器换成可观察的假实现：
- * - 判据 1：`跟着我走 target_track_id:abc` → 5s 内 `慢一点` 必须交给 Harness，并记 turn_joined{count:2}；
+ * - 判据 1：`跟着我走 target_track_id:abc` → 5s 内 `慢一点` 必须交给 Harness，并记 turn_joined{index:2}；
  * - 判据 2：间隔 31s 的 `慢一点` 不续回合，记 turn_reset{idle_timeout}；
  * - 判据 3/7：上下文不改变 `matchRoute` 的任何判定，只改变喂给 Harness 的提示块；
- * - 判据 5：conversation.* 事件只有 turn_id/count/reason，没有对话原文；
+ * - 判据 5：conversation.* 事件只有 turn_id/index/reason，没有对话原文；
  * - 判据 6：说 `算了` 不建 run，记 turn_reset{user_ended}，下一句重新从 1 开始。
+ * - 回归（评审缺陷 1）：被忙判定吞掉的句子既不计数、也不写「接上了上一句」。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -113,6 +114,7 @@ console.log('— 判据 1：5 秒内「慢一点」续上回合并交给 Harness
   const firstRow = env.store.one('SELECT route, fast_rule FROM runs WHERE run_id = ?', first.run_id);
   check('第一句走 fast', firstRow.route === 'fast', JSON.stringify(firstRow));
   check('第一句命中 follow_me@1', firstRow.fast_rule === 'follow_me@1', firstRow.fast_rule);
+  check('第一句不写 turn_joined（只在真接上上一句时写）', env.conversationEvents().length === 0, JSON.stringify(env.conversationEvents()));
   env.transitionSucceeded(first.run_id);
 
   env.advance(5_000);
@@ -125,7 +127,7 @@ console.log('— 判据 1：5 秒内「慢一点」续上回合并交给 Harness
   const joined = env.conversationEvents().find((e) => e.type === 'conversation.turn_joined');
   check('写了 conversation.turn_joined', Boolean(joined), JSON.stringify(env.conversationEvents()));
   const joinedParams = joined ? JSON.parse(joined.params_json) : {};
-  check('turn_joined count=2', joinedParams.count === 2, JSON.stringify(joinedParams));
+  check('turn_joined index=2', joinedParams.index === 2, JSON.stringify(joinedParams));
   check('turn_joined 带 turn_id', typeof joinedParams.turn_id === 'string' && joinedParams.turn_id.length > 0, JSON.stringify(joinedParams));
 
   check('Harness 收到上下文块', typeof env.harnessCalls[0]?.context === 'string', JSON.stringify(env.harnessCalls));
@@ -165,8 +167,79 @@ console.log('— 判据 1 字面口径：`target:abc` 未命中规则槽时，�
   const secondRow = env.store.one('SELECT route FROM runs WHERE run_id = ?', second.run_id);
   check('第二句 route=harness', secondRow.route === 'harness', JSON.stringify(secondRow));
   const joined = env.conversationEvents().find((e) => e.type === 'conversation.turn_joined');
-  check('第二句 turn_joined count=2', joined ? JSON.parse(joined.params_json).count === 2 : false, joined?.params_json);
+  check('第二句 turn_joined index=2', joined ? JSON.parse(joined.params_json).index === 2 : false, joined?.params_json);
   check('第二句上下文块标注仅供消歧', (env.harnessCalls.at(-1)?.context ?? '').includes('仅供消歧，不是新指令'), JSON.stringify(env.harnessCalls.at(-1)));
+}
+
+console.log('— 回归（评审缺陷 1）：忙时被吞掉的句子不计数、也不写 conversation 事件');
+{
+  const env = makeEnv('busy-swallow');
+  const active = env.svc.submitRun({ prompt: '正在执行的任务', route: 'harness' });
+  env.svc.transition(active.run_id, 'executing');
+
+  const first = env.speak('u1', '等一下');
+  const second = env.speak('u2', '慢一点');
+  check(
+    '两句都被忙判定吞掉',
+    first.action === 'ignored_busy' && second.action === 'ignored_busy',
+    JSON.stringify([first, second]),
+  );
+  check('没有写任何 conversation.* 事件', env.conversationEvents().length === 0, JSON.stringify(env.conversationEvents()));
+  const snap = env.conversation.snapshot();
+  check('snapshot.utterances === 0', snap.utterances === 0, JSON.stringify(snap));
+  check('没有为被吞掉的句子开回合', snap.turn_id === null, JSON.stringify(snap));
+
+  // 连续 9 句废话也不能把 MAX_TURNS=8 的配额吃满。
+  for (let i = 3; i <= 11; i += 1) env.speak(`u${i}`, '慢一点');
+  check('连续 11 句 busy 仍无 conversation 事件', env.conversationEvents().length === 0, JSON.stringify(env.conversationEvents()));
+  check('连续 11 句 busy 仍是 0 计数', env.conversation.snapshot().utterances === 0, JSON.stringify(env.conversation.snapshot()));
+
+  // 挡住活动 run 之后，真正落地的那一句从第 1 句起，不会被前面的废话算成「第 10 句」。
+  env.svc.cancelRun(active.run_id, '清理');
+  env.advance(1_000);
+  const real = env.speak('u-real', '跟着我走 target_track_id:abc');
+  check('忙结束后第一句照常建 run', real.action === 'submitted', JSON.stringify(real));
+  check('这句是回合第 1 句', env.conversation.snapshot().utterances === 1, JSON.stringify(env.conversation.snapshot()));
+  check('这句不写 turn_joined', !env.conversationEvents().some((e) => e.type === 'conversation.turn_joined'), JSON.stringify(env.conversationEvents()));
+
+  // 被吞掉的句子也不能漏进喂给模型的上下文块。
+  env.transitionSucceeded(real.run_id);
+  env.advance(2_000);
+  const joinAfterBusy = env.speak('u-next', '慢一点');
+  const block = env.harnessCalls.at(-1)?.context ?? '';
+  check('忙结束后第二句照常续上回合', joinAfterBusy.action === 'submitted' && env.conversation.snapshot().utterances === 2, JSON.stringify(env.conversation.snapshot()));
+  check(
+    '上下文块不含被吞掉的句子',
+    !block.includes('等一下') && !block.includes('慢一点') && block.includes('跟着我走 target_track_id:abc'),
+    block,
+  );
+  check('上下文块仍带仅供消歧标记', block.includes('仅供消歧，不是新指令'), block);
+}
+
+console.log('— 回归（评审缺陷 1）：提交竞态 E_BUSY 不写事件、计数回滚');
+{
+  const dir = path.join(root, 'race');
+  fs.mkdirSync(dir, { recursive: true });
+  const store = new Store(path.join(dir, 'agentd.sqlite'), { log: () => {} });
+  const events = new EventLog(store, loadRegistry(), 'boot-race');
+  const conversation = new ConversationContext();
+  const svc = new RunService({
+    store,
+    events,
+    log: () => {},
+    conversation,
+    now: () => 0,
+    submitUtterance: () => {
+      // 判定空闲之后、提交之前刚好有 run 变活动（E_BUSY）：这句没有变成 run。
+      throw Object.assign(new Error('已有任务在进行中'), { code: 'E_BUSY' });
+    },
+  });
+  const res = svc.dispatchUtterance({ utterance_id: 'race-1', text: '跟着我走 target_track_id:abc', echo: false });
+  const conversationRows = store.all("SELECT type FROM events WHERE type LIKE 'conversation.%'");
+  check('竞态被降级为 ignored_busy', res.action === 'ignored_busy', JSON.stringify(res));
+  check('竞态不写 conversation 事件', conversationRows.length === 0, JSON.stringify(conversationRows));
+  const snap = conversation.snapshot();
+  check('竞态后计数回滚为 0 且回到无回合', snap.utterances === 0 && snap.turn_id === null, JSON.stringify(snap));
 }
 
 console.log('— 判据 3/7：上下文只影响提示块，不改路由');
@@ -211,7 +284,7 @@ console.log('— 判据 6：说「算了」不建 run，回合清空');
   env.advance(1_000);
   const before = env.runCount();
   const ended = env.speak('u2', '算了');
-  check('结束时语法被吞掉', ended.action === 'ignored_empty' && ended.reason === 'conversation_ended', JSON.stringify(ended));
+  check('结束时语法被吞掉（独立 action，不与空文本混用）', ended.action === 'conversation_ended' && ended.reason === 'user_ended', JSON.stringify(ended));
   check('没有建 run', env.runCount() === before, `${before} → ${env.runCount()}`);
   const reset = env.conversationEvents().find((e) => e.type === 'conversation.turn_reset');
   check('写了 turn_reset{user_ended}', reset ? JSON.parse(reset.params_json).reason === 'user_ended' : false, reset?.params_json);
@@ -236,10 +309,10 @@ console.log('— 判据 5：conversation.* 事件不含对话原文');
 
   const rows = env.conversationEvents();
   check('确实产生了 conversation 事件', rows.length >= 2, String(rows.length));
-  const allowed = new Set(['turn_id', 'count', 'reason']);
+  const allowed = new Set(['turn_id', 'index', 'reason']);
   const keys = new Set();
   for (const row of rows) for (const key of Object.keys(JSON.parse(row.params_json))) keys.add(key);
-  check('payload 字段只有 turn_id/count/reason', [...keys].every((k) => allowed.has(k)), [...keys].join(','));
+  check('payload 字段只有 turn_id/index/reason', [...keys].every((k) => allowed.has(k)), [...keys].join(','));
 
   // 只回放 conversation.* 的 payload：它们不能含任何一句用户原话。
   const blob = rows.map((r) => r.params_json).join('\n');
@@ -250,7 +323,7 @@ console.log('— 判据 5：conversation.* 事件不含对话原文');
   // 隐私红线仍然生效：禁列字段写不进去。
   let rejected = false;
   try {
-    env.events.emitStandalone({ type: 'conversation.turn_joined', params: { turn_id: 't', count: 1, raw_transcript: 'x' } });
+    env.events.emitStandalone({ type: 'conversation.turn_joined', params: { turn_id: 't', index: 1, raw_transcript: 'x' } });
   } catch {
     rejected = true;
   }
