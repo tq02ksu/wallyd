@@ -344,15 +344,28 @@ console.log('— 判据 1/5/10：确认 → executing → succeeded；复述不�
   // GH-13 判据 1：run 终态 → 桥收到 speak → speech.tts_finished → 事件库 speech.spoken。
   // 播报异步执行（不阻塞状态推进），所以要等它落到假 robotd 上。
   const speaks = await waitFor(() => (speakCalls().length > 0 ? speakCalls() : null));
-  check('run 终态触发且只触发一次结论播报', speaks?.length === 1, String(speaks?.length));
+  // 失败信息要能直接指向三种原因之一：没收到 speak / 收到了多次 / 凭据不对。
+  const speakCountProblem =
+    speaks === undefined
+      ? '没有收到 speak 请求（run 终态未触发播报，或等待超时）'
+      : speaks.length === 0
+        ? '没有收到 speak 请求'
+        : speaks.length > 1
+          ? `收到了 ${speaks.length} 次 speak（应恰好 1 次）`
+          : null;
+  check('run 终态触发且只触发一次结论播报', speakCountProblem === null, speakCountProblem ?? '');
   const speak = speaks?.[0];
   check(
     'speak 带 X-Wally-Approval',
     typeof speak?.header === 'string' && speak.header.includes('.'),
-    String(speak?.header),
+    speak ? `speak 请求的凭据头不合法：${JSON.stringify(speak.header)}` : '没有收到 speak 请求',
   );
   const speakCredential = decodeCredential(speak?.header);
-  check('凭据 capability = robot_speak', speakCredential?.capability === 'robot_speak', JSON.stringify(speakCredential));
+  check(
+    '凭据 capability = robot_speak',
+    speakCredential?.capability === 'robot_speak',
+    speak ? `凭据 capability=${JSON.stringify(speakCredential?.capability)}（应为 robot_speak）` : '没有收到 speak 请求',
+  );
   const expectedNarration = composeNarrationText(run, detail.json.steps ?? []);
   check(
     '播报正文来自执行事实（result_summary / step note / 兜底）',
@@ -394,7 +407,11 @@ console.log('— 判据 2：结论播报中 barge-in → run 仍 succeeded，nar
   await waitFor(() => (runRow(runId).status === 'succeeded' ? true : null));
   const speaks = await waitFor(() => (speakCalls().length > speakBefore ? speakCalls() : null));
   const speak = speaks?.at(-1);
-  check('被打断的是本次 run 的结论播报', Boolean(speak?.res_task_id), JSON.stringify(speak));
+  check(
+    '被打断的是本次 run 的结论播报',
+    Boolean(speak?.res_task_id),
+    speak ? `speak 没有可关联的 task_id：${JSON.stringify(speak)}` : '没有收到本次 run 的 speak 请求',
+  );
 
   // V03 的打断：话没说完，不是任务没做成。
   feed('speech.tts_cancelled', {

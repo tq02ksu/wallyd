@@ -130,6 +130,31 @@ export class RobotdEventBridge {
         this.onFinal(p);
         return;
 
+      case 'speech.ignored': {
+        // robotd 丢弃了一轮（例如另一轮还在进行）：这不只是 robotd 的日志，
+        // 也要进 agentd 的同一条时间线。复用分发器已有的 observation 类型，
+        // 不新增第二个「被忽略」语义。
+        const utteranceId = typeof p.utterance_id === 'string' ? p.utterance_id : '';
+        const reason = normIgnoredReason(p.reason);
+        if (!utteranceId || !reason) {
+          this.hooks.log?.('忽略无法识别的 speech.ignored', {
+            utterance_id: utteranceId,
+            reason: p.reason,
+          });
+          return;
+        }
+        this.hooks.log?.('robotd 丢弃了一轮语音', {
+          utterance_id: utteranceId,
+          reason,
+        });
+        this.emit(
+          'observation.speech_ignored',
+          { reason, utterance_id: utteranceId },
+          typeof p.run_id === 'string' && p.run_id ? p.run_id : undefined,
+        );
+        return;
+      }
+
       case 'speech.started':
         this.onStarted(ev.timestamp, p);
         return;
@@ -397,6 +422,19 @@ function normNoSpeechReason(reason?: string): string {
       return reason;
     default:
       return 'silence';
+  }
+}
+
+/** `speech.ignored` 的枚举。`speaking` 由 V06 使用，本轮只接受、不产生。 */
+function normIgnoredReason(reason: unknown): 'busy' | 'echo' | 'empty' | 'speaking' | undefined {
+  switch (reason) {
+    case 'busy':
+    case 'echo':
+    case 'empty':
+    case 'speaking':
+      return reason;
+    default:
+      return undefined;
   }
 }
 

@@ -215,6 +215,10 @@ class AudioRuntime:
         bridge = self.bridge
         if bridge is None or not bridge.ready():
             raise RuntimeError(f"语音桥不可用（{self.bridge_status.value}）：{self._last_error()}")
+        # 先给这次请求一个身份：即便它随后被拒绝，``speech.ignored`` 也要指向
+        # **被丢弃的这一轮**，而不是已经在听的那一轮。
+        requested_id = f"utt-{uuid.uuid4().hex[:8]}"
+        rejected = False
         with self._lock:
             # 静音期间**不允许开启新一轮识别**（R14：静音期间不产生新的识别结果）。
             # 早期缺陷：静音只拦住了自动切句，显式 `POST /v1/speech/listen` 照常执行，
@@ -228,9 +232,15 @@ class AudioRuntime:
                 if self.utt.auto and self.utt.task_id is None:
                     self.utt.task_id = task_id
                     return self.utt
-                raise RuntimeError("上一轮听还没结束")
-            utt = Utterance(utterance_id=f"utt-{uuid.uuid4().hex[:8]}", task_id=task_id)
-            self.utt = utt
+                rejected = True
+                utt = None
+            else:
+                utt = Utterance(utterance_id=requested_id, task_id=task_id)
+                self.utt = utt
+        if rejected:
+            # 丢账要可见：robotd 侧的「拒绝」与 agentd 侧的「busy」必须在同一条时间线上。
+            self._emit("speech.ignored", {"utterance_id": requested_id, "reason": "busy"})
+            raise RuntimeError("上一轮听还没结束")
         cmd = {
             "cmd": "listen",
             "utterance_id": utt.utterance_id,
@@ -507,6 +517,7 @@ class AudioRuntime:
         utterance_id = str(ev.get("utterance_id") or "")
         if not utterance_id:
             return None
+        rejected = False
         with self._lock:
             if self.muted:
                 return None
@@ -514,9 +525,20 @@ class AudioRuntime:
             if current is not None:
                 # 显式 listen 会先创建同 id 的轮，再收到桥的 ready；自动轮则直接认领。
                 # 已经认领过的轮次（probe 事实先到）也在这里返回，不重复发 speech.ready。
-                return current if current.utterance_id == utterance_id else None
-            utt = Utterance(utterance_id=utterance_id, task_id=None, auto=True)
-            self.utt = utt
+                if current.utterance_id == utterance_id:
+                    return current
+                rejected = True
+                utt = None
+            else:
+                utt = Utterance(utterance_id=utterance_id, task_id=None, auto=True)
+                self.utt = utt
+        if rejected:
+            # 另一轮还在进行：这一轮**不认领**，但不能静默丢掉。
+            # 只有桥真的开了一轮（``ready``）才记账；probe 的迟到 ``speech_state``
+            # 不是一次语音，记成 ignored 只会制造噪声。
+            if ev.get("ev") == "ready":
+                self._emit("speech.ignored", {"utterance_id": utterance_id, "reason": "busy"})
+            return None
         self._emit(
             "speech.ready",
             {
