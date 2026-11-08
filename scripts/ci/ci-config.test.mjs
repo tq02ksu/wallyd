@@ -399,14 +399,41 @@ for (const [lane, commands] of Object.entries(laneCommands)) {
 check('run-gates.sh fails fast', strictMode.test(gatesScript), gatesScript.slice(0, 200));
 check('run-gates.sh checks diff hygiene', /git diff --check/.test(gatesScript), gatesScript);
 
-// GH-36: the apple lane exists so Swift is *compiled*, and its AEC3 step must
-// fail closed while `third_party/webrtc-aec3` is empty. `|| true` (or a
-// continue-on-error added later) would turn both back into a display-only check.
+// GH-36: the apple lane exists so Swift is *compiled*. `|| true` (or a
+// continue-on-error added later) would turn a compile failure back into a
+// display-only check.
 const appleScript = readFileSync(path.join(root, 'scripts', 'ci', 'check-apple.sh'), 'utf8');
 check('the apple lane never masks a failure', !/\|\|\s*true\b/.test(appleScript), appleScript);
+// `eval/aec3/build_aec3.sh` (GH-6) is fail-closed on its own: with no vendored
+// sources it exits non-zero and points at `scripts/vendor-aec3.sh`. "The sources
+// are not vendored yet" is not a defect, so the lane turns exactly that cause
+// into a loud SKIP and stays red for every other failure. A silent skip, an
+// unconditional `exit 0`, or dropping the vendor hint would each make the step
+// unreadable when it really breaks.
 check(
-  'the apple lane fails closed on missing AEC3 sources',
+  'the apple lane keeps the AEC3 vendor hint',
   /vendor-aec3\.sh/.test(appleScript),
+  appleScript,
+);
+check(
+  'the apple lane records absent AEC3 sources as an explicit SKIP',
+  appleScript.includes('SKIP: third_party/webrtc-aec3 empty'),
+  appleScript,
+);
+check(
+  'the apple lane skips AEC3 only when the sources are absent and build_aec3.sh said so',
+  appleScript.includes('[ "$aec3_absent" = 1 ] && grep -q') &&
+    appleScript.includes("grep -q 'vendor-aec3\\.sh'"),
+  appleScript,
+);
+// `EnergyVAD` gives every stored property a default value, so Swift synthesises
+// a *private* memberwise initializer and `@testable import` cannot reach it
+// (that already produced one red lane). The extracted core must keep an explicit
+// `init(speechDb: ...)`; without this assertion the diagnosis only shows up as a
+// puzzling compile error in the XCTest step.
+check(
+  'the apple lane asserts the extracted core keeps an explicit EnergyVAD init',
+  appleScript.includes("grep -q 'init(speechDb:'"),
   appleScript,
 );
 

@@ -40,7 +40,7 @@ status: draft
 | `scripts/uvc_capture.swift` | `swiftc -parse` | 相机抓帧，运行需要设备与 TCC 授权，CI 不运行 |
 | `src/tools/cam_list.swift` | `-parse` + `swiftc -O` 真编译 | 只枚举设备，编译不需要设备 |
 | `eval/vision_bench.swift` | `-parse` + `swiftc -O` 真编译 | Vision 框架编译，不跑基准（无图片、无真机时延结论） |
-| `eval/aec3/aec3_eval.cc` | `bash eval/aec3/build_aec3.sh` 后 `clang++` 链接 | 源码未入库时 fail-closed 变红（见 §6） |
+| `eval/aec3/aec3_eval.cc` | `bash eval/aec3/build_aec3.sh` 后 `clang++` 链接 | 源码未入库时 `build_aec3.sh` fail-closed、lane 记 SKIP（见 §6.2）；入库后真编译 + 链接 |
 | `scripts/apple/**/*.swift` | `swiftc -parse` | 本 lane 的测试包（`Package.swift`、占位文件、XCTest 用例） |
 
 ## 3. 三档判据
@@ -50,7 +50,7 @@ status: draft
 | ✅ 可跑 | 全部 Swift 的语法/类型解析（`swiftc -parse`） | 进 `apple` lane |
 | ✅ 可跑 | 三个自包含目标 `swiftc -O` 真编译（`speech_fixture` / `cam_list` / `vision_bench`） | 进 `apple` lane |
 | ✅ 可跑 | 纯逻辑单测：能量 VAD 去抖/迟滞/端点、TTS 分句与限长（XCTest） | 进 `apple` lane |
-| ✅ 可跑 | AEC3 离线链路的**编译**（`build_aec3.sh` + 链接 `aec3_eval`） | 进 `apple` lane；源码入库前 fail-closed |
+| ✅ 可跑 | AEC3 离线链路的**编译**（`build_aec3.sh` + 链接 `aec3_eval`） | 进 `apple` lane；源码未入库时 `build_aec3.sh` fail-closed，lane 记为 SKIP（附 `vendor-aec3.sh` 提示） |
 | ✅ 可跑 | 契约检查、文档链接检查、源码 lint | 仍由 Linux `static` / `robotd` lane 跑，不在 mac 上重复 |
 | ⚠️ 可能可跑 | 虚拟音频设备（BlackHole 等）上的闭环：TTS 出到虚拟设备，再回灌给桥 | **本轮只调研，不改代码**；问题清单与验证方案见 §4 |
 | ⚠️ 可能可跑 | AEC3 逐样本比对（喂固定 PCM，比较包装层输出与 `aec3_eval`） | 需要先有实时包装层（#6）；本轮未实现，不进 lane |
@@ -79,25 +79,31 @@ CI 绿了也不代表它们成立。
 进入 `apple` 门禁前的门槛：上述五项全部有实测数据，且单次增加耗时不超过 15 分钟预算。
 在那之前，「虚拟声卡闭环」不属于可跑档。
 
-## 5. 耗时与工具链（首次 `apple` run 后回填）
+## 5. 耗时与工具链（第一次 `apple` run 实测）
 
-本设计的实现环境是 Linux 沙箱，没有 `swiftc`，无法预填实测值。`check-apple.sh`
-会打印每一段的秒数，PR 第一次 `apple` run 后把数字填进下表（issue handoff 要求项 2/3）。
+数据来自 PR #38 第一次 `apple` run：
+<https://github.com/tq02ksu/wallyd/actions/runs/42434804540>（2026-11-08，
+该次在 XCTest 编译阶段红，原因见 §6.1；编译/解析两段的数据不受影响）。
 
 | 段 | 实测值 | 备注 |
 | --- | --- | --- |
-| runner 镜像 | 待填 | `macos-latest` 当次解析成的具体镜像名 |
-| `swiftc` 版本 | 待填 | `swift --version` |
-| SDK 版本 | 待填 | `xcrun --show-sdk-version` |
-| macOS 版本 | 待填 | `sw_vers -productVersion` |
-| Xcode 版本 | 待填 | `xcodebuild -version` |
-| 工具链探测 | 待填 | 四条版本命令本身 |
-| `swiftc -parse`（全部文件） | 待填 | 逐文件解析 |
-| `swiftc -O`（3 个自包含目标） | 待填 | 真编译 + 链接 |
-| XCTest | 待填 | 抽取纯逻辑 + `swift test` |
-| AEC3 构建 | 待填 | 源码未入库时是「立即失败」，不是耗时 |
+| runner 镜像 | `macos-26-arm64`，镜像版本 `20261102.0473.1` | `macos-latest` 当次解析结果；arm64、macOS 26.7.2（`25G332`） |
+| `swiftc` 版本 | Apple Swift 6.3.3（`swiftlang-6.3.3.1.3 clang-2100.1.1.101`），target `arm64-apple-macosx26.0` | `swift --version` |
+| SDK 版本 | 26.5 | `xcrun --show-sdk-version` |
+| macOS 版本 | 26.7.2（`25G332`） | `sw_vers -productVersion` |
+| Xcode 版本 | 26.6（`17F113`） | `xcodebuild -version` |
+| 工具链探测 | 4 s | 四条版本命令本身（首次调用 `swift` 要热起来） |
+| `actions/checkout@v4` | 2 s | 不在 `check-apple.sh` 内，单独计 |
+| `swiftc -parse`（9 个文件） | 2 s | 逐文件解析，含脚本类文件 |
+| `swiftc -O`（3 个自包含目标） | 9 s | `speech_fixture` 6.5 s、`cam_list` 1.1 s、`vision_bench` 1.9 s；`vision_bench.swift:50` 有一条 `variable 'cases' was never mutated` warning（警告不判定，lane 只认退出码） |
+| XCTest | 首次 run 23 s 后失败；修好后待下一次 run 回填 | 抽取 0.2 s + `swift test` 冷启动编译测试包 |
+| AEC3 构建 | 0 s（SKIP） | 源码未入库，`build_aec3.sh` 立即 fail-closed，被识别为 SKIP |
+| `apple` job 总时长 | 42 s（01:34:11→01:34:53） | 远低于 15 分钟预算 |
 
-这些数字决定以后要不要加 SwiftPM/Xcode 缓存，以及 AEC3 构建是否需要并行化（`build_aec3.sh` 归 #6）。
+结论：目前**不需要** SwiftPM/Xcode 缓存——整条 lane 冷启动不到 1 分钟，加缓存省下的
+十几秒不值得多一层失效面；也没有路径过滤的必要（见 §8）。等 #6 把 AEC3 源码入库后，
+AEC3 段会从 0 s 变成真实构建耗时（`build_aec3.sh` 串行 `clang++` 编译全部 `.cc`），
+届时再看是否需要并行化或缓存 `work/verify/build/obj`——那是 #6 的构建脚本范畴。
 
 ## 6. 门禁接线与 fail-closed
 
@@ -111,12 +117,42 @@ CI 绿了也不代表它们成立。
 
 `scripts/ci/ci-config.test.mjs` 新增断言专门守这三者一致（并检查 `quality.needs`/`env`
 没有 `LANES` 之外的多余项），同时钉住 `runs-on: macos-latest`、15 分钟超时、
-「workflow 没有 `paths:` 过滤」、「`check-apple.sh` 没有 `|| true`」。
+「workflow 没有 `paths:` 过滤」、「`check-apple.sh` 没有 `|| true`」，以及本轮新增的两条：
+`check-apple.sh` 必须保留抽取后的 `init(speechDb:` 断言（§6.1）、必须保留
+`SKIP: third_party/webrtc-aec3 empty` 且只在「源码缺失 + `build_aec3.sh` 自己给出 vendor
+提示」时跳过（§6.2）。这三条断言都做过变异验证：删掉对应逻辑，测试立刻变红。
 
-**AEC3 fail-closed**：`third_party/webrtc-aec3/` 为空时 `build_aec3.sh` 非零退出并提示
-`scripts/vendor-aec3.sh`，`check-apple.sh` 据此让 `apple` **变红**（不是 SKIP、不是
-`continue-on-error`）。因此在本分支当前树（源码未入库）上 `apple` 预期是红的；
-等 #6 把源码入库后同一条 lane 才可能变绿。这是与 #6 对齐的口径，不是回归。
+### 6.1 被抽取的纯逻辑必须显式声明 `init`
+
+`scripts/mac_speech.swift` 的 `EnergyVAD` 所有存储属性都带默认值。Swift 对这种 struct
+合成的是 **`private` memberwise initializer**，`@testable import` 只把可见性放宽到
+`internal`，抬不动 `private`——第一次 `apple` run 正是因此红的：
+
+```
+BridgeCoreTests.swift:12:15: error: 'EnergyVAD' initializer is inaccessible due to 'private' protection level
+```
+
+修法是**在生产代码里**给 `EnergyVAD` 写一个显式的 `internal init(speechDb:silenceDb:minSpeechSec:endpointSilenceSec:onsetFrames:)`，
+运行期内部状态（`speaking` / `speechSec` / `silenceSec` / `lastSec` / `above`）不进参数。
+不允许把 `private` 改宽（那会让内部状态可被外部改写），也不允许绕过构造入口去反推状态。
+
+`check-apple.sh` 在抽取后立刻断言 `Generated.swift` 含 `init(speechDb:`，所以这条规则
+被删掉时会得到一句明确的诊断，而不是一个「Swift 报了个奇怪的可见性错误」的红 lane。
+`mac_speech_pipeline.swift` 里的其余 struct（`ASRFinal` / `TTSAudio` / `TTSClip` 等）都有
+无默认值属性，合成的是 `internal` memberwise init，**没有**这个坑；classes 的同名问题也不存在
+（全默认值时合成的是 `internal` 的 `init()`）。
+
+### 6.2 AEC3：脚本自身 fail-closed，lane 只对「还没入库」记 SKIP
+
+`third_party/webrtc-aec3/` 缺失或为空时，`build_aec3.sh`（#6 所有）**自身**非零退出并提示
+`scripts/vendor-aec3.sh`——这是它的正确行为，已有单测守住。
+
+`check-apple.sh` 只在**同时满足**两个条件时把这一步记成
+`SKIP: third_party/webrtc-aec3 empty`：源码目录不存在/为空，且 `build_aec3.sh` 的输出里
+确实带 `vendor-aec3.sh` 提示。其余任何失败（显式 `AEC3_SRC` 指坏、编译错误、链接错误、
+缺 `libwebrtc_aec3.a`）都让 `apple` 变红。没有 `continue-on-error`，没有 `|| true`，
+也不会把 SKIP 写成 PASS：作业日志里 SKIP 行与原因都会打印，总结行也写明 `aec3_eval SKIPPED`。
+
 lane 解析 AEC3 源码目录的方式与 `build_aec3.sh` 一致：只认 `third_party/webrtc-aec3`
 或显式 `AEC3_SRC`，**不读 `work/` 回退目录**（#6 已取消该回退）。
 
