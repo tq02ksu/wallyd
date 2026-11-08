@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const MIGRATIONS: string[][] = [
   [
@@ -172,6 +172,11 @@ const MIGRATIONS: string[][] = [
     'ALTER TABLE runs ADD COLUMN narration_requested_at TEXT',
     'ALTER TABLE runs ADD COLUMN narration TEXT',
   ],
+  // v3（GH-10）：会话复用的 Harness thread。
+  // - thread_id 只属于 sessions：同一会话的多个 run 复用同一个 thread；
+  // - 放在 sessions 而不是 runs，因为「复用」的粒度是会话，不是单次任务；
+  // - 可空：既有会话尚未跑过 Harness，或 Harness 未配置。
+  ['ALTER TABLE sessions ADD COLUMN thread_id TEXT'],
 ];
 
 export class StoreUnavailable extends Error {

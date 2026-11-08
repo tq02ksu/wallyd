@@ -56,10 +56,12 @@ function clarifyEvents() {
 // 「过来」现在由规则表里的 `come_here@1` 覆盖：命中但缺 `target_track_id` → 澄清。
 // 这里用生产规则表，不再注入伪造规则（V05 落地前那份注入已经多余且会造成重复 id）。
 const executed = [];
+const harnessExecuted = [];
 const deps = {
   runs: svc,
   availableCapabilities: () => new Set(['robot_stop', 'robot_follow']),
   executeFast: (runId, capability, args) => executed.push({ runId, capability, args }),
+  executeHarness: (runId) => harnessExecuted.push(runId),
 };
 
 
@@ -131,7 +133,15 @@ check('记了一条 router.blocked', logged.length === 1 && logged[0].m === 'rou
 check('原因标成否定', logged[0]?.x?.blocked?.[0]?.reason === 'negation', JSON.stringify(logged[0]));
 check('没有下发任何能力', executed.length === execBefore, String(executed.length - execBefore));
 check('拦下的命中落成 harness，不是快速路由', blocked.route === 'harness', blocked.route);
+check('harness run 真的交给执行器', harnessExecuted.at(-1) === blocked.run_id, JSON.stringify(harnessExecuted));
 if (blocked.run_id) svc.cancelRun(blocked.run_id, '测试收尾');
+
+console.log('— 普通复杂指令也交给 Harness，而不是停在 accepted');
+const complex = submitRunRequest(deps, { prompt: '去厨房看看有没有人' });
+check('route=harness', complex.route === 'harness', JSON.stringify(complex));
+check('harness 执行器收到同一个 run_id', harnessExecuted.at(-1) === complex.run_id, JSON.stringify(harnessExecuted));
+check('两次 harness 都触发了执行', harnessExecuted.length === 2, String(harnessExecuted.length));
+if (complex.run_id) svc.cancelRun(complex.run_id, '测试收尾');
 
 store.close();
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);

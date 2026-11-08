@@ -10,7 +10,8 @@
  * 所以这里的分支是：
  * - `clarify` / `ambiguous`：不建 run，只写一条 `route.clarify` 事件（有会话时同时落
  *   用户消息），不占活动名额；
- * - `matched` / `none`：建 run；`matched` 时由装配层注入的 `executeFast` 真正执行。
+ * - `matched` / `none`：建 run；`matched` 由 `executeFast`、`none` 由 `executeHarness`
+ *   在装配层真正启动执行。
  *
  * ## 停止是安全旁路
  *
@@ -42,6 +43,8 @@ export interface RunRequestDeps {
   availableCapabilities: () => ReadonlySet<string> | null;
   /** 命中可执行规则后启动执行。装配层注入，**不阻塞响应**。 */
   executeFast: (runId: string, capability: string, args: Record<string, unknown>) => void;
+  /** `route: harness` 的 run 交给 Harness 执行器。装配层注入，**不阻塞响应**。 */
+  executeHarness: (runId: string) => void;
   /** 测试可注入的规则表；生产使用 `FAST_RULES`。 */
   rules?: readonly FastRule[];
   /**
@@ -129,6 +132,10 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
   // 快速路由必须真的执行，不能只标一个 `route: fast` 就停在那儿。
   if (matched.kind === 'matched' && !result.duplicate) {
     deps.executeFast(result.run_id, matched.rule.capability, matched.args);
+  }
+  // Harness 同理：建了 run 就要推进，否则它会永远停在 accepted。
+  if (route === 'harness' && !result.duplicate) {
+    deps.executeHarness(result.run_id);
   }
 
   return {
