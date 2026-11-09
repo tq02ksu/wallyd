@@ -166,7 +166,7 @@ def default_capabilities() -> list[Capability]:
             public_name="robot_announce",
             group="speech",
             implementation=Implementation.IMPLEMENTED,
-            summary="系统播报审批复述（免审批；不接受任意自由文本）",
+            summary="系统播报审批复述与澄清追问（免审批；不接受任意自由文本）",
             requires_approval=False,
         ),
         Capability(

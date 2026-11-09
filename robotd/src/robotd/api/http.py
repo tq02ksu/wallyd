@@ -31,7 +31,13 @@ from xml.sax.saxutils import escape as _xml_escape  # noqa: F401 - 保留给将�
 
 from ..approval import CREDENTIAL_HEADER, enforce_approval
 from ..app import App, resolve_work_dir
-from ..core.announce import APPROVAL_REPEAT, render_announcement
+from ..core.announce import (
+    APPROVAL_REPEAT,
+    CLARIFICATION,
+    CLARIFICATION_REASONS,
+    render_announcement,
+    render_clarification,
+)
 from ..core.errors import ErrorCode, RobotdError, wrap_unexpected
 from ..core.types import Exclusivity, TaskError, TaskState
 from . import events as events_api
@@ -137,6 +143,45 @@ def _optional_number(body: dict[str, Any], key: str, *, minimum: float | None = 
     if minimum is not None and float(value) < minimum:
         raise RobotdError(ErrorCode.VALIDATION, f"字段 {key} 不得小于 {minimum}")
     return float(value)
+
+
+def _optional_str(body: dict[str, Any], key: str, *, max_len: int = 200) -> str | None:
+    if key not in body or body[key] is None:
+        return None
+    value = body[key]
+    if not isinstance(value, str) or not value.strip():
+        raise RobotdError(ErrorCode.VALIDATION, f"字段 {key} 必须是非空字符串")
+    if len(value) > max_len:
+        raise RobotdError(ErrorCode.VALIDATION, f"字段 {key} 超过 {max_len} 字符上限")
+    return value.strip()
+
+
+def _optional_str_list(
+    body: dict[str, Any],
+    key: str,
+    *,
+    max_len: int,
+    max_items: int,
+    pattern: re.Pattern[str] | None = None,
+) -> list[str]:
+    if key not in body or body[key] is None:
+        return []
+    value = body[key]
+    if not isinstance(value, list):
+        raise RobotdError(ErrorCode.VALIDATION, f"字段 {key} 必须是字符串数组")
+    if len(value) > max_items:
+        raise RobotdError(ErrorCode.VALIDATION, f"字段 {key} 最多 {max_items} 项")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise RobotdError(ErrorCode.VALIDATION, f"字段 {key} 的每一项都必须是非空字符串")
+        text = item.strip()
+        if len(text) > max_len:
+            raise RobotdError(ErrorCode.VALIDATION, f"字段 {key} 的项超过 {max_len} 字符上限")
+        if pattern is not None and not pattern.match(text):
+            raise RobotdError(ErrorCode.VALIDATION, f"字段 {key} 的项含非法字符：{text!r}")
+        out.append(text)
+    return out
 
 
 def _reject_unknown(body: dict[str, Any], allowed: set[str]) -> None:
@@ -291,29 +336,78 @@ def _h_speak(ctx: RouteContext) -> dict[str, Any]:
 
 
 _APPROVAL_ID = re.compile(r"^[A-Za-z0-9_.:-]+$")
+_ANNOUNCE_SLOT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ANNOUNCE_FIELDS = {
+    "approval_id",
+    "kind",
+    "action_label",
+    "args_summary",
+    "reason",
+    "missing",
+    "candidates",
+    "more",
+}
 
 
 def _h_announce(ctx: RouteContext) -> dict[str, Any]:
-    """``robot_announce``：审批复述的系统播报路径，**不走审批门**。
+    """``robot_announce``：系统播报路径（审批复述 / 澄清追问），**不走审批门**。
 
     与 ``robot_speak`` 的边界是契约级的：这里没有 ``text`` 参数，只有结构化的审批字段，
-    正文由 robotd 用固定模板渲染。播报完成以 ``speech.tts_finished``（带 approval_id）为准；
+    正文由 robotd 用固定模板渲染。播报完成以 ``speech.tts_finished``（带 ``kind``，
+    审批复述另带 ``approval_id``）为准；
     失败会发 ``speech.announce_failed``，不能静默。
     """
     body = ctx.body
-    _reject_unknown(body, {"approval_id", "kind", "action_label", "args_summary"})
-    approval_id = _require_str(body, "approval_id", max_len=64)
-    if not _APPROVAL_ID.match(approval_id):
-        raise RobotdError(ErrorCode.VALIDATION, "approval_id 含非法字符")
+    _reject_unknown(body, _ANNOUNCE_FIELDS)
     kind = _require_str(body, "kind", max_len=40)
-    if kind != APPROVAL_REPEAT:
+    approval_id: str | None = None
+    if kind == APPROVAL_REPEAT:
+        # 审批复述专属字段：混入澄清字段说明调用方搞错了形状，不能猜。
+        extra = {"reason", "missing", "candidates", "more"} & set(body)
+        if extra:
+            raise RobotdError(
+                ErrorCode.VALIDATION,
+                f"approval_repeat 不接受字段：{', '.join(sorted(extra))}",
+            )
+        approval_id = _require_str(body, "approval_id", max_len=64)
+        if not _APPROVAL_ID.match(approval_id):
+            raise RobotdError(ErrorCode.VALIDATION, "approval_id 含非法字符")
+        action_label = _require_str(body, "action_label", max_len=80)
+        args_summary = _require_str(body, "args_summary", max_len=200)
+        try:
+            text = render_announcement(kind=kind, action_label=action_label, args_summary=args_summary)
+        except ValueError as exc:
+            raise RobotdError(ErrorCode.VALIDATION, str(exc)) from exc
+    elif kind == CLARIFICATION:
+        # 澄清没有审批记录：approval_id / args_summary 是审批复述的字段。
+        extra = {"approval_id", "args_summary"} & set(body)
+        if extra:
+            raise RobotdError(
+                ErrorCode.VALIDATION,
+                f"clarification 不接受字段：{', '.join(sorted(extra))}",
+            )
+        reason = _require_str(body, "reason", max_len=40)
+        if reason not in CLARIFICATION_REASONS:
+            raise RobotdError(
+                ErrorCode.VALIDATION,
+                f"不支持的澄清原因 reason={reason!r}；只允许 {sorted(CLARIFICATION_REASONS)}",
+            )
+        action_label = _optional_str(body, "action_label", max_len=80)
+        missing = _optional_str_list(body, "missing", max_len=64, max_items=8, pattern=_ANNOUNCE_SLOT)
+        candidates = _optional_str_list(body, "candidates", max_len=80, max_items=3)
+        more = bool(_optional_bool(body, "more"))
+        try:
+            text = render_clarification(
+                reason=reason,
+                action_label=action_label,
+                missing=missing,
+                candidates=candidates,
+                more=more,
+            )
+        except ValueError as exc:
+            raise RobotdError(ErrorCode.VALIDATION, str(exc)) from exc
+    else:
         raise RobotdError(ErrorCode.VALIDATION, f"不支持的播报类型 kind={kind!r}")
-    action_label = _require_str(body, "action_label", max_len=80)
-    args_summary = _require_str(body, "args_summary", max_len=200)
-    try:
-        text = render_announcement(kind=kind, action_label=action_label, args_summary=args_summary)
-    except ValueError as exc:
-        raise RobotdError(ErrorCode.VALIDATION, str(exc)) from exc
 
     def run(_cap: Any) -> dict[str, Any]:
         runtime = ctx.app.audio
@@ -338,29 +432,30 @@ def _h_announce(ctx: RouteContext) -> dict[str, Any]:
             )
             # 失败也必须可观测：agentd 不能因为「请求发出去了」就以为问过用户
             try:
-                ctx.app.kernel.emit(
-                    "speech.announce_failed",
-                    {
-                        "approval_id": approval_id,
-                        "kind": kind,
-                        "task_id": task.task_id,
-                        "reason": str(exc),
-                    },
-                )
+                failed: dict[str, Any] = {
+                    "kind": kind,
+                    "task_id": task.task_id,
+                    "reason": str(exc),
+                }
+                if approval_id is not None:
+                    failed["approval_id"] = approval_id
+                ctx.app.kernel.emit("speech.announce_failed", failed)
             except Exception:  # noqa: BLE001
                 log.warning("发送 speech.announce_failed 失败", exc_info=True)
             raise RobotdError(
                 ErrorCode.UNAVAILABLE,
                 f"无法进行系统播报：{exc}",
-                {"capability": "robot.announce", "approval_id": approval_id},
+                {"capability": "robot.announce", **({"approval_id": approval_id} if approval_id else {})},
             ) from exc
-        return {
+        accepted: dict[str, Any] = {
             "task_id": task.task_id,
             "status": "accepted",
-            "approval_id": approval_id,
             "kind": kind,
             "text": text,
         }
+        if approval_id is not None:
+            accepted["approval_id"] = approval_id
+        return accepted
 
     return _call_capability(ctx.app, "robot.announce", run)
 

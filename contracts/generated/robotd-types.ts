@@ -82,15 +82,16 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 系统播报审批复述（不调用需审批的 robot_speak）
-         * @description robotd 内部的系统播报路径：只接受结构化的审批复述请求，由 robotd 用固定模板渲染，
-         *     **不接受任意自由文本**（没有 `text` 字段；未知字段一律 400）。
+         * 系统播报（审批复述 / 澄清追问；不调用需审批的 robot_speak）
+         * @description robotd 内部的系统播报路径：只接受结构化的审批复述或澄清追问请求，由 robotd 用
+         *     固定模板渲染，**不接受任意自由文本**（没有 `text` 字段；未知字段一律 400）。
          *
          *     与 `/v1/robot/speak` 的区别是契约级的，不是「调用方自觉」：
          *
          *     - 本端点不要求审批，因为它本身就是审批链路的一环；
-         *     - 因此它只念审批复述与系统提示，参数必须来自 agentd 的审批记录
-         *       （`approval_id` + 固定 `kind` + 有界 `action_label`/`args_summary`）；
+         *     - 因此它只念审批复述与澄清追问：审批复述来自 agentd 的审批记录
+         *       （`approval_id` + 固定 `kind` + 有界 `action_label`/`args_summary`），
+         *       澄清追问只来自规则匹配结果的结构化 `missing` / `candidates`；
          *     - 播报完成后由 `speech.tts_finished`（带 `approval_id`/`kind`）告知调用方
          *       **真的播完了**，而不是「请求已受理」。agentd 必须等这条事件才开启确认窗口。
          *
@@ -512,14 +513,22 @@ export interface components {
             persist?: boolean;
         };
         /**
-         * @description 审批复述请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的
-         *     `robot_speak`，否则本端点就成了它的免审批版本。
+         * @description 系统播报请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的
+         *     `robot_speak`，否则本端点就成了它的免审批版本。正文一律由 robotd 用固定模板渲染。
+         *
+         *     按 `kind` 区分两种请求：
+         *
+         *     - `approval_repeat`：必填 `approval_id` / `action_label` / `args_summary`；
+         *     - `clarification`：`action_label` 是命中规则的摘要，`missing` 是缺失参数字段名，
+         *       `candidates` 是歧义候选的规则摘要（agentd 已按上限截断），`more=true` 表示还有
+         *       「别的」。正文来自这些结构化字段，**不接受用户原文**。
          */
-        AnnounceRequest: {
+        AnnounceRequest: components["schemas"]["ApprovalRepeatAnnounceRequest"] | components["schemas"]["ClarificationAnnounceRequest"];
+        ApprovalRepeatAnnounceRequest: {
             /** @description agentd 审批记录的 ID；robotd 只用于回显与事件关联，不持有审批状态。 */
             approval_id: string;
             /**
-             * @description 固定播报种类；当前只允许审批复述。
+             * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
             kind: "approval_repeat";
@@ -528,13 +537,52 @@ export interface components {
             /** @description 关键参数摘要，来自 agentd 的审批记录；robotd 用固定模板念出。 */
             args_summary: string;
         };
-        AnnounceAccepted: {
+        ClarificationAnnounceRequest: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "clarification";
+            /** @description 命中规则的摘要（有界），不是用户原文。 */
+            action_label?: string;
+            /**
+             * @description 选择固定模板的哪个分支。
+             * @enum {string}
+             */
+            reason: "missing_arguments" | "capability_unavailable" | "precondition" | "ambiguous";
+            /** @description 缺失参数字段名（如 `target_track_id`）。只接受标识符，不接受用户原文。 */
+            missing?: string[];
+            /** @description 歧义候选的规则摘要。候选超过 3 条时 agentd 只传前两条，并把 `more` 设为 true。 */
+            candidates?: string[];
+            /**
+             * @description 候选还有「别的」时念出「还是别的」。
+             * @default false
+             */
+            more?: boolean;
+        };
+        AnnounceAccepted: components["schemas"]["ApprovalRepeatAnnounceAccepted"] | components["schemas"]["ClarificationAnnounceAccepted"];
+        ApprovalRepeatAnnounceAccepted: {
             task_id: string;
             /** @enum {string} */
             status: "accepted";
             approval_id: string;
-            /** @enum {string} */
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
             kind: "approval_repeat";
+            /** @description robotd 实际交给 TTS 的完整句子（固定模板渲染结果），供 agentd 存审计。 */
+            text: string;
+        };
+        ClarificationAnnounceAccepted: {
+            task_id: string;
+            /** @enum {string} */
+            status: "accepted";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "clarification";
             /** @description robotd 实际交给 TTS 的完整句子（固定模板渲染结果），供 agentd 存审计。 */
             text: string;
         };

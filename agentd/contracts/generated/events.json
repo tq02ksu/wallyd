@@ -696,16 +696,17 @@
       "category": "route",
       "severity": "warning",
       "title": "没听明白要做什么",
-      "summary": "{reason}",
+      "summary": "{question}",
       "impact": null,
       "advice": "{advice}",
       "is_recovery": false,
       "payload_fields": [
+        "question",
         "reason",
         "advice"
       ],
       "required_fields": [
-        "reason"
+        "question"
       ]
     },
     {

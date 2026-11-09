@@ -771,12 +771,17 @@
       "category": "route",
       "severity": "warning",
       "title": "没听明白要做什么",
-      "summary": "{reason}",
+      "summary": "{question}",
       "advice": "{advice}",
       "payload": {
-        "reason": {
+        "question": {
           "type": "string",
           "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": false,
+          "notes": "结构化原因：missing_arguments / capability_unavailable / precondition / ambiguous；窗口收尾时为 window_expired / user_cancelled / prompt_too_long / stop / superseded"
         },
         "advice": {
           "type": "string",

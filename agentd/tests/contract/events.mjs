@@ -159,6 +159,13 @@ try {
   // outcome_label 在 title 里（「任务{outcome_label}」），summary 是 {detail}。
   check('run.finished 用 outcome_label 表达结果', finished.title.includes('{outcome_label}'));
   check('run.finished 必填 outcome 字段', finished.required_fields.includes('outcome'));
+
+  // GH-49：澄清事件必须带 question（与 run.waiting_input.question 同名），
+  // 不能只留一个 reason 让用户猜「它到底问了什么」。
+  const clarify = tpl.get('route.clarify');
+  check('route.clarify 必填 question', clarify.required_fields.includes('question'));
+  check('route.clarify summary 用 question', clarify.summary.includes('{question}'));
+  check('route.clarify 的 reason 是可选的结构化原因', !clarify.required_fields.includes('reason'));
 } finally {
   await runtime.close();
 }

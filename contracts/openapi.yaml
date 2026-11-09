@@ -179,16 +179,17 @@ paths:
       # 它也不是 Agent 可调用的能力，因此不投影进 MCP 工具面。
       x-mcp-exclude: true
       tags: [robot]
-      summary: 系统播报审批复述（不调用需审批的 robot_speak）
+      summary: 系统播报（审批复述 / 澄清追问；不调用需审批的 robot_speak）
       description: |
-        robotd 内部的系统播报路径：只接受结构化的审批复述请求，由 robotd 用固定模板渲染，
-        **不接受任意自由文本**（没有 `text` 字段；未知字段一律 400）。
+        robotd 内部的系统播报路径：只接受结构化的审批复述或澄清追问请求，由 robotd 用
+        固定模板渲染，**不接受任意自由文本**（没有 `text` 字段；未知字段一律 400）。
 
         与 `/v1/robot/speak` 的区别是契约级的，不是「调用方自觉」：
 
         - 本端点不要求审批，因为它本身就是审批链路的一环；
-        - 因此它只念审批复述与系统提示，参数必须来自 agentd 的审批记录
-          （`approval_id` + 固定 `kind` + 有界 `action_label`/`args_summary`）；
+        - 因此它只念审批复述与澄清追问：审批复述来自 agentd 的审批记录
+          （`approval_id` + 固定 `kind` + 有界 `action_label`/`args_summary`），
+          澄清追问只来自规则匹配结果的结构化 `missing` / `candidates`；
         - 播报完成后由 `speech.tts_finished`（带 `approval_id`/`kind`）告知调用方
           **真的播完了**，而不是「请求已受理」。agentd 必须等这条事件才开启确认窗口。
 
@@ -802,11 +803,27 @@ components:
           default: false
           description: 是否要求板侧持久化（掉电保留）；默认仅本次运行有效
     AnnounceRequest:
+      description: |
+        系统播报请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的
+        `robot_speak`，否则本端点就成了它的免审批版本。正文一律由 robotd 用固定模板渲染。
+
+        按 `kind` 区分两种请求：
+
+        - `approval_repeat`：必填 `approval_id` / `action_label` / `args_summary`；
+        - `clarification`：`action_label` 是命中规则的摘要，`missing` 是缺失参数字段名，
+          `candidates` 是歧义候选的规则摘要（agentd 已按上限截断），`more=true` 表示还有
+          「别的」。正文来自这些结构化字段，**不接受用户原文**。
+      oneOf:
+        - $ref: "#/components/schemas/ApprovalRepeatAnnounceRequest"
+        - $ref: "#/components/schemas/ClarificationAnnounceRequest"
+      discriminator:
+        propertyName: kind
+        mapping:
+          approval_repeat: "#/components/schemas/ApprovalRepeatAnnounceRequest"
+          clarification: "#/components/schemas/ClarificationAnnounceRequest"
+    ApprovalRepeatAnnounceRequest:
       type: object
       additionalProperties: false
-      description: |
-        审批复述请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的
-        `robot_speak`，否则本端点就成了它的免审批版本。
       required: [approval_id, kind, action_label, args_summary]
       properties:
         approval_id:
@@ -818,7 +835,6 @@ components:
         kind:
           type: string
           enum: [approval_repeat]
-          description: 固定播报种类；当前只允许审批复述。
         action_label:
           type: string
           minLength: 1
@@ -829,7 +845,56 @@ components:
           minLength: 1
           maxLength: 200
           description: 关键参数摘要，来自 agentd 的审批记录；robotd 用固定模板念出。
+    ClarificationAnnounceRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, reason]
+      properties:
+        kind:
+          type: string
+          enum: [clarification]
+        action_label:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: 命中规则的摘要（有界），不是用户原文。
+        reason:
+          type: string
+          enum: [missing_arguments, capability_unavailable, precondition, ambiguous]
+          description: 选择固定模板的哪个分支。
+        missing:
+          type: array
+          maxItems: 8
+          description: |
+            缺失参数字段名（如 `target_track_id`）。只接受标识符，不接受用户原文。
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+        candidates:
+          type: array
+          maxItems: 3
+          description: |
+            歧义候选的规则摘要。候选超过 3 条时 agentd 只传前两条，并把 `more` 设为 true。
+          items:
+            type: string
+            minLength: 1
+            maxLength: 80
+        more:
+          type: boolean
+          default: false
+          description: 候选还有「别的」时念出「还是别的」。
     AnnounceAccepted:
+      oneOf:
+        - $ref: "#/components/schemas/ApprovalRepeatAnnounceAccepted"
+        - $ref: "#/components/schemas/ClarificationAnnounceAccepted"
+      discriminator:
+        propertyName: kind
+        mapping:
+          approval_repeat: "#/components/schemas/ApprovalRepeatAnnounceAccepted"
+          clarification: "#/components/schemas/ClarificationAnnounceAccepted"
+    ApprovalRepeatAnnounceAccepted:
       type: object
       required: [task_id, status, approval_id, kind, text]
       properties:
@@ -843,6 +908,21 @@ components:
         kind:
           type: string
           enum: [approval_repeat]
+        text:
+          type: string
+          description: robotd 实际交给 TTS 的完整句子（固定模板渲染结果），供 agentd 存审计。
+    ClarificationAnnounceAccepted:
+      type: object
+      required: [task_id, status, kind, text]
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [accepted]
+        kind:
+          type: string
+          enum: [clarification]
         text:
           type: string
           description: robotd 实际交给 TTS 的完整句子（固定模板渲染结果），供 agentd 存审计。

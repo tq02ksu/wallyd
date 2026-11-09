@@ -106,8 +106,20 @@ def test_robot_announce_is_contract_declared_system_path(spec, tools):
 
     announce_body = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     schema = spec["components"]["schemas"][announce_body.rsplit("/", 1)[-1]]
-    assert "text" not in schema["properties"], "系统播报不得接受任意自由文本"
-    assert schema.get("additionalProperties") is False
+    variants = schema["oneOf"]
+    by_kind = {}
+    for ref in variants:
+        name = ref["$ref"].rsplit("/", 1)[-1]
+        variant = spec["components"]["schemas"][name]
+        assert "text" not in variant["properties"], "系统播报不得接受任意自由文本"
+        assert variant.get("additionalProperties") is False
+        kinds = variant["properties"]["kind"]["enum"]
+        assert len(kinds) == 1
+        by_kind[kinds[0]] = variant
+    assert set(by_kind) == {"approval_repeat", "clarification"}
+    assert {"approval_id", "action_label", "args_summary"} <= set(by_kind["approval_repeat"]["required"])
+    assert "approval_id" not in by_kind["clarification"]["required"]
+    assert "reason" in by_kind["clarification"]["required"]
 
 
 def test_no_hardware_primitives_in_public_tools(tools):
