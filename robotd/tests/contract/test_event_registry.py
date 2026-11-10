@@ -190,9 +190,9 @@ def _reduce_branch_events() -> set[str]:
 # ---------------------------------------------------------------- 登记表边界
 def test_registry_boundary_semantics():
     registry = load_event_registry()
-    # events[] 是 29 条精确名（GH-7 新增 speech.ignored），没有一条含星号；
-    # device.* 只是订阅过滤语义。
-    assert len(registry.exact) == 29
+    # events[] 是 31 条精确名（GH-57 新增 safety.stop_requested / safety.slowdown），
+    # 没有一条含星号；device.* 只是订阅过滤语义。
+    assert len(registry.exact) == 31
     assert not any("*" in name for name in registry.exact)
     assert registry.allows("device.recovered")
     assert not registry.allows("device.recoverd")

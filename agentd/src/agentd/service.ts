@@ -151,6 +151,8 @@ export async function createRuntime(
   });
   let announcerRef: ApprovalAnnouncer | null = null;
   let narratorRef: RunNarrator | null = null;
+  // runs 在 bridge 之后构造；用 ref 让 bridge 的安全停止归属拿到同一个实例。
+  let runsRef: RunService | null = null;
   // 语音分发入口：桥收到 final 后交给 runs.dispatchUtterance（审批 → 忙 → 提交）。
   let utteranceDispatchRef:
     | ((input: { utterance_id: string; text: string; started_at?: string; echo: boolean }) => void)
@@ -158,6 +160,10 @@ export async function createRuntime(
   const robotdBridge = new RobotdEventBridge({
     events,
     store,
+    runs: {
+      findRunByRobotTask: (taskId) => runsRef?.findRunByRobotTask(taskId) ?? null,
+      cancelRun: (runId, reason) => runsRef?.cancelRun(runId, reason),
+    },
     hooks: {
       log: (m, x) => log(m, x),
       onAnnouncementFinished: (outcome) => announcerRef?.onFinished(outcome),
@@ -264,6 +270,7 @@ export async function createRuntime(
         idempotency_key: `asr:${utterance_id}`,
       }),
   });
+  runsRef = runs;
   const harnessExecutor = new HarnessExecutor({
     runs,
     store,
@@ -539,14 +546,22 @@ export async function createRuntime(
       runs.transition(runId, 'executing');
       // 步骤与工具调用都要落库：界面靠它们显示「实际做了什么」，
       // 只有状态没有步骤会出现「succeeded 但看不出执行过什么」。
-      const res = await robotd.callCapability(capability, args);
+      // 停止来源由 agentd 只做**标注**，安全判定仍在 robotd；语音「停」与 API 停止
+      // 必须能区分，上层判据只读 cause。
+      const runRow = runs.getRunRow(runId);
+      const callArgs: Record<string, unknown> =
+        capability === 'robot_stop'
+          ? { ...args, cause: runRow?.source === 'asr' ? 'user_voice' : 'user_stop_api' }
+          : args;
+      const res = await robotd.callCapability(capability, callArgs);
       const detail = res.robot_task_id ? `robotd 任务 ${res.robot_task_id}` : '已下发';
       store.transaction((tx) => {
         const sid = runs.addStep(tx, runId, `执行 ${capability}`, 'active');
         tx.run('UPDATE run_steps SET state = ?, finished_at = ?, note = ? WHERE step_id = ?', 'done', nowIso(), detail, sid);
-        runs.recordToolCall(tx, runId, capability, `执行 ${capability}`, compactJson(args), 'succeeded', {
-          args,
+        runs.recordToolCall(tx, runId, capability, `执行 ${capability}`, compactJson(callArgs), 'succeeded', {
+          args: callArgs,
           approvalParams: [],
+          robotTaskId: res.robot_task_id,
         });
       });
       runs.transition(runId, 'succeeded', { reason: 'fast_rule', detail });
@@ -592,7 +607,8 @@ export async function createRuntime(
       let cancelledApprovals = 0;
 
       if (active) {
-        const c = runs.cancelRun(active.run_id, '收到停止指令');
+        // blocking_reason 用结构化 cause，不用中文自由文本。
+        const c = runs.cancelRun(active.run_id, 'user_stop_api');
         cancelledRunId = active.run_id;
         cancelledApprovals = c.voidedApprovals;
       }
@@ -600,39 +616,37 @@ export async function createRuntime(
       // 直达 robotd：不等 Harness、不等模型、不走审批
       let bodyStop: Record<string, unknown>;
       try {
-        const r = await robotd.stop('agentd_stop');
+        const r = await robotd.stop('user_stop_api');
         if (r.board_ack === true) {
-          bodyStop = { state: 'confirmed', detail: 'robotd 已确认板侧收到停止', board_ack: true };
+          bodyStop = {
+            state: 'confirmed',
+            cause: 'user_stop_api',
+            detail: 'robotd 已确认板侧收到停止',
+            board_ack: true,
+          };
         } else if (r.board_ack === false) {
           bodyStop = {
             state: 'requested',
+            cause: 'user_stop_api',
             detail: 'robotd 已受理停止，但板侧未确认（链路可能已断）',
             board_ack: false,
           };
         } else {
-          bodyStop = { state: 'requested', detail: 'robotd 已受理停止，未拿到板侧确认', board_ack: null };
+          bodyStop = {
+            state: 'requested',
+            cause: 'user_stop_api',
+            detail: 'robotd 已受理停止，未拿到板侧确认',
+            board_ack: null,
+          };
         }
       } catch (e: any) {
         // 不可达时必须说 unknown，不能假装停了
         bodyStop = {
           state: 'unknown',
+          cause: 'user_stop_api',
           detail: `无法确认停止是否生效：${e.message}`,
           board_ack: null,
         };
-      }
-
-      const emitType = 'safety.stop_requested';
-      if (events.isRegistered(emitType)) {
-        events.emitStandalone({
-          type: emitType,
-          severity: bodyStop.state === 'confirmed' ? 'info' : 'warning',
-          run_id: cancelledRunId,
-          params: {
-            state: bodyStop.state as string,
-            detail: String(bodyStop.detail),
-            run_id: cancelledRunId ?? undefined,
-          },
-        });
       }
 
       return {

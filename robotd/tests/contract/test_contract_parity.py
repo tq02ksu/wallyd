@@ -17,9 +17,11 @@ import pytest
 from robotd.api.http import build_routes
 from robotd.capabilities import Implementation, Registry
 from robotd.core.errors import ErrorCode, RobotdError, http_status_for
+from robotd.core.safety import STOP_CAUSES
 from robotd.core.types import TaskState
 
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts"
+AGENTD_CONTRACTS = CONTRACTS.parent / "agentd" / "contracts"
 
 
 def load(name: str) -> dict:
@@ -115,6 +117,30 @@ def test_no_hardware_primitives_in_public_tools(tools):
     for tool in tools:
         for word in banned:
             assert word not in tool["name"], f"公开工具 {tool['name']} 含硬件原语 {word}"
+
+
+def test_safety_stop_requested_cause_contract_matches_implementation(events):
+    """新字段必须是契约必填枚举，且与 robotd/agentd 两侧同一组取值。"""
+    source = json.loads((CONTRACTS / "events.json").read_text(encoding="utf-8"))
+    ev = next(e for e in source["events"] if e["type"] == "safety.stop_requested")
+    cause = ev["payload"]["cause"]
+    assert cause["required"] is True
+    assert set(cause["enum"]) == set(STOP_CAUSES)
+
+    generated = next(e for e in events["events"] if e["type"] == "safety.stop_requested")
+    assert "cause" in generated["required_fields"]
+
+    agentd = json.loads((AGENTD_CONTRACTS / "events.json").read_text(encoding="utf-8"))
+    semantic = next(e for e in agentd["events"] if e["type"] == "safety.stop_requested")
+    assert semantic["payload"]["cause"]["required"] is True
+    assert set(semantic["payload"]["cause"]["enum"]) == set(STOP_CAUSES)
+
+
+def test_slowdown_contract_is_change_only():
+    source = json.loads((CONTRACTS / "events.json").read_text(encoding="utf-8"))
+    ev = next(e for e in source["events"] if e["type"] == "safety.slowdown")
+    assert ev.get("no_state") is True
+    assert "仅在减速状态变化时发送" in ev["notes"]
 
 
 def _approval_params(operation: dict) -> list[str] | None:

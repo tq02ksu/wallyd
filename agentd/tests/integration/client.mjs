@@ -39,12 +39,14 @@ const stopTool = tools.find((t) => t.name === 'robot_stop');
 check('robot_stop 存在', Boolean(stopTool));
 
 // 停止：安全旁路
-const stopRes = await client.stop('clienttest');
+const stopRes = await client.stop('user_stop_api');
 console.log('stop:', JSON.stringify(stopRes));
 check('stop.ok', stopRes.ok === true);
+check('stop.cause 结构化', stopRes.cause === 'user_stop_api');
+check('stop.state 合法', ['requested', 'confirmed', 'unknown'].includes(stopRes.state));
 check('stop.board_ack 是布尔或 null', typeof stopRes.board_ack === 'boolean' || stopRes.board_ack === null);
 check('stop.at 是数字', typeof stopRes.at === 'number');
-const stopAgain = await client.stop('clienttest');
+const stopAgain = await client.stop('user_stop_api');
 check('stop 幂等', stopAgain.ok === true);
 
 // 任务列表

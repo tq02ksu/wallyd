@@ -216,7 +216,7 @@ accepted → running → completed | failed | cancelled
 | 类别 | 事件示例 | 最低必要信息 |
 | --- | --- | --- |
 | 任务 | `task.started`, `task.progress`, `task.completed`, `task.failed`, `task.cancelled` | `task_id`、能力名、进度或终态/错误 |
-| 运动/安全 | `motion.plan`, `safety.stopped` | 计划摘要或停止原因；不宣称实际到位 |
+| 运动/安全 | `motion.plan`, `safety.stopped`, `safety.stop_requested`, `safety.slowdown` | 计划摘要、停止动作、结构化停止原因与确认状态；`slowdown` 仅在减速状态变化时发；不宣称实际到位 |
 | 设备 | `device.ready`, `device.lost`, `device.recovered`, `device.reset`, `device.changed` | 设备名、变化/原因、可确认的固件信息 |
 | 状态 | `state.rejected` | 被拒事件的 `type`、`payload_keys` 与 `reason`；不含 payload 原文 |
 | 视觉 | `vision.*`, `camera.*`, `people.*`, `person.*` | 观测、有效性与时间信息；不得把模型原始格式直接作为稳定能力契约 |

@@ -235,6 +235,9 @@ export interface paths {
          *     不保证断开驱动使能。响应只表示访问已受理，**不表示物理静止**（板侧应答 ≠ 物理静止证明）。
          *     是否连带取消语音/音频任务见 `x-cancels`。超时未收到板侧应答时返回 504/E_TIMEOUT，
          *     调用方不得据此认为机器人仍在运动。
+         *     可选的 `cause` 是结构化停止来源（写入 `safety.stop_requested.cause`）；
+         *     缺省或旧客户端只传 `reason` 时由 robotd 归一成 `user_stop_api`。
+         *     `detail` 只作人读补充，调用方判据必须读 `cause`。
          */
         post: operations["robot_stop"];
         delete?: never;
@@ -1212,7 +1215,18 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    cause?: "user_voice" | "user_stop_api" | "obstacle" | "watchdog_timeout" | "param_out_of_range" | "observation_stale" | "device_lost" | "bridge_exit" | "internal_error";
+                    /** @description 旧字段，向后兼容；已知值映射为 cause，未知值按 user_stop_api。 */
+                    reason?: string;
+                    /** @description 人读补充，不参与任何判据。 */
+                    detail?: string;
+                };
+            };
+        };
         responses: {
             /** @description 已受理停止 */
             200: {
@@ -1228,6 +1242,16 @@ export interface operations {
                         at: number;
                         /** @description 是否收到板侧 stop 应答；未收到为 false（此时应报 504，不返回 200） */
                         board_ack?: boolean | null;
+                        /**
+                         * @description 结构化停止原因，与 safety.stop_requested.cause 一致
+                         * @enum {string}
+                         */
+                        cause?: "user_voice" | "user_stop_api" | "obstacle" | "watchdog_timeout" | "param_out_of_range" | "observation_stale" | "device_lost" | "bridge_exit" | "internal_error";
+                        /**
+                         * @description confirmed 仅表示板侧应答了停止；unknown 表示无法确认停稳
+                         * @enum {string}
+                         */
+                        state?: "requested" | "confirmed" | "unknown";
                     };
                 };
             };
