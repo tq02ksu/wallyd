@@ -8,7 +8,11 @@
 #
 #   1. `swiftc -parse` every tracked `.swift` file  (syntax gate, all files)
 #   2. `swiftc -O` the three self-contained tools    (real compile + link)
-#   3. `swift test` over the hardware-free pure core (real XCTest assertions)
+#   3. `swift test` over the hardware-free pure core (real XCTest assertions),
+#      plus the GH-55 command surface compiled both with and without
+#      `-D WALLY_AUDIO_TEST_HARNESS`: the default build must not recognise
+#      `harness_play_wav` / `harness_record_pair` (E_CMD_UNKNOWN), the flagged
+#      build must. Both run the classifier, neither touches an audio device.
 #   4. `bash eval/aec3/build_aec3.sh`, then link `aec3_eval`
 #      — the build script is fail-closed (it exits non-zero with a
 #        `scripts/vendor-aec3.sh` hint) but "the sources are not vendored yet"
@@ -57,6 +61,20 @@ for file in $swift_files; do
 done
 printf '[apple] swiftc -parse: %ss\n' "$((SECONDS - step_start))"
 
+# 1b) Parse the sources again with the GH-55 test-harness flag. The harness
+# block is inactive in a default build, so the loop above only checks its
+# syntax; this pass also parses the active branch. Building the real app still
+# needs macOS 26 SDK (SpeechAnalyzer), which the runner does not have.
+step_start=$SECONDS
+printf '[apple] swiftc -parse -D WALLY_AUDIO_TEST_HARNESS (test harness branches)\n'
+for file in scripts/mac_speech.swift scripts/mac_speech_pipeline.swift; do
+    if ! swiftc -parse -D WALLY_AUDIO_TEST_HARNESS "$file"; then
+        printf '[apple] parse with WALLY_AUDIO_TEST_HARNESS failed: %s\n' "$file" >&2
+        exit 1
+    fi
+done
+printf '[apple] swiftc -parse (harness): %ss\n' "$((SECONDS - step_start))"
+
 # 2) Real compile + link for the three tools that are self-contained (single
 # file, no other repository sources). A parse-only gate would miss type errors
 # and missing framework symbols, so these get a real `swiftc -O` build.
@@ -83,14 +101,17 @@ printf '[apple] swiftc -O: %ss\n' "$((SECONDS - step_start))"
 
 # 3) A genuinely executed XCTest over the bridge's pure logic. `mac_speech.swift`
 # is a script (top-level CLI dispatch), so SwiftPM cannot import it. The
-# extractor copies `struct EnergyVAD` and `func splitSentences` verbatim out of
-# it before the test run, which keeps one source of truth instead of a drifting
-# duplicate. Both are hardware-free; see the test file for what is asserted.
+# extractor copies `struct EnergyVAD`, `func splitSentences` and the GH-55
+# command surface (`enum ServeCommand` / `func classifyServeCommand`) verbatim
+# out of it before the test run, which keeps one source of truth instead of a
+# drifting duplicate. All are hardware-free; see the test files for what is
+# asserted.
 step_start=$SECONDS
 printf '[apple] XCTest over the hardware-free bridge core\n'
 python3 scripts/apple/extract_bridge_core.py \
     --source scripts/mac_speech.swift \
-    --out scripts/apple/Sources/BridgeCore/Generated.swift
+    --out scripts/apple/Sources/BridgeCore/Generated.swift \
+    --out-harness scripts/apple/Sources/BridgeCoreHarness/Generated.swift
 # Guard the extraction itself: `EnergyVAD` must keep an explicit
 # `init(speechDb: ...)`. Every stored property of that struct has a default
 # value, so without an explicit initializer Swift synthesises a *private*
@@ -102,6 +123,17 @@ if ! grep -q 'init(speechDb:' scripts/apple/Sources/BridgeCore/Generated.swift; 
     printf '[apple] extracted core has no explicit EnergyVAD init(speechDb:...)\n' >&2
     printf '[apple] declare an internal init on struct EnergyVAD in scripts/mac_speech.swift\n' >&2
     printf '[apple] (synthesised memberwise init is private; @testable cannot reach it)\n' >&2
+    exit 1
+fi
+# GH-55: the command surface must be present in both generated copies. If the
+# classifier is renamed, the extraction fails first; if the harness `#if` block
+# disappears, the flagged copy silently stops proving anything, so assert it.
+if ! grep -q 'func classifyServeCommand(' scripts/apple/Sources/BridgeCore/Generated.swift; then
+    printf '[apple] extracted core has no classifyServeCommand; the serve command surface drifted\n' >&2
+    exit 1
+fi
+if ! grep -q 'WALLY_AUDIO_TEST_HARNESS' scripts/apple/Sources/BridgeCoreHarness/Generated.swift; then
+    printf '[apple] harness copy has no WALLY_AUDIO_TEST_HARNESS block; the flag would prove nothing\n' >&2
     exit 1
 fi
 swift test --package-path scripts/apple

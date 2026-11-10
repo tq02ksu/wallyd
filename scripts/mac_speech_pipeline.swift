@@ -569,6 +569,16 @@ final class ServeBridgeV2: @unchecked Sendable {
     var lastFinalAtMs: Int?
     var lastRenderDb: Double = -120
 
+#if WALLY_AUDIO_TEST_HARNESS
+    // GH-55: harness playback is the same render path as TTS, so the 100 ms
+    // `aec_echo_probe` cadence must run for it too — otherwise ABAB would
+    // produce WAVs with no echo measurements and look "finished".
+    var harnessRenderActive = false
+    var harnessRecording = false
+    var harnessMicSamples: [Int16] = []
+    var harnessRecordSubscribed = false
+#endif
+
     // ASR worker / utterance lifecycle.
     var active: ActiveUtterance?
     var asrEngine: (any ASREngine)?
@@ -631,13 +641,21 @@ final class ServeBridgeV2: @unchecked Sendable {
         ttsRenderQueue.async { [weak self] in self?.renderLoop() }
 
         let ok = buildEngine()
-        emitLine(["ev": "bridge_ready", "pid": Int(ProcessInfo.processInfo.processIdentifier),
-                  "locale": loc.identifier, "asr_format": asrFormat.description,
-                  "aec": aec, "engine_started": ok, "preroll": prerollMax,
-                  "asr_engine": asrBackend.rawValue, "tts_engine": ttsBackend.rawValue,
-                  "tts_queue_capacity": ttsQueueCapacity,
-                  "auto_listen": true,
-                  "ts_mono_ns": monoNs(), "t_ms": ms()])
+        var ready: [String: Any] = ["ev": "bridge_ready",
+                                    "pid": Int(ProcessInfo.processInfo.processIdentifier),
+                                    "locale": loc.identifier, "asr_format": asrFormat.description,
+                                    "aec": aec, "engine_started": ok, "preroll": prerollMax,
+                                    "asr_engine": asrBackend.rawValue,
+                                    "tts_engine": ttsBackend.rawValue,
+                                    "tts_queue_capacity": ttsQueueCapacity,
+                                    "auto_listen": true,
+                                    "ts_mono_ns": monoNs(), "t_ms": ms()]
+#if WALLY_AUDIO_TEST_HARNESS
+        // Falsification anchor for eval/aec3: a default build omits this field,
+        // so a script that sees harness commands answered must not trust them.
+        ready["test_harness"] = true
+#endif
+        emitLine(ready)
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { [weak self] n in
                 guard let self, (n.object as? AVAudioEngine) === self.engine else { return }
@@ -914,7 +932,13 @@ final class ServeBridgeV2: @unchecked Sendable {
         let m = muted
         let activeId = active?.id
         let autoEndpoint = active?.autoEndpoint ?? false
+#if WALLY_AUDIO_TEST_HARNESS
+        // Harness playback is the production render path, so it must also drive
+        // the production echo-probe cadence.
+        let speaking = response != nil || harnessRenderActive
+#else
         let speaking = response != nil
+#endif
         let renderDb = lastRenderDb
         let busy = engineFailed || autoStarting
         lock.unlock()
@@ -1424,10 +1448,52 @@ final class ServeBridgeV2: @unchecked Sendable {
         return rms > 1e-7 ? 20 * log10(rms) : nil
     }
 
+    /// Convert already-rendered PCM to the mixer/playerNode format.
+    private func buffersForMixer(_ bufs: [AVAudioPCMBuffer],
+                                 _ mixFmt: AVAudioFormat) -> [AVAudioPCMBuffer] {
+        guard let first = bufs.first else { return [] }
+        if mixFmt.channelCount == first.format.channelCount,
+           mixFmt.sampleRate == first.format.sampleRate {
+            return bufs
+        }
+        guard let conv = AVAudioConverter(from: first.format, to: mixFmt) else { return [] }
+        var playBufs: [AVAudioPCMBuffer] = []
+        for b in bufs {
+            let cap = AVAudioFrameCount(Double(b.frameLength) * mixFmt.sampleRate / b.format.sampleRate) + 64
+            guard let out = AVAudioPCMBuffer(pcmFormat: mixFmt, frameCapacity: cap) else { continue }
+            var used = false
+            var convErr: NSError?
+            conv.convert(to: out, error: &convErr) { _, status in
+                if used { status.pointee = .noDataNow; return nil }
+                used = true; status.pointee = .haveData
+                return b
+            }
+            if convErr == nil { playBufs.append(out) }
+        }
+        return playBufs
+    }
+
+    /// The one playback path. Production TTS and the GH-55 test harness both
+    /// schedule here, on the node attached to this bridge's AVAudioEngine, so a
+    /// measured echo is the production render path's echo.
+    private func scheduleOnPlayerNode(_ bufs: [AVAudioPCMBuffer])
+        -> (player: AVAudioPlayerNode, seconds: Double)? {
+        lock.lock(); let engine = self.engine; let player = playerNode; lock.unlock()
+        guard let player, engine.isRunning else { return nil }
+        let mixFmt = engine.mainMixerNode.outputFormat(forBus: 0)
+        engine.connect(player, to: engine.mainMixerNode, format: mixFmt)
+        let playBufs = buffersForMixer(bufs, mixFmt)
+        guard !playBufs.isEmpty else { return nil }
+        player.stop()
+        player.play()
+        for b in playBufs { player.scheduleBuffer(b, at: nil, options: [], completionHandler: nil) }
+        let seconds = Double(playBufs.reduce(0) { $0 + Int64($1.frameLength) }) / mixFmt.sampleRate
+        return (player, seconds)
+    }
+
     /// Schedule pre-synthesized PCM on the engine's playerNode so AEC sees the render reference.
     private func playBuffers(_ bufs: [AVAudioPCMBuffer], text: String, responseId: String) {
-        lock.lock(); let engine = self.engine; let player = playerNode; lock.unlock()
-        guard let player, engine.isRunning else {
+        guard let scheduled = scheduleOnPlayerNode(bufs) else {
             // Engine rebuilding: fall back to system synthesis so speech still leaves the robot.
             let synth = AVSpeechSynthesizer()
             lock.lock(); self.synth = synth; lock.unlock()
@@ -1445,31 +1511,8 @@ final class ServeBridgeV2: @unchecked Sendable {
             }
             return
         }
-        let mixFmt = engine.mainMixerNode.outputFormat(forBus: 0)
-        engine.connect(player, to: engine.mainMixerNode, format: mixFmt)
-        var playBufs: [AVAudioPCMBuffer] = []
-        if let first = bufs.first, mixFmt.channelCount == first.format.channelCount,
-           mixFmt.sampleRate == first.format.sampleRate {
-            playBufs = bufs
-        } else if let first = bufs.first, let conv = AVAudioConverter(from: first.format, to: mixFmt) {
-            for b in bufs {
-                let cap = AVAudioFrameCount(Double(b.frameLength) * mixFmt.sampleRate / b.format.sampleRate) + 64
-                guard let out = AVAudioPCMBuffer(pcmFormat: mixFmt, frameCapacity: cap) else { continue }
-                var used = false
-                var convErr: NSError?
-                conv.convert(to: out, error: &convErr) { _, status in
-                    if used { status.pointee = .noDataNow; return nil }
-                    used = true; status.pointee = .haveData
-                    return b
-                }
-                if convErr == nil { playBufs.append(out) }
-            }
-        }
-        guard !playBufs.isEmpty else { return }
-        player.stop()
-        player.play()
-        for b in playBufs { player.scheduleBuffer(b, at: nil, options: [], completionHandler: nil) }
-        let seconds = Double(playBufs.reduce(0) { $0 + Int64($1.frameLength) }) / mixFmt.sampleRate
+        let player = scheduled.player
+        let seconds = scheduled.seconds
         let deadline = Date().addingTimeInterval(seconds + 1.0)
         while Date() < deadline {
             lock.lock(); let gone = response?.id != responseId || response?.cancelled == true
@@ -1531,6 +1574,241 @@ final class ServeBridgeV2: @unchecked Sendable {
         }
         finishResponse(rid, cancelled: true, reason: "stop_speak")
     }
+
+#if WALLY_AUDIO_TEST_HARNESS
+    // ------------------------------------------------------------ test-only WAV harness (GH-55)
+    //
+    // Compiled in only with `-D WALLY_AUDIO_TEST_HARNESS` (build script:
+    // `WALLY_AUDIO_TEST_HARNESS=1 sh scripts/build_audio_bridge.sh`). A default
+    // build does not contain these commands at all: classifyServeCommand
+    // returns nil and the bridge answers E_CMD_UNKNOWN.
+    //
+    // Both commands schedule through `scheduleOnPlayerNode`, i.e. the same
+    // ServeBridgeV2 / AVAudioEngine / playerNode graph as `speak`, and playback
+    // sets `harnessRenderActive` so the production 100 ms `aec_echo_probe`
+    // cadence runs. A separate playback path would measure a different echo
+    // than production and make ABAB results non-transferable.
+
+    /// Read a WAV into decoded PCM buffers.
+    private func readWavBuffers(_ path: String) -> [AVAudioPCMBuffer]? {
+        guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: path)) else { return nil }
+        let fmt = file.processingFormat
+        let frames = AVAudioFrameCount(file.length)
+        guard frames > 0,
+              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames),
+              (try? file.read(into: buf)) != nil, buf.frameLength > 0 else { return nil }
+        return [buf]
+    }
+
+    /// Down-mix and resample any PCM buffer to 16 kHz mono Int16.
+    ///
+    /// Linear interpolation on purpose: `AVAudioConverter`'s push mode stalls
+    /// when only one input buffer is supplied (the old `record` command hit
+    /// this and produced header-only WAVs).
+    static func pcm16Mono16k(_ buf: AVAudioPCMBuffer) -> [Int16] {
+        let inFrames = Int(buf.frameLength)
+        let srcRate = buf.format.sampleRate
+        let srcCh = max(1, Int(buf.format.channelCount))
+        guard inFrames > 0, srcRate > 0 else { return [] }
+        let outFrames = max(1, Int(Double(inFrames) * 16_000.0 / srcRate))
+        var out = [Int16](repeating: 0, count: outFrames)
+        let ratio = srcRate / 16_000.0
+        if let f = buf.floatChannelData {
+            for i in 0..<outFrames {
+                let pos = Double(i) * ratio
+                let i0 = min(Int(pos), inFrames - 1), i1 = min(i0 + 1, inFrames - 1)
+                let frac = Float(pos - Double(i0))
+                var acc: Float = 0
+                for c in 0..<srcCh { acc += f[c][i0] * (1 - frac) + f[c][i1] * frac }
+                acc /= Float(srcCh)
+                out[i] = Int16(max(-32768, min(32767, acc * 32767)))
+            }
+        } else if let s = buf.int16ChannelData {
+            for i in 0..<outFrames {
+                let pos = Double(i) * ratio
+                let i0 = min(Int(pos), inFrames - 1), i1 = min(i0 + 1, inFrames - 1)
+                let frac = Float(pos - Double(i0))
+                var acc: Float = 0
+                for c in 0..<srcCh {
+                    acc += Float(s[c][i0]) * (1 - frac) + Float(s[c][i1]) * frac
+                }
+                acc /= Float(srcCh)
+                out[i] = Int16(max(-32768, min(32767, acc)))
+            }
+        } else {
+            return []
+        }
+        return out
+    }
+
+    /// Write 16 kHz mono PCM16 WAV. Returns false instead of throwing so the
+    /// event can carry the failure.
+    static func writeWav16(_ samples: [Int16], to path: String) -> Bool {
+        guard !samples.isEmpty else { return false }
+        var data = Data()
+        func put32(_ v: UInt32) {
+            var x = v.littleEndian
+            withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+        }
+        func put16(_ v: UInt16) {
+            var x = v.littleEndian
+            withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+        }
+        let bytes = UInt32(samples.count * 2)
+        data.append(contentsOf: Array("RIFF".utf8))
+        put32(36 + bytes)
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        put32(16)
+        put16(1)                 // PCM
+        put16(1)                 // mono
+        put32(16_000)
+        put32(16_000 * 2)        // byte rate
+        put16(2)                 // block align
+        put16(16)                // bits per sample
+        data.append(contentsOf: Array("data".utf8))
+        put32(bytes)
+        var le = samples.map { $0.littleEndian }
+        le.withUnsafeBufferPointer { data.append(Data(bytes: $0.baseAddress!, count: $0.count * 2)) }
+        return (try? data.write(to: URL(fileURLWithPath: path))) != nil
+    }
+
+    /// Append captured mic frames while `harnessRecording` is set. Called from
+    /// the capture worker; only memory copies happen here (never disk I/O).
+    private func harnessMicFrame(_ frame: AudioFrame) {
+        lock.lock(); let rec = harnessRecording; lock.unlock()
+        guard rec else { return }
+        let samples = Self.pcm16Mono16k(frame.buffer)
+        guard !samples.isEmpty else { return }
+        lock.lock(); harnessMicSamples.append(contentsOf: samples); lock.unlock()
+    }
+
+    private func beginHarnessRender() {
+        lock.lock(); harnessRenderActive = true; lock.unlock()
+    }
+
+    private func endHarnessRender() {
+        lock.lock(); harnessRenderActive = false; lock.unlock()
+    }
+
+    /// `{"cmd":"harness_play_wav","path":"…/aec_probe.wav"}`
+    func harnessPlayWav(_ cmd: [String: Any]) {
+        guard let path = cmd["path"] as? String else {
+            emitLine(["ev": "error", "code": "E_ARGS", "message": "harness_play_wav 需要 path",
+                      "ts_mono_ns": monoNs(), "t_ms": ms()])
+            return
+        }
+        work.async { [weak self] in
+            guard let self else { return }
+            guard let buffers = self.readWavBuffers(path) else {
+                emitLine(["ev": "error", "code": "E_FILE", "message": "读不到或解码失败：\(path)",
+                          "ts_mono_ns": monoNs(), "t_ms": ms()])
+                return
+            }
+            let frames = buffers.reduce(0) { $0 + Int($1.frameLength) }
+            let rate = buffers[0].format.sampleRate
+            guard rate > 0 else {
+                emitLine(["ev": "error", "code": "E_FILE", "message": "测试音采样率无效：\(path)",
+                          "ts_mono_ns": monoNs(), "t_ms": ms()])
+                return
+            }
+            if let db = self.referenceDb(buffers) {
+                self.lock.lock(); self.lastRenderDb = db; self.lock.unlock()
+            }
+            emitLine(["ev": "play_started", "path": path, "frames": frames,
+                      "format": buffers[0].format.description,
+                      "ts_mono_ns": monoNs(), "t_ms": ms()])
+            self.beginHarnessRender()
+            guard let scheduled = self.scheduleOnPlayerNode(buffers) else {
+                self.endHarnessRender()
+                emitLine(["ev": "error", "code": "E_NO_PLAYER",
+                          "message": "playerNode 不可用（engine 未运行）",
+                          "ts_mono_ns": monoNs(), "t_ms": ms()])
+                return
+            }
+            // 0.5 s tail so residual echo is captured as well.
+            Thread.sleep(forTimeInterval: scheduled.seconds + 0.5)
+            self.endHarnessRender()
+            emitLine(["ev": "play_finished", "path": path, "frames": frames,
+                      "seconds": (Double(frames) / rate * 1000).rounded() / 1000,
+                      "ts_mono_ns": monoNs(), "t_ms": ms()])
+        }
+    }
+
+    /// `{"cmd":"harness_record_pair","dir":"…","path":"…/aec_probe.wav"}`
+    ///
+    /// Plays the WAV through the production playerNode and records
+    /// `<dir>/ref.wav` (the test WAV's PCM, down-mixed/resampled to 16 kHz mono
+    /// on the same timebase as the AEC model) plus `<dir>/mic.wav` (the capture
+    /// pipeline's frames).
+    func harnessRecordPair(_ cmd: [String: Any]) {
+        guard let dir = cmd["dir"] as? String, let path = cmd["path"] as? String else {
+            emitLine(["ev": "error", "code": "E_ARGS", "message": "harness_record_pair 需要 dir 与 path",
+                      "ts_mono_ns": monoNs(), "t_ms": ms()])
+            return
+        }
+        work.async { [weak self] in
+            guard let self else { return }
+            guard let buffers = self.readWavBuffers(path) else {
+                emitLine(["ev": "error", "code": "E_FILE", "message": "读不到或解码失败：\(path)",
+                          "ts_mono_ns": monoNs(), "t_ms": ms()])
+                return
+            }
+            var ref: [Int16] = []
+            for b in buffers { ref.append(contentsOf: Self.pcm16Mono16k(b)) }
+            guard !ref.isEmpty else {
+                emitLine(["ev": "error", "code": "E_FILE", "message": "测试音没有可用的 PCM 样本",
+                          "ts_mono_ns": monoNs(), "t_ms": ms()])
+                return
+            }
+            emitLine(["ev": "record_read", "dir": dir, "path": path,
+                      "src_format": buffers[0].format.description,
+                      "ref_samples": ref.count, "ts_mono_ns": monoNs(), "t_ms": ms()])
+
+            self.lock.lock()
+            self.harnessMicSamples.removeAll(keepingCapacity: true)
+            self.harnessRecording = true
+            let subscribe = !self.harnessRecordSubscribed
+            self.harnessRecordSubscribed = true
+            self.lock.unlock()
+            if subscribe {
+                self.frameBus.subscribe("test-harness-record") { [weak self] frame in
+                    self?.harnessMicFrame(frame)
+                }
+            }
+            emitLine(["ev": "record_started", "dir": dir, "ts_mono_ns": monoNs(), "t_ms": ms()])
+
+            self.beginHarnessRender()
+            guard let scheduled = self.scheduleOnPlayerNode(buffers) else {
+                self.endHarnessRender()
+                self.lock.lock(); self.harnessRecording = false; self.lock.unlock()
+                emitLine(["ev": "error", "code": "E_NO_PLAYER",
+                          "message": "playerNode 不可用（engine 未运行）",
+                          "ts_mono_ns": monoNs(), "t_ms": ms()])
+                return
+            }
+            if let db = self.referenceDb(buffers) {
+                self.lock.lock(); self.lastRenderDb = db; self.lock.unlock()
+            }
+            emitLine(["ev": "record_scheduled", "dir": dir,
+                      "seconds": (scheduled.seconds * 1000).rounded() / 1000,
+                      "ts_mono_ns": monoNs(), "t_ms": ms()])
+            // Play length + 1.5 s tail so the mic file also carries decay.
+            Thread.sleep(forTimeInterval: scheduled.seconds + 1.5)
+            self.endHarnessRender()
+            self.lock.lock()
+            self.harnessRecording = false
+            let mic = self.harnessMicSamples
+            self.harnessMicSamples.removeAll(keepingCapacity: false)
+            self.lock.unlock()
+
+            let okRef = Self.writeWav16(ref, to: dir + "/ref.wav")
+            let okMic = Self.writeWav16(mic, to: dir + "/mic.wav")
+            emitLine(["ev": "record_finished", "dir": dir, "ref_samples": ref.count,
+                      "mic_samples": mic.count, "ref_ok": okRef, "mic_ok": okMic,
+                      "ts_mono_ns": monoNs(), "t_ms": ms()])
+        }
+    }
+#endif
 
     // ------------------------------------------------------------ status / shutdown
 
@@ -1651,7 +1929,9 @@ func runServeBridgeMode() async {
     bridge.start()
 
     // Command surface is intentionally small: listen / stop / speak / stop_speak plus mute,
-    // unmute, status and quit. Diagnostic play/record entry points are not production commands.
+    // unmute, status and quit. Diagnostic play/record entry points are not production
+    // commands, and the GH-55 test harness is compiled in only with
+    // `-D WALLY_AUDIO_TEST_HARNESS` (see classifyServeCommand in mac_speech.swift).
     DispatchQueue.global().async {
         while let line = readLine(strippingNewline: true) {
             let t = line.trimmingCharacters(in: .whitespaces)
@@ -1663,19 +1943,25 @@ func runServeBridgeMode() async {
                           "ts_mono_ns": monoNs(), "t_ms": ms()])
                 continue
             }
-            switch (obj["cmd"] as? String) ?? "" {
-            case "listen":     bridge.listen(obj)
-            case "stop":       bridge.finish(reason: (obj["reason"] as? String) ?? "stdin")
-            case "mute":       bridge.setMuted(true)
-            case "unmute":     bridge.setMuted(false)
-            case "speak":      bridge.speak(obj)
-            case "stop_speak": bridge.stopSpeak()
-            case "status":     bridge.status()
-            case "quit":       bridge.shutdown(); exit(0)
-            default:
+            guard let command = classifyServeCommand((obj["cmd"] as? String) ?? "") else {
                 emitLine(["ev": "error", "code": "E_CMD_UNKNOWN",
                           "message": "不认识的命令：\(obj["cmd"] ?? "-")",
                           "ts_mono_ns": monoNs(), "t_ms": ms()])
+                continue
+            }
+            switch command {
+            case .listen:     bridge.listen(obj)
+            case .stop:       bridge.finish(reason: (obj["reason"] as? String) ?? "stdin")
+            case .mute:       bridge.setMuted(true)
+            case .unmute:     bridge.setMuted(false)
+            case .speak:      bridge.speak(obj)
+            case .stopSpeak:  bridge.stopSpeak()
+            case .status:     bridge.status()
+            case .quit:       bridge.shutdown(); exit(0)
+#if WALLY_AUDIO_TEST_HARNESS
+            case .harnessPlayWav:    bridge.harnessPlayWav(obj)
+            case .harnessRecordPair: bridge.harnessRecordPair(obj)
+#endif
             }
         }
         bridge.shutdown()
