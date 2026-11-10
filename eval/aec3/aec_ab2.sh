@@ -10,6 +10,10 @@
 #
 # 用法：sh eval/aec3/aec_ab2.sh [轮数，默认 3] [vpio|aec3]
 #
+# 前置（GH-55）：桥必须用测试专用 harness 构建，play/record 已从正式命令面删除：
+#   WALLY_AUDIO_TEST_HARNESS=1 sh scripts/build_audio_bridge.sh
+# 脚本先证伪 `"test_harness": true`；默认构建不认识 harness_play_wav，实验作废。
+#
 #   vpio（默认）：--aec（VPIO）对 --no-aec
 #   aec3：--aec3（软件分叉参考）对 --no-aec；桥必须在 bridge_ready 里确认
 #         `"aec_mode": "aec3"`，否则实验作废（忽略未知 flag 会把 VPIO 数据伪装成 AEC3）
@@ -29,6 +33,7 @@ case "$MODE" in
     ;;
 esac
 
+[ -d "$APP" ] || { echo "缺桥：先 WALLY_AUDIO_TEST_HARNESS=1 sh scripts/build_audio_bridge.sh"; exit 1; }
 [ -f "$WAV" ] || { echo "缺测试音：先跑 python3 work/verify/make_probe.py"; exit 1; }
 mkdir -p "$OUT"
 
@@ -57,10 +62,19 @@ run_one() {
     return 1
   fi
 
+  # 证伪（GH-55）：harness 命令只存在于测试专用构建；bridge_ready 没回报就作废。
+  # 默认构建会回 E_CMD_UNKNOWN，这时绝不能把「没有播完」当成环境问题继续跑。
+  if ! grep -q '"test_harness": true' "$base.out" 2>/dev/null; then
+    echo "[$round-$tag] FAIL 桥未回报 test_harness=true（AudioBridge 未用 WALLY_AUDIO_TEST_HARNESS=1 构建）"
+    kill $holder 2>/dev/null || true
+    pkill -f "AudioBridge serve" 2>/dev/null || true
+    return 1
+  fi
+
   sleep 1
   # --- 播报前本底：3 秒静默采样 ---
   sleep 3
-  echo "{\"cmd\":\"play\",\"path\":\"$WAV\"}" > "$base.in"
+  echo "{\"cmd\":\"harness_play_wav\",\"path\":\"$WAV\"}" > "$base.in"
   # 测试音 5.0s，多等 3s 让残余回声也采到
   sleep 8
   # --- 播报后本底：再 2 秒 ---

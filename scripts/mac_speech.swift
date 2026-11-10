@@ -934,6 +934,51 @@ if mode == "speak-stream" {
     exit(0)
 }
 
+// ---------------------------------------------------------------- serve 命令面
+
+/// The production `serve` command surface.
+///
+/// Kept hardware-free and free of AVFoundation types on purpose: the macOS
+/// `apple` lane extracts this enum and `classifyServeCommand` into
+/// `BridgeCore` and *executes* it, so "a default build answers E_CMD_UNKNOWN
+/// for test-only commands" is a compiled assertion, not a grep.
+enum ServeCommand: Equatable {
+    case listen
+    case stop
+    case mute
+    case unmute
+    case speak
+    case stopSpeak
+    case status
+    case quit
+#if WALLY_AUDIO_TEST_HARNESS
+    // GH-55 test-only surface. Never part of a default build: the eval scripts
+    // must first see `"test_harness": true` in `bridge_ready`, otherwise the
+    // experiment is thrown out instead of being reported as a pass.
+    case harnessPlayWav
+    case harnessRecordPair
+#endif
+}
+
+/// `nil` means "not a command": the bridge answers `E_CMD_UNKNOWN`.
+func classifyServeCommand(_ raw: String) -> ServeCommand? {
+    switch raw {
+    case "listen": return .listen
+    case "stop": return .stop
+    case "mute": return .mute
+    case "unmute": return .unmute
+    case "speak": return .speak
+    case "stop_speak": return .stopSpeak
+    case "status": return .status
+    case "quit": return .quit
+#if WALLY_AUDIO_TEST_HARNESS
+    case "harness_play_wav": return .harnessPlayWav
+    case "harness_record_pair": return .harnessRecordPair
+#endif
+    default: return nil
+    }
+}
+
 // ---------------------------------------------------------------- serve：常驻语音桥
 //
 // 实现拆到 scripts/mac_speech_pipeline.swift（构建时拼进同一个 main.swift，仍是同一个
