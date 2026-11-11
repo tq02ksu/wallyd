@@ -36,6 +36,13 @@ def run_cli(payload: dict, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def run_cli_batch(cases: list[dict]) -> list[str]:
+    """一次 node 进程比较大量整数，避免 200+ 次进程启动把契约测试拖成分钟级。"""
+    res = run_cli({"cases": cases}, "--batch")
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
 def test_lexicon_is_the_contract_owned_single_source():
     assert LEXICON_PATH == REPO / "contracts" / "announce-lexicon.json"
     lex = load_lexicon()
@@ -81,6 +88,48 @@ def test_python_and_typescript_render_identically(args, fields, expected):
     res = run_cli({"args": args, "fields": fields})
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0, "零"),
+        (1, "一"),
+        (9, "九"),
+        # 10–19 必须读「十」「十五」，不能丢「十」只留个位（review 复现的缺陷）。
+        (10, "十"),
+        (11, "十一"),
+        (15, "十五"),
+        (19, "十九"),
+        (20, "二十"),
+        (99, "九十九"),
+        (100, "一百"),
+        (101, "一百零一"),
+        (110, "一百一十"),
+        (115, "一百一十五"),
+        (1000, "一千"),
+        # 零后的低位组要保留「一十」：一万零一十五，而不是一万零十五。
+        (1015, "一千零一十五"),
+        (10015, "一万零一十五"),
+        (100000, "十万"),
+        (1000000, "一百万"),
+        (-15, "负十五"),
+    ],
+)
+def test_standard_mandarin_reading_golden(value, expected):
+    got = format_args_summary({"steps_per_m": value}, ["steps_per_m"])
+    assert got == f"每米步数{expected}"
+    res = run_cli({"args": {"steps_per_m": value}, "fields": ["steps_per_m"]})
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == got
+
+
+def test_every_integer_in_review_range_matches_typescript():
+    """0..200 全区间 + 万位边界：两份实现必须逐字节相同，不能靠手挑样例。"""
+    values = list(range(201)) + [10000, 10015, 100000, 1000000]
+    cases = [{"args": {"steps_per_m": value}, "fields": ["steps_per_m"]} for value in values]
+    python_outputs = [format_args_summary(case["args"], case["fields"]) for case in cases]
+    assert run_cli_batch(cases) == python_outputs
 
 
 def test_changing_one_digit_reading_changes_both_sides(tmp_path: Path):

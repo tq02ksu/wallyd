@@ -7,6 +7,7 @@ const argv = process.argv.slice(2);
 const rulesIndex = argv.indexOf('--rules');
 const rulesPath = rulesIndex >= 0 ? argv[rulesIndex + 1] : undefined;
 const mode = argv.includes('--validate') ? 'validate' : 'format';
+const batch = argv.includes('--batch');
 
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
@@ -20,10 +21,17 @@ try {
 
 try {
   const lex = loadLexicon(rulesPath);
-  const text = mode === 'validate'
-    ? validateArgsSummary(String(input.summary ?? ''), lex)
-    : formatArgsSummary(input.args ?? {}, input.fields ?? [], lex);
-  process.stdout.write(`${text}\n`);
+  if (batch) {
+    const results = (input.cases ?? []).map((item) =>
+      formatArgsSummary(item.args ?? {}, item.fields ?? [], lex),
+    );
+    process.stdout.write(`${JSON.stringify(results)}\n`);
+  } else {
+    const text = mode === 'validate'
+      ? validateArgsSummary(String(input.summary ?? ''), lex)
+      : formatArgsSummary(input.args ?? {}, input.fields ?? [], lex);
+    process.stdout.write(`${text}\n`);
+  }
 } catch (e) {
   console.error(e.message);
   process.exit(1);

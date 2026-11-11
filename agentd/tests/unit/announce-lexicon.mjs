@@ -63,6 +63,19 @@ console.log('— 数字 + 单位读法');
     formatArgsSummary({ angle_deg: -15 }, ['angle_deg']) === '角度负十五度',
     formatArgsSummary({ angle_deg: -15 }, ['angle_deg']),
   );
+  // 10–19 必须读「十/十五」；10015 的低位组要保留「一十」，不能变成「一万零十五」。
+  for (const [value, expected] of [
+    [10, '每米步数十'],
+    [11, '每米步数十一'],
+    [15, '每米步数十五'],
+    [19, '每米步数十九'],
+    [10015, '每米步数一万零一十五'],
+    [100000, '每米步数十万'],
+    [1000000, '每米步数一百万'],
+  ]) {
+    const got = formatArgsSummary({ steps_per_m: value }, ['steps_per_m']);
+    check(`整数 ${value} → ${expected}`, got === expected, got);
+  }
   check(
     '文本字段',
     formatArgsSummary({ target_track_id: 't7' }, ['target_track_id', 'target']) === '目标：t7',

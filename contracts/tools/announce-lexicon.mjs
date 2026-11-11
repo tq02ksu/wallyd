@@ -74,17 +74,19 @@ function intToChinese(n, lex) {
       }
       out += d[String(digit)] + units[i];
     }
-    // 标准读法是「十五」而不是「一十五」；只在没有更高位时省略。
-    return out.startsWith(`${d['1']}${lex.small_units['10']}`) ? out.slice(1) : out;
+    return out;
   };
   if (lex.large_units?.['10000'] && n >= 10000) {
     const high = Math.floor(n / 10000);
     const low = n % 10000;
     let out = `${intToChinese(high, lex)}${lex.large_units['10000']}`;
+    // 零之后的低位组保留「一十」：10015 读「一万零一十五」，不是「一万零十五」。
     if (low > 0) out += `${low < 1000 ? d['0'] : ''}${four(low)}`;
     return out;
   }
-  return four(n);
+  const out = four(n);
+  // 只有最高位组省略「一十」的前导「一」：10 → 十，10015 的低位组仍是「一十五」。
+  return out.startsWith(`${d['1']}${lex.small_units['10']}`) ? out.slice(1) : out;
 }
 
 function numberToChinese(value, lex) {

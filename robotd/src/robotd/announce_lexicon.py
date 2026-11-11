@@ -82,17 +82,20 @@ def _int_to_chinese(value: int, lexicon: Mapping[str, Any]) -> str:
                 out += digits["0"]
                 zero_pending = False
             out += digits[str(digit)] + units[index]
-        prefix = digits["1"] + lexicon["small_units"]["10"]
-        return out[len(prefix) :] if out.startswith(prefix) else out
+        return out
 
     large = lexicon.get("large_units") or {}
     if "10000" in large and value >= 10000:
         high, low = divmod(value, 10000)
         out = _int_to_chinese(high, lexicon) + large["10000"]
         if low > 0:
+            # 零之后的低位组保留「一十」：10015 读「一万零一十五」，不是「一万零十五」。
             out += (digits["0"] if low < 1000 else "") + four(low)
         return out
-    return four(value)
+    out = four(value)
+    # 只有最高位组省略「一十」的前导「一」：10 → 十，10015 的低位组仍是「一十五」。
+    prefix = digits["1"] + lexicon["small_units"]["10"]
+    return out[1:] if out.startswith(prefix) else out
 
 
 def _number_to_chinese(value: Any, lexicon: Mapping[str, Any]) -> str:
