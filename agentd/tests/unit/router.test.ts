@@ -408,6 +408,17 @@ console.log('— GH-12：上一轮是 robot_follow 时，「慢一点」命中 s
   check('上一轮交给模型 → none', prevHarness.kind === 'none', show(prevHarness));
   const prevStop = matchRoute('慢一点', { ...ctx, previous: { capability: 'robot_stop', args: {} } });
   check('上一轮不是跟随 → none', prevStop.kind === 'none', show(prevStop));
+  // 前置判断必须落在「上一轮能力」上，而不是「参数里恰好有目标」：去掉
+  // requiresPreviousCapability 后本例会错误命中 slow_down（拿非跟随轮的目标去调速）。
+  const prevOtherWithTarget = matchRoute('慢一点', {
+    ...ctx,
+    previous: { capability: 'move_forward', args: { target_track_id: 'abc' } },
+  });
+  check(
+    '上一轮不是跟随（即使参数里有目标）→ none',
+    prevOtherWithTarget.kind === 'none',
+    show(prevOtherWithTarget),
+  );
   const noTarget = matchRoute('慢一点', { ...ctx, previous: { capability: 'robot_follow', args: {} } });
   check('上一轮没有目标 → none（不拿空参数执行）', noTarget.kind === 'none', show(noTarget));
 
