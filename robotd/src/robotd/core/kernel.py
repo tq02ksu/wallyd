@@ -258,6 +258,14 @@ class EventKernel:
                     f"任务 {task_id} 已终结（{task.state.value}），不能恢复",
                     {"task_id": task_id, "state": task.state.value},
                 )
+            # 与 pause 对称：只有运动任务有暂停这件事，soft 任务的 resume 是调用错误，
+            # 不能靠「它本来就 running」返回 200 假装成功（契约写的是 409/E_STATE）。
+            if task.exclusivity is not Exclusivity.MOTION:
+                raise RobotdError(
+                    ErrorCode.STATE,
+                    f"任务 {task_id} 不是运动任务，不能恢复",
+                    {"task_id": task_id, "exclusivity": task.exclusivity.value},
+                )
             if task.state is TaskState.RUNNING:
                 return task
             if task.state is not TaskState.PAUSED:

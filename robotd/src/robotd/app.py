@@ -388,7 +388,7 @@ class App:
             self._arm_pause_timer(task_id)
         except Exception as exc:  # noqa: BLE001
             # 不变量：paused 一定有截止时间。定时器都排不上就不能留一个无限期暂停，
-            # 退回 running 并如实报内部故障，调用方可以再试。
+            # 按 failed 收尾并如实报内部故障，调用方可以再试。
             log.error("暂停定时器无法建立，任务按内部故障收尾：%s", task_id, exc_info=True)
             self.kernel.finish(
                 task_id,
@@ -409,7 +409,18 @@ class App:
         """``POST /v1/tasks/{id}/resume``：从 paused 回到 running。
 
         **不新建任务、不重发动作能力、不重签审批凭据**：任务 id 与参数都没变。
+
+        链路不通时拒绝恢复并**保持 paused**：恢复意味着「身体可以继续动」，
+        板侧联系不上就不能声称已经恢复。任务不因此变成无限期 running——
+        这次暂停的截止时间还在，到期会照常转 ``cancelled``。
         """
+        task = self.kernel.get_task(task_id)
+        if task.state is TaskState.PAUSED and not self.state.link_ready:
+            raise RobotdError(
+                ErrorCode.LINK,
+                "板侧链路不可用，任务保持 paused（到暂停上限会自动取消）",
+                {"task_id": task_id},
+            )
         resumed = self.kernel.resume_task(task_id)
         self.clear_pause_timer(task_id)
         return resumed.to_public()
@@ -462,8 +473,13 @@ class App:
             except Exception:  # noqa: BLE001
                 log.warning("暂停超时前下发停止失败 %s", task_id, exc_info=True)
         announced = self._announce_pause_expired()
+        # 事件与终态分开兜底：事件发不出去只是时间线缺一条记录，
+        # 任务留在 paused 才是真故障（那条暂停已经没有任何定时器兜着了）。
         try:
             self.kernel.emit("task.pause_expired", task_id=task_id, announced=announced)
+        except Exception:  # noqa: BLE001
+            log.warning("暂停超时事件未能发出 %s（仍按 cancelled 收尾）", task_id, exc_info=True)
+        try:
             self.kernel.finish(task_id, TaskState.CANCELLED, reason="pause_timeout")
         except Exception:  # noqa: BLE001
             log.warning("暂停超时收尾失败 %s", task_id, exc_info=True)

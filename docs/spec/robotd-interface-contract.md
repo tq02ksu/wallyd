@@ -155,7 +155,8 @@ accepted → running → completed | failed | cancelled
 `paused` 是中间态（GH-48）：速度归零、位置保持、任务不终结，也不是 mute。只对运动任务有效。
 `POST /v1/tasks/{task_id}/pause` 先下发板侧停止再转 `paused`；暂停有上限（默认 120s），
 到期转 `cancelled(reason=pause_timeout)` 并尽力播报。
-`POST /v1/tasks/{task_id}/resume` 从 `paused` 回到 `running`，**不新建任务、不重新签发审批凭据**。
+`POST /v1/tasks/{task_id}/resume` 从 `paused` 回到 `running`，**不新建任务、不重新签发审批凭据**；
+板侧链路不可用时返回 `503/E_LINK` 并保持 `paused`（暂停上限照旧生效，到期转 `cancelled`）。
 任务仅保证在 robotd 当前进程生命周期内可查询；进程重启后，调用方必须重新读取状态，不能假设任务持久化。
 
 `DELETE /v1/tasks/{task_id}` 取消指定任务；运动任务被取消后还必须确认执行 stop 路径。

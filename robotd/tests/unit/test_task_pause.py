@@ -200,6 +200,16 @@ def test_soft_task_cannot_pause():
     assert err.value.code is ErrorCode.STATE
 
 
+def test_soft_task_cannot_resume_either():
+    """契约写的是 409/E_STATE：不能因为 soft 任务本来就 running 就返回 200。"""
+    kernel = make_kernel()
+    task = kernel.new_task("speech.listen", Exclusivity.SOFT)
+    kernel.mark_running(task.task_id)
+    with pytest.raises(RobotdError) as err:
+        kernel.resume_task(task.task_id)
+    assert err.value.code is ErrorCode.STATE
+
+
 def test_accepted_task_cannot_pause():
     kernel = make_kernel()
     task = kernel.new_task("robot.follow", Exclusivity.MOTION)
@@ -376,6 +386,50 @@ def test_pause_expiry_after_resume_is_a_noop():
 
     assert app.kernel.get_task(task_id).state is TaskState.RUNNING
     assert audio.spoken == []
+    app.shutdown()
+
+
+def test_pause_expiry_still_cancels_when_the_event_cannot_be_emitted(monkeypatch):
+    """事件写不进去只是时间线缺一条，任务不能因此留在没有定时器的 paused。"""
+    scheduler = FakeScheduler()
+    audio = FakeAudio()
+    app = make_app(audio=audio, scheduler=scheduler)
+    task_id = make_motion_task(app.kernel)
+    app.pause_task(task_id)
+
+    real_emit = app.kernel.emit
+
+    def flaky_emit(type_: str, **payload: Any):
+        if type_ == "task.pause_expired":
+            raise RuntimeError("event log unavailable")
+        return real_emit(type_, **payload)
+
+    monkeypatch.setattr(app.kernel, "emit", flaky_emit)
+
+    scheduler.fire_all()
+
+    assert app.kernel.get_task(task_id).state is TaskState.CANCELLED
+    assert app.kernel.get_task(task_id).reason == "pause_timeout"
+    app.shutdown()
+
+
+def test_resume_with_unready_link_keeps_task_paused_and_bounded():
+    """链路不通时不能声称「已恢复」：任务保持 paused，截止时间照旧生效。"""
+    scheduler = FakeScheduler()
+    app = make_app(scheduler=scheduler)
+    task_id = make_motion_task(app.kernel)
+    app.pause_task(task_id)
+    app.state._apply_link(DeviceStatus.LOST)
+
+    with pytest.raises(RobotdError) as err:
+        app.resume_task(task_id)
+
+    assert err.value.code is ErrorCode.LINK
+    assert app.kernel.get_task(task_id).state is TaskState.PAUSED
+    # 暂停上限没被误撤销：到期仍会收尾。
+    assert app._pause_timers.get(task_id) is not None
+    scheduler.fire_all()
+    assert app.kernel.get_task(task_id).state is TaskState.CANCELLED
     app.shutdown()
 
 

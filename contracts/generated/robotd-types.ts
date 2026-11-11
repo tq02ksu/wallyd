@@ -334,6 +334,9 @@ export interface paths {
          *       恢复仅改变任务状态，不宣称已经产生真实速度曲线（R15/R17 未完成）。
          *     - 已 `running` 时幂等返回；终态任务返回 `409/E_STATE`，不复活。
          *     - 只对运动任务有效；`soft` 任务返回 `409/E_STATE`。
+         *     - 板侧链路不可用时返回 `503/E_LINK` 且**保持 `paused`**：恢复意味着「身体可以继续动」，
+         *       联系不上板侧就不能声称已恢复。任务不会因此变成无限期 running——暂停截止时间照旧，
+         *       到期仍会转 `cancelled`（`reason: pause_timeout`）。
          *     - **不需要审批**：没有改变任何被用户确认并绑定过的参数（见 approval-digest 的
          *       `risk_policy`：降低风险的变更不触发重签，提高风险的才触发）。
          */
@@ -1486,6 +1489,15 @@ export interface operations {
             };
             /** @description 任务不在 paused（或已终结），不允许恢复 */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 板侧链路不可用；任务保持 paused，由暂停上限负责收尾 */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

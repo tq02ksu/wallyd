@@ -264,7 +264,9 @@ def test_pause_resume_are_resource_subpaths_without_approval(spec):
     verb_paths = [
         path
         for path in spec["paths"]
-        if path.endswith(("/pause", "/resume")) and path != "/v1/tasks/{task_id}/pause" and path != "/v1/tasks/{task_id}/resume"
+        if path.endswith(("/pause", "/resume"))
+        and path != "/v1/tasks/{task_id}/pause"
+        and path != "/v1/tasks/{task_id}/resume"
     ]
     assert not verb_paths, f"不允许并行的暂停/恢复动词路由：{verb_paths}"
 
