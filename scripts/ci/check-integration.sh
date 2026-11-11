@@ -6,6 +6,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+# Pure-logic voice baseline tests: they spawn short-lived stand-in commands, so
+# they need neither macOS nor hardware. They cover the streaming collector
+# (timeout/crash keep events, on-disk ndjson, live line delivery, truncated
+# tail) and the frozen timing basis. Run them before the simulator so a broken
+# collector fails fast instead of after a full robotd/agentd round trip.
+printf '[integration] voice baseline streaming unit tests\n'
+python3 -m unittest discover -s eval/voice/tests
+
 PORT="${ROBOTD_TEST_PORT:-8799}"
 export ROBOTD_URL="http://127.0.0.1:${PORT}"
 LOG_DIR="$ROOT/work/ci"

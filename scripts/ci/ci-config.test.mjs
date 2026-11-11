@@ -385,7 +385,12 @@ const laneCommands = {
   ],
   robotd: ['ruff format', 'ruff check', 'python -m pytest'],
   agentd: ['npm --prefix agentd test'],
-  integration: ['--sim', '/v1/health', 'npm --prefix agentd run test:live'],
+  integration: [
+    'python3 -m unittest discover -s eval/voice/tests',
+    '--sim',
+    '/v1/health',
+    'npm --prefix agentd run test:live',
+  ],
   apple: ['swiftc -parse', 'swift test', 'eval/aec3/build_aec3.sh'],
 };
 const strictMode = /^set -euo pipefail$/m;
