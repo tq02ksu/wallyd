@@ -49,7 +49,42 @@ sh eval/voice/run_baseline.sh --out eval/voice/runs/run2.json
 所以这两项的基准点取事件自带的音频轴：`speech_state.audio_ms`、`partial.audio_end_ms`、
 `endpoint.silence_ms`。只有「端点之后 finalize 的尾巴」和真机麦克风模式才用墙钟。
 
-## 2. 已知限制（都写进 JSON，不藏）
+## 2. 采集层：逐行流式读 + 同时落盘（GH-45）
+
+采集器（`run_stream_file` / `run_tts_playback` / `run_stream_mic`）统一走 `run_streaming()`：
+`subprocess.Popen(..., bufsize=0)` 起进程拿裸管道，再用
+`io.TextIOWrapper(..., encoding="utf-8", errors="replace", newline="")` 自己包一层读侧。
+读侧用 `readline()` 逐行取，裸管道上每次只做一次 `read(2)`，有多少读多少，
+不会攒满 8 KiB 或等到 EOF 才把行交出来：
+每读到一行就 ① 解析成事件 ② 原样追加写盘 ③ 交给回调（`on_event` 因此在子进程还在跑时就能拿到行）。
+stderr 同样逐行写 `*.stderr.log`（`--trace` 心跳靠它）。`speak-stream` 的 `text\nend\n`
+喂法由 `stdin_lines` 参数负责。
+
+每次运行一个目录 `eval/voice/runs/<UTC 时间戳>/`（gitignore），里面是
+`<fixture>.<clip>.run<N>.ndjson`（逐行原样落盘的事件）+ 同名 `*.stderr.log`。
+要固定目录（例如把两次运行并排比较）用 `--runs-dir <dir>`；默认按 UTC 时间戳新建。
+报告 JSON 的 `runs_dir` 指向这个目录，`fixtures[].clips` / `runs[]` 与 `failed_runs[]`
+里带着每条运行的 `events_path`。以前只有聚合结果，现在能拿着报告回去看「哪条事件的哪一段变慢了」。
+
+**超时/崩溃不再丢事件。** 到时间先 `terminate()`（5s 内不退再 `kill()`），然后照常返回
+已经读到的事件：`error.code = "E_TIMEOUT"`，`events` 保留。非零退出同理，
+`error.code = "E_EXIT_<code>"`。`ok` 仍然是 `error is None and bool(events)` ——
+有 error 就是 `False`，半截数据不会被当成完整样本；这些运行会记进报告的 `failed_runs`，
+能看到「跑到第几个事件才停」以及原始文件路径。
+
+**读线程卡住也会说出来，而不是悄悄少一截。** 如果子进程把 stdout 写端交给了孙进程，
+EOF 永远不来，`proc.wait()` 能返回但读线程还活着。`run_streaming()` 在
+`terminate_grace` 后检查 `is_alive()`：活着就给结果加 `truncated` / `dropped_tail`、
+`error.code = "E_TAIL_LOST"`，并在落盘 `.ndjson` 尾部追加一行
+`{"truncated": true, "reason": "reader_alive_after_join"}`（**只进文件，不进 `events`**，
+逐字段比较不受影响）。这条样本会被标成不完整，而不是 `ok: true`。
+
+流式读**只改变「什么时候拿到事件」**，不改变「事件里自带的时间戳」：首字仍用
+`partial.audio_end_ms − speech_state.audio_ms`，final 仍用 `endpoint.silence_ms` + finalize 尾巴，
+TTS 首包仍用进程内 `ts_mono_ns` 差。落盘的 `.ndjson` 是桥输出的原样行，
+`ts_mono_ns` / `audio_ms` / `audio_end_ms` 与改前逐字段一致。
+
+## 3. 已知限制（都写进 JSON，不藏）
 
 - **`--file` 仍要求麦克风授权。** `scripts/mac_speech.swift` 的 `stream` 在解析 `--file` 之前就检查
   `micAuth()`，所以「没授权」时离线车道同样起不来。脚本会如实标
@@ -67,7 +102,7 @@ sh eval/voice/run_baseline.sh --out eval/voice/runs/run2.json
   判「采集还在走」，并检查 feed 序号单调；这是存活/节奏代理，不是逐帧序号。长采集会把
   `--idle-timeout` 拉到运行时长以上，否则安静房间会在 20s 空闲超时处提前收尾。
 
-## 3. 基线与回归判据
+## 4. 基线与回归判据
 
 - `eval/voice/baseline.json` 入库；首次由真机跑出来，用 `--seed-baseline` 写入。**播种后的基线与
   运行报告同构**（同一份 JSON，`seeded: true`），逐字段可比；SKIP 的指标保留但 `p95` 为 `null`，
@@ -82,7 +117,7 @@ sh eval/voice/run_baseline.sh --out eval/voice/runs/run2.json
 - `capture_continuity` 的 2s 是**本仓库代理阈值**，§11 没有给数字；报告里
   `threshold_source` 会写明，别把它当官方门槛。
 
-## 4. 怎么新增一个夹具（不改脚本）
+## 5. 怎么新增一个夹具（不改脚本）
 
 新增场景 = **加一个 JSON**。放哪里：`eval/voice/fixtures/` 下任意层级（子目录按场景分组）。脚本递归发现
 `*.json`，字段校验失败会列出全部问题并以退出码 2 结束（fail closed，不猜）。
@@ -130,26 +165,26 @@ sh eval/voice/run_baseline.sh --out eval/voice/runs/run2.json
 
 `source=pending-hardware` 的夹具还要求 `expected.utterances = 0`、不许带 `generate`。
 
-## 5. C 类（机器人播放 + 用户插话）为什么只有目录
+## 6. C 类（机器人播放 + 用户插话）为什么只有目录
 
 它需要真扬声器输出、真实房间回声、真实人声插入，合成不出来。所以
 `fixtures/c_barge_in/` 里只有 `barge_in.json`（`source: pending-hardware`），
 **没有音频**。打断响应/自听误触发率两项在真机 harness（#41 AEC harness）落地前一律
 `SKIP: needs-hardware`——这是 #41 的验收对象，不是本链路能测的。
 
-## 6. 文件清单
+## 7. 文件清单
 
 | 文件 | 作用 |
 | --- | --- |
 | `run_baseline.sh` | 薄壳；`sh` 兼容，可在任意目录调用 |
-| `voice_baseline.py` | 全部逻辑：夹具校验/生成、驱动桥、解析 NDJSON、p50/p95、判定、摘要（仅标准库） |
+| `voice_baseline.py` | 全部逻辑：夹具校验/生成、驱动桥（`run_streaming` 逐行读）、解析 NDJSON、p50/p95、判定、摘要（仅标准库） |
 | `baseline.json` | 入库基线（未播种时 `seeded: false`，只判绝对值） |
 | `fixtures/*.json` | 夹具标注（唯一需要提交的夹具文件） |
 | `tests/test_voice_baseline.py` | 纯逻辑单测（`python3 -m unittest discover -s eval/voice/tests`） |
 | `tests/data/*.ndjson` | 回放用事件样本（单测/演示，不是硬件证据） |
-| `runs/` | 每次运行的 JSON（gitignore） |
+| `runs/` | 每次运行的报告 JSON + `runs/<UTC 时间戳>/` 下的原始事件 `*.ndjson` / `*.stderr.log`（gitignore） |
 
-## 7. 贴证据的最低要求（PR）
+## 8. 贴证据的最低要求（PR）
 
 1. 同一台机、同一次会话连跑两次的**完整 JSON**（不是摘要）；
 2. 一次「故意注入退步」的 FAIL 输出（例如把某次采样翻倍）；

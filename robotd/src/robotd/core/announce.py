@@ -25,6 +25,10 @@ _MOUTH_SLOT = {"target_track_id": "目标（track）"}
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
+#: 暂停超时的系统提示。**固定文本，不接受调用方输入**：它不是 ``robot_speak`` 的
+#: 免审批版本，只是 robotd 对自己状态的如实说明。
+PAUSE_EXPIRED_TEXT = "等太久了，我先停下了。"
+
 
 def _one_line(value: str, *, field: str, max_len: int) -> str:
     text = (value or "").strip()

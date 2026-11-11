@@ -160,6 +160,31 @@ try {
   check('run.finished 用 outcome_label 表达结果', finished.title.includes('{outcome_label}'));
   check('run.finished 必填 outcome 字段', finished.required_fields.includes('outcome'));
 
+  // GH-57：停止原因必须是结构化必填枚举，判据不得退化成中文 detail。
+  const stopReq = tpl.get('safety.stop_requested');
+  check('safety.stop_requested 已登记', Boolean(stopReq));
+  check('safety.stop_requested 必填 cause', stopReq?.required_fields.includes('cause') === true);
+  const aEventsSource = JSON.parse(
+    fs.readFileSync(path.resolve(HERE, '..', '..', 'contracts', 'events.json'), 'utf8'),
+  );
+  const stopSource = aEventsSource.events.find((e) => e.type === 'safety.stop_requested');
+  const requiredCauses = [
+    'user_voice',
+    'user_stop_api',
+    'obstacle',
+    'watchdog_timeout',
+    'param_out_of_range',
+    'observation_stale',
+    'device_lost',
+    'bridge_exit',
+    'internal_error',
+  ];
+  check(
+    'cause 枚举覆盖九种停止来源',
+    requiredCauses.every((c) => stopSource?.payload?.cause?.enum?.includes(c)),
+    JSON.stringify(stopSource?.payload?.cause?.enum),
+  );
+
   // GH-49：澄清事件必须带 question（与 run.waiting_input.question 同名），
   // 不能只留一个 reason 让用户猜「它到底问了什么」。
   const clarify = tpl.get('route.clarify');

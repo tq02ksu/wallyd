@@ -182,6 +182,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "board_watchdog_ms": config.board_watchdog_ms,
                         "barge_in_erle_margin_db": config.barge_in_erle_margin_db,
                         "barge_in_erle_floor_db": config.barge_in_erle_floor_db,
+                        # GH-48：暂停上限是安全参数，运维应能直接确认生效值。
+                        "pause_max_seconds": config.pause_max_seconds,
                     },
                     "work_dir": str(resolve_work_dir(config)),
                     "note": "check-config 不打开串口、不启动子进程、不监听端口",

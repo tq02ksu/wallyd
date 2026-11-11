@@ -119,6 +119,25 @@ def default_capabilities() -> list[Capability]:
             summary="取消任务：运动任务取消联动 stop（板侧下发强度取决于板侧适配）",
         ),
         Capability(
+            name="task.pause",
+            public_name="task_pause",
+            group="tasks",
+            implementation=Implementation.IMPLEMENTED,
+            summary=(
+                "暂停运动任务：速度归零、位置保持、任务不终结；超过上限自动取消并播报"
+                "（板侧 stop 下发强度取决于板侧适配）"
+            ),
+            requires_approval=False,
+        ),
+        Capability(
+            name="task.resume",
+            public_name="task_resume",
+            group="tasks",
+            implementation=Implementation.IMPLEMENTED,
+            summary="从 paused 恢复原任务；不新建任务、不重新签发审批凭据",
+            requires_approval=False,
+        ),
+        Capability(
             name="robot.calibration.get",
             public_name="robot_calibration_get",
             group="odometry",

@@ -16,10 +16,13 @@ import pytest
 
 from robotd.api.http import build_routes
 from robotd.capabilities import Implementation, Registry
+from robotd.core.announce import SUPPORTED_KINDS
 from robotd.core.errors import ErrorCode, RobotdError, http_status_for
+from robotd.core.safety import STOP_CAUSES
 from robotd.core.types import TaskState
 
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts"
+AGENTD_CONTRACTS = CONTRACTS.parent / "agentd" / "contracts"
 
 
 def load(name: str) -> dict:
@@ -86,9 +89,10 @@ def test_mcp_tool_face_matches_contract_tools(tools):
     assert "debug_serial" not in names
     assert "events_subscribe" not in names
     assert "robot_announce" not in names
-    # GH-6 新增 speech_abort：工具面从 14 增到 15。数量是契约的一部分，
-    # 增删端点必须同时改这里，否则「契约悄悄多了一条路」不会被发现。
-    assert len(tools) == 15, f"MCP 工具面必须保持 15 项，实际 {len(tools)}"
+    # GH-6 新增 speech_abort：14 → 15；GH-48 新增 task_pause/task_resume：15 → 17。
+    # 数量是契约的一部分，增删端点必须同时改这里，
+    # 否则「契约悄悄多了一条路」不会被发现。
+    assert len(tools) == 17, f"MCP 工具面必须保持 17 项，实际 {len(tools)}"
 
 
 def test_robot_announce_is_contract_declared_system_path(spec, tools):
@@ -117,6 +121,11 @@ def test_robot_announce_is_contract_declared_system_path(spec, tools):
         assert len(kinds) == 1
         by_kind[kinds[0]] = variant
     assert set(by_kind) == {"approval_repeat", "clarification"}
+    # GH-49 review：多条并行改动会各自往 kind 里加值，若没有断言锁住这个集合，
+    # 实现与契约就会悄悄漂移。要求两者**精确相等**，新增 kind 时两边一起改。
+    assert set(by_kind) == set(SUPPORTED_KINDS), (
+        f"robot_announce kind 枚举漂移：契约 {sorted(by_kind)} != 实现 {sorted(SUPPORTED_KINDS)}"
+    )
     assert {"approval_id", "action_label", "args_summary"} <= set(by_kind["approval_repeat"]["required"])
     assert "approval_id" not in by_kind["clarification"]["required"]
     assert "reason" in by_kind["clarification"]["required"]
@@ -127,6 +136,30 @@ def test_no_hardware_primitives_in_public_tools(tools):
     for tool in tools:
         for word in banned:
             assert word not in tool["name"], f"公开工具 {tool['name']} 含硬件原语 {word}"
+
+
+def test_safety_stop_requested_cause_contract_matches_implementation(events):
+    """新字段必须是契约必填枚举，且与 robotd/agentd 两侧同一组取值。"""
+    source = json.loads((CONTRACTS / "events.json").read_text(encoding="utf-8"))
+    ev = next(e for e in source["events"] if e["type"] == "safety.stop_requested")
+    cause = ev["payload"]["cause"]
+    assert cause["required"] is True
+    assert set(cause["enum"]) == set(STOP_CAUSES)
+
+    generated = next(e for e in events["events"] if e["type"] == "safety.stop_requested")
+    assert "cause" in generated["required_fields"]
+
+    agentd = json.loads((AGENTD_CONTRACTS / "events.json").read_text(encoding="utf-8"))
+    semantic = next(e for e in agentd["events"] if e["type"] == "safety.stop_requested")
+    assert semantic["payload"]["cause"]["required"] is True
+    assert set(semantic["payload"]["cause"]["enum"]) == set(STOP_CAUSES)
+
+
+def test_slowdown_contract_is_change_only():
+    source = json.loads((CONTRACTS / "events.json").read_text(encoding="utf-8"))
+    ev = next(e for e in source["events"] if e["type"] == "safety.slowdown")
+    assert ev.get("no_state") is True
+    assert "仅在减速状态变化时发送" in ev["notes"]
 
 
 def _approval_params(operation: dict) -> list[str] | None:
@@ -257,6 +290,29 @@ def test_approval_flags_in_contract_are_reflected_in_routes(spec):
     assert announce.method == "POST"
     assert announce.template == "/v1/robot/announce"
     assert announce.requires_approval is False
+
+
+def test_pause_resume_are_resource_subpaths_without_approval(spec):
+    """GH-48：暂停/恢复只有一种能力面形态，且不要求审批。
+
+    反向判据的保护：如果实现改回「发 stop 再重发 follow」，就必须新增审批与动作调用；
+    这里锁死 resume 不带 ``x-requires-approval``，并禁止并行的全局动词路由。
+    """
+    pause = spec["paths"]["/v1/tasks/{task_id}/pause"]["post"]
+    resume = spec["paths"]["/v1/tasks/{task_id}/resume"]["post"]
+    assert pause["operationId"] == "task_pause"
+    assert resume["operationId"] == "task_resume"
+    assert _approval_params(pause) is None
+    assert _approval_params(resume) is None
+    assert "paused" in spec["components"]["schemas"]["TaskState"]["enum"]
+    verb_paths = [
+        path
+        for path in spec["paths"]
+        if path.endswith(("/pause", "/resume"))
+        and path != "/v1/tasks/{task_id}/pause"
+        and path != "/v1/tasks/{task_id}/resume"
+    ]
+    assert not verb_paths, f"不允许并行的暂停/恢复动词路由：{verb_paths}"
 
 
 def test_task_state_enum_matches_implementation(spec):

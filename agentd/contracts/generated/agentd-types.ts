@@ -679,6 +679,8 @@ export interface components {
             body_stop: {
                 /** @enum {string} */
                 state: "requested" | "confirmed" | "unknown" | "not_applicable";
+                /** @enum {string} */
+                cause?: "user_voice" | "user_stop_api" | "obstacle" | "watchdog_timeout" | "param_out_of_range" | "observation_stale" | "device_lost" | "bridge_exit" | "internal_error";
                 detail?: string;
                 board_ack?: boolean | null;
             };

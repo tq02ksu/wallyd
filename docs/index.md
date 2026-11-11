@@ -40,6 +40,7 @@
 - [GH-9 常听会话状态机](design/GH-9.md) - AudioRuntime 的 idle/listening/thinking/speaking、runtime 驱动的自动续听、`inter_utterance_ms` 防抖与只拦非打断自动轮的 `speaking` 闸
 - [GH-13 run 结论播报](design/GH-13.md) - run 终态经 `robot_speak` 播报；一次性凭据、run_id 幂等、barge-in 只标 `narration: interrupted` 不改 run 状态
 - [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
+- [GH-57 结构化停止原因](design/GH-57.md) - `safety.stop_requested.cause` 必填枚举、`unknown/device_lost` 与 `confirmed/watchdog_timeout` 语义、agentd `blocking_reason` 归属与播报
 - [模型选型](model-selection.md) - LLM / TTS / ASR 选型（苹果生态优先，2026-09-17 口径）
 - [产品定位与套件化约束](product-positioning.md) - 平台而非成品、套件化销售的口述决策
 - [可行性评估与技术风险清单](risk-assessment.md) - R1–R7 风险项与验证顺序
@@ -97,6 +98,7 @@
 - [GH-18 审批拒绝侧设计](design/GH-18.md) - `X-Wally-Approval` 一次性凭据、共享秘密与已消费 nonce 账本
 - [GH-19：审批复述的系统播报路径](design/GH-19.md) - `robot_announce` 的契约、事件与确认窗口时序
 - [GH-11 语音确认通道设计](design/GH-11.md) - `waiting_confirmation` 的语音 settle、窗口/回声规则与凭据签发
+- [GH-48 任务暂停/恢复](design/GH-48.md) - `POST /v1/tasks/{id}/pause|resume`、`TaskState.paused`、暂停上限与安全优先级；resume 不重签审批
 - [GH-36 macOS CI 门禁分档](design/macos-ci.md) - `apple` lane 的编译/纯逻辑测试/AEC3 fail-closed 口径，以及哪些真机判据永远留给人
 - [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
 
