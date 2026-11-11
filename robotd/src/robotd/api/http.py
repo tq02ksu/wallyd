@@ -32,6 +32,7 @@ from xml.sax.saxutils import escape as _xml_escape  # noqa: F401 - 保留给将�
 from ..approval import CREDENTIAL_HEADER, enforce_approval
 from ..app import App, resolve_work_dir
 from ..core.announce import (
+    APPROVAL_UNHEARD,
     APPROVAL_REPEAT,
     CLARIFICATION,
     CLARIFICATION_REASONS,
@@ -407,7 +408,7 @@ def _h_announce(ctx: RouteContext) -> dict[str, Any]:
     _reject_unknown(body, _ANNOUNCE_FIELDS)
     kind = _require_str(body, "kind", max_len=40)
     approval_id: str | None = None
-    if kind == APPROVAL_REPEAT:
+    if kind in (APPROVAL_REPEAT, APPROVAL_UNHEARD):
         # 审批复述专属字段：混入澄清字段说明调用方搞错了形状，不能猜。
         extra = {"reason", "missing", "candidates", "more"} & set(body)
         if extra:
@@ -419,7 +420,7 @@ def _h_announce(ctx: RouteContext) -> dict[str, Any]:
         if not _APPROVAL_ID.match(approval_id):
             raise RobotdError(ErrorCode.VALIDATION, "approval_id 含非法字符")
         action_label = _require_str(body, "action_label", max_len=80)
-        args_summary = _require_str(body, "args_summary", max_len=200)
+        args_summary = _require_str(body, "args_summary", max_len=60)
         try:
             text = render_announcement(kind=kind, action_label=action_label, args_summary=args_summary)
         except ValueError as exc:

@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const MIGRATIONS: string[][] = [
   [
@@ -177,6 +177,10 @@ const MIGRATIONS: string[][] = [
   // - 放在 sessions 而不是 runs，因为「复用」的粒度是会话，不是单次任务；
   // - 可空：既有会话尚未跑过 Harness，或 Harness 未配置。
   ['ALTER TABLE sessions ADD COLUMN thread_id TEXT'],
+  // v4（GH-53）：确认窗口内「再说一遍」的次数。
+  // 落库而不是只放内存：进程重启后不能把用户已经用掉的复述次数清零，
+  // 否则「最多 3 次」就变成了「每次重启再送 3 次」。
+  ['ALTER TABLE approvals ADD COLUMN repeat_count INTEGER NOT NULL DEFAULT 0'],
 ];
 
 export class StoreUnavailable extends Error {

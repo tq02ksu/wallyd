@@ -12,9 +12,11 @@
  */
 import type { RunService } from './runs.ts';
 import type { RobotdClient } from './robotd-client.ts';
+import { LexiconError, validateArgsSummary } from '../../../contracts/tools/announce-lexicon.mjs';
 
 /** 只接受审批复述：别的 kind 即使带 approval_id 也不许开确认窗口。 */
 const APPROVAL_REPEAT = 'approval_repeat';
+const APPROVAL_UNHEARD = 'approval_unheard';
 
 export interface AnnouncementOutcome {
   approval_id: string;
@@ -69,6 +71,16 @@ export class ApprovalAnnouncer {
       });
       return { ok: false, error: `审批状态为 ${approval.status}，不能再播报` };
     }
+    // 先过词表再发包：含糊/超长摘要不能靠 robotd 的 400 才发现，
+    // 更不能在重试或旧数据路径上被别的 TTS 念出去。
+    const invalid = this.validateSummary(approval.args_summary);
+    if (invalid) {
+      this.runs.abortApproval(approvalId, invalid, {
+        byStop: false,
+        kind: 'invalid_args_summary',
+      });
+      return { ok: false, error: invalid };
+    }
     try {
       const accepted = await this.robotd.announce({
         approval_id: approvalId,
@@ -89,6 +101,77 @@ export class ApprovalAnnouncer {
         kind: 'no_audio',
       });
       return { ok: false, error: message };
+    }
+  }
+
+  /**
+   * 确认窗口内重播同一条复述。
+   *
+   * 与 `announce()` 的区别：审批已经从 `persisted/announced` 进入 `waiting`，
+   * 这里**只允许 waiting**，且不打开新窗口、不改 `window_opens_at/closes_at`。
+   */
+  async reannounce(
+    approvalId: string,
+  ): Promise<{ ok: boolean; task_id?: string; text?: string; error?: string }> {
+    const approval = this.runs.getApproval(approvalId);
+    if (!approval) return { ok: false, error: `审批不存在：${approvalId}` };
+    if (approval.status !== 'waiting') {
+      return { ok: false, error: `审批状态为 ${approval.status}，不能重播` };
+    }
+    const invalid = this.validateSummary(approval.args_summary);
+    if (invalid) return { ok: false, error: invalid };
+    try {
+      const accepted = await this.robotd.announce({
+        approval_id: approvalId,
+        kind: APPROVAL_REPEAT,
+        action_label: approval.action_label,
+        args_summary: approval.args_summary,
+      });
+      this.runs.markApprovalAnnounced(approvalId, accepted.text);
+      this.noteSpeak?.(accepted.task_id, accepted.text);
+      return { ok: true, task_id: accepted.task_id, text: accepted.text };
+    } catch (e: any) {
+      const message = e?.message ? String(e.message) : String(e);
+      this.log('审批复述重播失败', { approval_id: approvalId, error: message });
+      // 重播失败说明用户没听见第二次复述；不能让窗口继续假装有效。
+      this.runs.abortApproval(approvalId, `复述重播失败：${message}`, {
+        byStop: false,
+        kind: 'repeat_failed',
+      });
+      return { ok: false, error: message };
+    }
+  }
+
+  /** 复述次数用尽：播报固定的「我没有听清，这次没有执行」。 */
+  async announceUnheard(
+    approvalId: string,
+  ): Promise<{ ok: boolean; task_id?: string; text?: string; error?: string }> {
+    const approval = this.runs.getApproval(approvalId);
+    if (!approval) return { ok: false, error: `审批不存在：${approvalId}` };
+    const invalid = this.validateSummary(approval.args_summary);
+    if (invalid) return { ok: false, error: invalid };
+    try {
+      const accepted = await this.robotd.announce({
+        approval_id: approvalId,
+        kind: APPROVAL_UNHEARD,
+        action_label: approval.action_label,
+        args_summary: approval.args_summary,
+      });
+      this.noteSpeak?.(accepted.task_id, accepted.text);
+      return { ok: true, task_id: accepted.task_id, text: accepted.text };
+    } catch (e: any) {
+      const message = e?.message ? String(e.message) : String(e);
+      this.log('没听清收尾播报失败', { approval_id: approvalId, error: message });
+      return { ok: false, error: message };
+    }
+  }
+
+  private validateSummary(summary: string): string | null {
+    try {
+      validateArgsSummary(summary);
+      return null;
+    } catch (e) {
+      return e instanceof LexiconError ? `参数摘要未通过词表校验：${e.message}` : String(e);
     }
   }
 

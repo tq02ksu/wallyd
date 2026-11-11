@@ -8,6 +8,7 @@ import { Store, nowIso } from '../../src/agentd/store.ts';
 import { EventLog, loadRegistry } from '../../src/agentd/events.ts';
 import { RunService, isTerminal } from '../../src/agentd/runs.ts';
 import { ApiError, toApiError } from '../../src/agentd/http.ts';
+import { classifyApprovalUtterance } from '../../src/agentd/approval-intent.ts';
 
 // 运行产物统一落到 work/（见 .gitignore），测试代码本身留在 tests/ 里受版本控制。
 const root = new URL('../../../work/agentd-test/runtime', import.meta.url).pathname;
@@ -272,6 +273,123 @@ check('succeeded 触发播报回调', terminalHits.length === 1 && terminalHits[
 const r12 = svc2.submitRun({ prompt: '取消不回调', route: 'fast' });
 svc2.cancelRun(r12.run_id, 'stop');
 check('cancelled 不触发播报回调', terminalHits.length === 1, JSON.stringify(terminalHits));
+
+console.log('— GH-53：再说一遍不消耗确认窗口，超过 3 次按未执行收尾');
+{
+  check('「再说一遍」是 repeat 意图', classifyApprovalUtterance('再说一遍').intent === 'repeat');
+  check('「没听清」是 repeat 意图', classifyApprovalUtterance('没听清').intent === 'repeat');
+  check('「什么」不再被吞成 none', classifyApprovalUtterance('什么').intent === 'repeat');
+  check('「确认不用」仍按 deny（否定优先）', classifyApprovalUtterance('确认不用').intent === 'deny');
+
+  const repeatHooks = [];
+  const unheardHooks = [];
+  const svc3 = new RunService({
+    store,
+    events,
+    log,
+    onApprovalRepeat: (approvalId, count) => repeatHooks.push({ approvalId, count }),
+    onApprovalUnheard: (approvalId) => unheardHooks.push(approvalId),
+  });
+  const r13 = svc3.submitRun({ prompt: '往前走', route: 'fast' });
+  const ap3 = svc3.createApproval({
+    runId: r13.run_id,
+    capability: 'robot_follow',
+    actionLabel: '向前跟随',
+    argsSummary: '最远距离二米',
+  });
+  svc3.markApprovalAnnounced(ap3.approval_id, '请确认：向前跟随。参数：最远距离二米。请说确认。');
+  svc3.openConfirmationWindow(ap3.approval_id, 30_000);
+  const opened = svc3.getApproval(ap3.approval_id);
+  const openedAt = opened.window_opens_at;
+  const closesAt = opened.window_closes_at;
+  const startedAt = new Date(Date.parse(openedAt) + 1000).toISOString();
+  const resolvedBefore = store.one(
+    'SELECT COUNT(*) AS n FROM events WHERE type = ? AND approval_id = ?',
+    'approval.resolved',
+    ap3.approval_id,
+  ).n;
+
+  const first = svc3.settleApproval({
+    approvalId: ap3.approval_id,
+    text: '再说一遍',
+    utteranceId: 'utt-repeat-1',
+    startedAt,
+  });
+  check('第一次 repeat 不改审批状态', first.outcome === 'repeat' && first.reason === 'repeat');
+  const afterFirst = svc3.getApproval(ap3.approval_id);
+  check('审批仍 waiting', afterFirst.status === 'waiting');
+  check('window_opened_at 不变', afterFirst.window_opens_at === openedAt);
+  check('window_closes_at 不变（过期仍按原 expires_at）', afterFirst.window_closes_at === closesAt);
+  check('repeat_count = 1', afterFirst.repeat_count === 1, afterFirst.repeat_count);
+  check(
+    '没有新增 approval.resolved',
+    store.one('SELECT COUNT(*) AS n FROM events WHERE type = ? AND approval_id = ?', 'approval.resolved', ap3.approval_id).n === resolvedBefore,
+  );
+  check('写 approval.repeat_requested', store.one("SELECT COUNT(*) AS n FROM events WHERE type = 'approval.repeat_requested' AND approval_id = ?", ap3.approval_id).n === 1);
+  check('装配层收到重播回调', repeatHooks.length === 1 && repeatHooks[0].count === 1, JSON.stringify(repeatHooks));
+
+  for (const [i, text] of ['没听清', '什么'].entries()) {
+    const res = svc3.settleApproval({
+      approvalId: ap3.approval_id,
+      text,
+      utteranceId: `utt-repeat-${i + 2}`,
+      startedAt,
+    });
+    check(`第 ${i + 2} 次 repeat 成功`, res.outcome === 'repeat', JSON.stringify(res));
+  }
+  check('repeat_count = 3', svc3.getApproval(ap3.approval_id).repeat_count === 3);
+  check('三次都没有 resolved', store.one('SELECT COUNT(*) AS n FROM events WHERE type = ? AND approval_id = ?', 'approval.resolved', ap3.approval_id).n === resolvedBefore);
+
+  const fourth = svc3.settleApproval({
+    approvalId: ap3.approval_id,
+    text: '没听清',
+    utteranceId: 'utt-repeat-4',
+    startedAt,
+  });
+  check('第 4 次按不执行收尾', fourth.outcome === 'denied' && fourth.reason === 'repeat_limit', JSON.stringify(fourth));
+  const denied = svc3.getApproval(ap3.approval_id);
+  check('审批 denied', denied.status === 'denied', denied.status);
+  const resolved = store.one(
+    "SELECT params_json FROM events WHERE type = 'approval.resolved' AND approval_id = ? ORDER BY seq DESC LIMIT 1",
+    ap3.approval_id,
+  );
+  const resolvedParams = JSON.parse(resolved.params_json);
+  check('resolved=denied 且带 repeat_limit', resolvedParams.status === 'denied' && resolvedParams.reason === 'repeat_limit', resolved.params_json);
+  check('run 未执行（cancelled）', svc3.getRunDetail(r13.run_id).run.status === 'cancelled');
+  check('装配层收到「没听清」收尾播报回调', unheardHooks.length === 1 && unheardHooks[0] === ap3.approval_id, JSON.stringify(unheardHooks));
+}
+
+console.log('— GH-53：repeat 不延长过期窗口');
+{
+  const svc4 = new RunService({ store, events, log });
+  const r14 = svc4.submitRun({ prompt: '往前走', route: 'fast' });
+  const ap4 = svc4.createApproval({
+    runId: r14.run_id,
+    capability: 'robot_follow',
+    actionLabel: '向前跟随',
+    argsSummary: '最远距离二米',
+  });
+  svc4.markApprovalAnnounced(ap4.approval_id, '请确认：向前跟随。参数：最远距离二米。请说确认。');
+  svc4.openConfirmationWindow(ap4.approval_id, 30_000);
+  const opened = svc4.getApproval(ap4.approval_id);
+  // 用户听清之前的时间不能延长窗口：把已存 closes_at 拨到过去，仍必须过期。
+  store.transaction((tx) => {
+    tx.run(
+      'UPDATE approvals SET window_closes_at = ? WHERE approval_id = ?',
+      new Date(Date.parse(opened.window_opens_at) - 1).toISOString(),
+      ap4.approval_id,
+    );
+  });
+  const late = svc4.settleApproval({
+    approvalId: ap4.approval_id,
+    text: '再说一遍',
+    utteranceId: 'utt-repeat-late',
+    startedAt: new Date(Date.parse(opened.window_opens_at) + 1000).toISOString(),
+  });
+  check('原窗口过期后 repeat 不能复活审批', late.outcome === 'expired', JSON.stringify(late));
+  check('过期按原 expires_at 收尾', svc4.getApproval(ap4.approval_id).status === 'timeout');
+  check('没有写 repeat_requested', store.one("SELECT COUNT(*) AS n FROM events WHERE type = 'approval.repeat_requested' AND approval_id = ?", ap4.approval_id).n === 0);
+}
 
 console.log('— 不可写 fail-closed');
 store.markUnwritable('磁盘满（模拟）');

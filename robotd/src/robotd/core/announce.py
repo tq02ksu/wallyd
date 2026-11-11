@@ -1,4 +1,4 @@
-"""系统播报的固定模板（审批复述 / 澄清追问）。
+"""系统播报的固定模板（审批复述 / 未听清收尾 / 澄清追问）。
 
 这条路径**不接收任意自由文本**：调用方给的是结构化的审批字段，robotd 用固定模板
 渲染成一句话。理由见 ``docs/design/GH-19.md``：如果它接受 ``text``，它就是
@@ -6,15 +6,24 @@
 
 GH-49 增加 ``clarification``：agentd 只传规则摘要与结构化的 ``missing`` / ``candidates``，
 正文仍由这里渲染。这样「澄清必须被说出口」不会把任意用户原文带进免审批通道。
+
+GH-53 增加 ``approval_unheard``：复述次数用尽时的固定收尾句；审批参数仍要先过
+``announce_lexicon`` 的安全词表，含糊或未按词表读法的内容一律拒绝。
 """
 
 from __future__ import annotations
 
 import re
 
+from robotd.announce_lexicon import LexiconError, validate_args_summary
+
 APPROVAL_REPEAT = "approval_repeat"
+APPROVAL_UNHEARD = "approval_unheard"
 CLARIFICATION = "clarification"
-SUPPORTED_KINDS = frozenset({APPROVAL_REPEAT, CLARIFICATION})
+SUPPORTED_KINDS = frozenset({APPROVAL_REPEAT, APPROVAL_UNHEARD, CLARIFICATION})
+
+#: 走审批复述模板的 kind。``clarification`` 有自己的渲染函数，不能混进来。
+APPROVAL_KINDS = frozenset({APPROVAL_REPEAT, APPROVAL_UNHEARD})
 
 CLARIFICATION_REASONS = frozenset(
     {"missing_arguments", "capability_unavailable", "precondition", "ambiguous"}
@@ -43,11 +52,18 @@ def _one_line(value: str, *, field: str, max_len: int) -> str:
 
 def render_announcement(*, kind: str, action_label: str, args_summary: str) -> str:
     """把审批字段渲染成固定句子。未知 kind 一律拒绝，不猜。"""
-    if kind != APPROVAL_REPEAT:
-        raise ValueError(f"不支持的播报类型 {kind!r}；只允许 {sorted(SUPPORTED_KINDS)}")
+    if kind not in APPROVAL_KINDS:
+        raise ValueError(f"不支持的播报类型 {kind!r}；只允许 {sorted(APPROVAL_KINDS)}")
     label = _one_line(action_label, field="action_label", max_len=80)
-    summary = _one_line(args_summary, field="args_summary", max_len=200)
-    return f"请确认：{label}。参数：{summary}。确认请说“确认”。"
+    summary = _one_line(args_summary, field="args_summary", max_len=60)
+    try:
+        summary = validate_args_summary(summary)
+    except LexiconError as exc:
+        raise ValueError(str(exc)) from exc
+    if kind == APPROVAL_UNHEARD:
+        # 复述次数用尽：固定收尾句，不把参数再念一遍，也不接受任何自由文本。
+        return "我没有听清，这次没有执行。"
+    return f"请确认：{label}。参数：{summary}。请说确认。"
 
 
 def render_clarification(

@@ -120,14 +120,19 @@ def test_robot_announce_is_contract_declared_system_path(spec, tools):
         kinds = variant["properties"]["kind"]["enum"]
         assert len(kinds) == 1
         by_kind[kinds[0]] = variant
-    assert set(by_kind) == {"approval_repeat", "clarification"}
+    assert set(by_kind) == {"approval_repeat", "approval_unheard", "clarification"}
     # GH-49 review：多条并行改动会各自往 kind 里加值，若没有断言锁住这个集合，
     # 实现与契约就会悄悄漂移。要求两者**精确相等**，新增 kind 时两边一起改。
     assert set(by_kind) == set(SUPPORTED_KINDS), (
         f"robot_announce kind 枚举漂移：契约 {sorted(by_kind)} != 实现 {sorted(SUPPORTED_KINDS)}"
     )
     assert {"approval_id", "action_label", "args_summary"} <= set(by_kind["approval_repeat"]["required"])
+    # GH-53 的收尾提示仍是审批播报：字段必须与 approval_repeat 一致，否则只传一半字段
+    # 的请求会在运行时才炸；这里把两者绑在一起。
+    assert set(by_kind["approval_unheard"]["required"]) == set(by_kind["approval_repeat"]["required"])
+    # GH-49：澄清没有审批记录，不能要求也不接受 args_summary（robotd 的 handler 同样拒绝）。
     assert "approval_id" not in by_kind["clarification"]["required"]
+    assert "args_summary" not in by_kind["clarification"]["properties"]
     assert "reason" in by_kind["clarification"]["required"]
 
 

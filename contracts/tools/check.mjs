@@ -229,6 +229,70 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
   }
 }
 
+// 2.7 审批复述安全词表：单一真值，且契约上限/读法不能与词表各说各话。
+{
+  const lexPath = path.join(ROOT, 'announce-lexicon.json');
+  if (!fs.existsSync(lexPath)) {
+    semantic.push('缺少 contracts/announce-lexicon.json（审批复述的唯一词表）');
+  } else {
+    const lex = JSON.parse(fs.readFileSync(lexPath, 'utf8'));
+    const schemas = spec.components?.schemas ?? {};
+    const announce = schemas.AnnounceRequest;
+    // GH-49 把 AnnounceRequest 改成了按 kind 区分的 oneOf（每种请求的必填字段不同）。
+    // 这里同时兼容扁平形态：扁平形态只有一个「变体」，两种形态都按同一组不变量检查。
+    // 注意：上面的 openapi-backend 校验会**原地解引用** spec，所以 oneOf 里既可能是
+    // `$ref`，也可能已经是展开后的对象；两种都要认。
+    const resolveVariant = (variant) =>
+      typeof variant?.$ref === 'string' ? schemas[variant.$ref.split('/').pop()] : variant;
+    const announceVariants = announce?.oneOf
+      ? announce.oneOf.map(resolveVariant).filter(Boolean)
+      : [announce].filter(Boolean);
+    const approvalKinds = ['approval_repeat', 'approval_unheard'];
+    const approvalViews = announceVariants.filter((v) =>
+      approvalKinds.some((k) => v?.properties?.kind?.enum?.includes(k)),
+    );
+    const seenKinds = new Set(announceVariants.flatMap((v) => v?.properties?.kind?.enum ?? []));
+    if (approvalViews.length === 0) {
+      semantic.push('AnnounceRequest 里找不到审批播报（approval_repeat / approval_unheard）');
+    }
+    for (const view of approvalViews) {
+      if (view?.['x-announce-lexicon'] !== 'announce-lexicon.json') {
+        semantic.push('审批播报请求必须标 x-announce-lexicon: announce-lexicon.json');
+      }
+      const summary = view?.properties?.args_summary;
+      if (summary?.maxLength !== lex.args_summary?.max_chars) {
+        semantic.push(
+          `审批播报 args_summary.maxLength=${summary?.maxLength} 与词表 max_chars=${lex.args_summary?.max_chars} 不一致`,
+        );
+      }
+    }
+    for (const allowed of approvalKinds) {
+      if (!seenKinds.has(allowed)) {
+        semantic.push(`AnnounceRequest.kind 枚举缺 ${allowed}`);
+      }
+    }
+    if (!Number.isInteger(lex.repeat?.max_attempts) || lex.repeat.max_attempts <= 0) {
+      semantic.push('announce-lexicon.json 的 repeat.max_attempts 必须是正整数');
+    }
+    const toolsPath = path.join(ROOT, 'generated', 'mcp-tools.json');
+    if (fs.existsSync(toolsPath)) {
+      const mcpTools = JSON.parse(fs.readFileSync(toolsPath, 'utf8'));
+      for (const tool of mcpTools) {
+        for (const param of tool.approvalParams ?? []) {
+          if (!lex.fields?.[param]) {
+            semantic.push(`审批字段 ${tool.name}.${param} 在 announce-lexicon.json 里没有读法`);
+          }
+        }
+      }
+    }
+    for (const [name, rel] of Object.entries(lex.implementations ?? {})) {
+      if (!fs.existsSync(path.join(ROOT, '..', rel))) {
+        semantic.push(`announce-lexicon.json 声明的 ${name} 实现不存在：${rel}`);
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------- 3. agentd 契约（ADR-0007 双契约门禁）
 // agentd 的契约与生成物独立维护。这里只做「生成物一致 + 三条硬约束」，
 // 不复用 robotd 的断言：两边的安全模型不同（agentd 没有模型工具面，反而有审批写入口禁令）。

@@ -586,14 +586,20 @@ export interface components {
          * @description 系统播报请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的
          *     `robot_speak`，否则本端点就成了它的免审批版本。正文一律由 robotd 用固定模板渲染。
          *
-         *     按 `kind` 区分两种请求：
+         *     按 `kind` 区分三种请求：
          *
          *     - `approval_repeat`：必填 `approval_id` / `action_label` / `args_summary`；
+         *     - `approval_unheard`：复述次数用尽后的固定收尾提示，字段与 `approval_repeat`
+         *       相同，robotd 只念固定句，不把参数再念一遍；
          *     - `clarification`：`action_label` 是命中规则的摘要，`missing` 是缺失参数字段名，
          *       `candidates` 是歧义候选的规则摘要（agentd 已按上限截断），`more=true` 表示还有
          *       「别的」。正文来自这些结构化字段，**不接受用户原文**。
          */
-        AnnounceRequest: components["schemas"]["ApprovalRepeatAnnounceRequest"] | components["schemas"]["ClarificationAnnounceRequest"];
+        AnnounceRequest: components["schemas"]["ApprovalRepeatAnnounceRequest"] | components["schemas"]["ApprovalUnheardAnnounceRequest"] | components["schemas"]["ClarificationAnnounceRequest"];
+        /**
+         * @description 审批复述请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的
+         *     `robot_speak`，否则本端点就成了它的免审批版本。
+         */
         ApprovalRepeatAnnounceRequest: {
             /** @description agentd 审批记录的 ID；robotd 只用于回显与事件关联，不持有审批状态。 */
             approval_id: string;
@@ -604,7 +610,36 @@ export interface components {
             kind: "approval_repeat";
             /** @description 动作的人类可读名称，来自 agentd 的审批记录。 */
             action_label: string;
-            /** @description 关键参数摘要，来自 agentd 的审批记录；robotd 用固定模板念出。 */
+            /**
+             * @description 关键参数摘要，来自 agentd 的审批记录；robotd 用固定模板念出。
+             *
+             *     格式由 `announce-lexicon.json` 唯一定义：数字必须用该词表的中文读法
+             *     （如 `零点一五`，禁止 `0.15`、`2.0`、科学计数法），单位必须用词表里的
+             *     中文词（`米每秒` / `厘米`）。禁止 `大约`、`左右`、`略微` 等不确定词：
+             *     审批复述必须是确定值。超过 60 字或含禁用词的请求一律 400，不允许把
+             *     含糊或过长的内容交给 TTS。
+             */
+            args_summary: string;
+        };
+        /**
+         * @description 复述次数用尽后的收尾提示。字段与 `approval_repeat` 相同（审批记录仍要被
+         *     听见并绑定），但 robotd 只念固定的「我没有听清，这次没有执行。」，
+         *     不再重复参数。**故意没有 `text` 字段**：它同样不接受自由文本。
+         */
+        ApprovalUnheardAnnounceRequest: {
+            /** @description agentd 审批记录的 ID；robotd 只用于回显与事件关联，不持有审批状态。 */
+            approval_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "approval_unheard";
+            /** @description 动作的人类可读名称，来自 agentd 的审批记录。 */
+            action_label: string;
+            /**
+             * @description 关键参数摘要，来自 agentd 的审批记录。与 `approval_repeat` 一样先过
+             *     `announce-lexicon.json` 校验，校验失败时 robotd 返回 400 而不是播报。
+             */
             args_summary: string;
         };
         ClarificationAnnounceRequest: {
@@ -630,7 +665,7 @@ export interface components {
              */
             more?: boolean;
         };
-        AnnounceAccepted: components["schemas"]["ApprovalRepeatAnnounceAccepted"] | components["schemas"]["ClarificationAnnounceAccepted"];
+        AnnounceAccepted: components["schemas"]["ApprovalRepeatAnnounceAccepted"] | components["schemas"]["ApprovalUnheardAnnounceAccepted"] | components["schemas"]["ClarificationAnnounceAccepted"];
         ApprovalRepeatAnnounceAccepted: {
             task_id: string;
             /** @enum {string} */
@@ -642,6 +677,19 @@ export interface components {
              */
             kind: "approval_repeat";
             /** @description robotd 实际交给 TTS 的完整句子（固定模板渲染结果），供 agentd 存审计。 */
+            text: string;
+        };
+        ApprovalUnheardAnnounceAccepted: {
+            task_id: string;
+            /** @enum {string} */
+            status: "accepted";
+            approval_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "approval_unheard";
+            /** @description robotd 实际交给 TTS 的固定收尾句，供 agentd 存审计。 */
             text: string;
         };
         ClarificationAnnounceAccepted: {
