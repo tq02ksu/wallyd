@@ -25,6 +25,7 @@ import { encodeCursor, decodeCursor } from './events.ts';
 import { ApiError } from './http.ts';
 import { classifyApprovalUtterance } from './approval-intent.ts';
 import { isProtectedUtterance } from './router.ts';
+import { announceLimits } from '../../../contracts/tools/announce-lexicon.mjs';
 
 export type RunStatus =
   | 'accepted'
@@ -167,6 +168,7 @@ export interface ApprovalRow {
   decided_by: string | null;
   authorization_json: string | null;
   authorization_consumed: number;
+  repeat_count: number;
   created_at: string;
 }
 
@@ -278,6 +280,15 @@ export interface RunServiceOptions {
    * `submitRunRequest` 负责。未注入时 dispatcher 只做忽略判定（单测用）。
    */
   submitUtterance?: (input: { text: string; utterance_id: string }) => { run_id?: string } | void;
+  /**
+   * 用户在确认窗口内说「再说一遍」：装配层据此重播**同一条**复述。
+   *
+   * 传入时已经落库 `repeat_count` 与 `approval.repeat_requested`；这里只负责发声，
+   * **不得**重开窗口或推进审批状态。
+   */
+  onApprovalRepeat?: (approvalId: string, repeatCount: number, maxRepeats: number) => void;
+  /** 复述次数用尽：装配层播报「我没有听清，这次没有执行」。 */
+  onApprovalUnheard?: (approvalId: string) => void;
 }
 
 export interface SubmitRunInput {
@@ -323,7 +334,7 @@ export interface ApprovalSettleInput {
   echo?: boolean;
 }
 
-export type ApprovalSettleOutcome = 'approved' | 'denied' | 'ignored' | 'expired' | 'none';
+export type ApprovalSettleOutcome = 'approved' | 'denied' | 'repeat' | 'ignored' | 'expired' | 'none';
 
 export interface ApprovalSettleResult {
   outcome: ApprovalSettleOutcome;
@@ -369,6 +380,11 @@ export class RunService {
   private onEvent: ((seq: number) => void) | undefined;
   private onTerminal: ((runId: string) => void) | undefined;
   private onCancel: ((runId: string) => void) | undefined;
+  private onApprovalRepeat:
+    | ((approvalId: string, repeatCount: number, maxRepeats: number) => void)
+    | undefined;
+  private onApprovalUnheard: ((approvalId: string) => void) | undefined;
+  private maxRepeats: number;
   private submitUtterance:
     | ((input: { text: string; utterance_id: string }) => { run_id?: string } | void)
     | undefined;
@@ -382,6 +398,9 @@ export class RunService {
     this.onEvent = opts.onEvent;
     this.onTerminal = opts.onTerminal;
     this.onCancel = opts.onCancel;
+    this.onApprovalRepeat = opts.onApprovalRepeat;
+    this.onApprovalUnheard = opts.onApprovalUnheard;
+    this.maxRepeats = announceLimits().max_repeats;
     this.submitUtterance = opts.submitUtterance;
   }
 
@@ -1206,9 +1225,68 @@ export class RunService {
       this.recordIgnored(a, 'unrecognized', input.utteranceId);
       return { outcome: 'ignored', reason: 'unrecognized', ...base };
     }
+    if (classified.intent === 'repeat') {
+      // 重播不是同意也不是拒绝：窗口有效期、window_opened_at 与审批状态都不动。
+      return this.requestApprovalRepeat(a, input.utteranceId);
+    }
     return classified.intent === 'deny'
       ? this.resolveDenied(a, input.utteranceId)
       : this.resolveApproved(a, input.utteranceId);
+  }
+
+  /**
+   * 确认窗口内要求重播。
+   *
+   * 次数上限是安全边界：无限重播会变成「用户一直没听清、机器人一直问」的死循环。
+   * 第 `maxRepeats + 1` 次按「没听清即不执行」收尾，并让装配层播报明确说明。
+   */
+  private requestApprovalRepeat(a: ApprovalRow, utteranceId?: string | null): ApprovalSettleResult {
+    const base = {
+      approval_id: a.approval_id,
+      run_id: a.run_id,
+      action_label: a.action_label,
+    };
+    const run = a.run_id ? this.getRunRow(a.run_id) : null;
+    let count = 0;
+    let won = false;
+    let seq = 0;
+    this.store.transaction((tx) => {
+      // 条件更新同时做两件事：占一次重播名额；计数到上限后拒绝再增加。
+      won = tx.run(
+        `UPDATE approvals SET repeat_count = repeat_count + 1
+         WHERE approval_id = ? AND status = 'waiting' AND repeat_count < ?`,
+        a.approval_id,
+        this.maxRepeats,
+      ).changes === 1;
+      if (!won) return;
+      const row = tx.one<{ repeat_count: number }>(
+        'SELECT repeat_count FROM approvals WHERE approval_id = ?',
+        a.approval_id,
+      );
+      count = row?.repeat_count ?? 0;
+      seq = this.events.emit(tx, {
+        type: 'approval.repeat_requested',
+        run_id: a.run_id,
+        approval_id: a.approval_id,
+        session_id: run?.session_id ?? null,
+        params: {
+          approval_id: a.approval_id,
+          action_label: a.action_label,
+          repeat_count: count,
+          max_repeats: this.maxRepeats,
+          utterance_id: utteranceId ?? undefined,
+        },
+      }).seq;
+    });
+    if (!won) {
+      // 名额已用尽：按不执行收尾。这里复用 deny 的原子状态迁移，但 reason 如实写 repeat_limit。
+      const denied = this.resolveDenied(a, utteranceId, 'repeat_limit');
+      if (denied.outcome === 'denied') this.fireUnheard(a.approval_id);
+      return denied;
+    }
+    this.notify(seq);
+    this.fireRepeat(a.approval_id, count);
+    return { outcome: 'repeat', reason: 'repeat', ...base };
   }
 
   /** 审批过期：审批 `timeout`、run `cancelled`，并显式写 `approval.expired`。 */
@@ -1323,7 +1401,11 @@ export class RunService {
     };
   }
 
-  private resolveDenied(a: ApprovalRow, utteranceId?: string | null): ApprovalSettleResult {
+  private resolveDenied(
+    a: ApprovalRow,
+    utteranceId?: string | null,
+    reason: string = 'denied',
+  ): ApprovalSettleResult {
     const run = a.run_id ? this.getRunRow(a.run_id) : null;
     const ts = nowIso();
     const seqs: number[] = [];
@@ -1338,10 +1420,11 @@ export class RunService {
       if (!won) return;
       if (run && !isTerminal(run.status)) {
         tx.run(
-          `UPDATE runs SET status = 'cancelled', finished_at = ?, updated_at = ?, blocking_reason = 'denied'
+          `UPDATE runs SET status = 'cancelled', finished_at = ?, updated_at = ?, blocking_reason = ?
            WHERE run_id = ?`,
           ts,
           ts,
+          reason,
           run.run_id,
         );
       }
@@ -1357,6 +1440,7 @@ export class RunService {
             status: 'denied',
             decided_by: 'voice',
             utterance_id: utteranceId ?? undefined,
+            reason,
           },
         }).seq,
       );
@@ -1367,7 +1451,13 @@ export class RunService {
             run_id: run.run_id,
             session_id: run.session_id,
             severity: 'warning',
-            params: { outcome: 'cancelled', detail: '用户拒绝（denied），没有执行。' },
+            params: {
+              outcome: 'cancelled',
+              detail:
+                reason === 'repeat_limit'
+                  ? '连续多次没有听清（repeat_limit），这次没有执行。'
+                  : '用户拒绝（denied），没有执行。',
+            },
           }).seq,
         );
       }
@@ -1377,7 +1467,7 @@ export class RunService {
     }
     this.clearWindowTimer(a.approval_id);
     for (const seq of seqs) this.notify(seq);
-    return { outcome: 'denied', reason: 'denied', approval_id: a.approval_id, run_id: a.run_id, action_label: a.action_label };
+    return { outcome: 'denied', reason, approval_id: a.approval_id, run_id: a.run_id, action_label: a.action_label };
   }
 
   /** 记一条 `approval.ignored`；**不改任何状态**。 */
@@ -1397,6 +1487,24 @@ export class RunService {
       this.notify(res.seq);
     } catch (e: any) {
       this.log('写 approval.ignored 失败', { approval_id: a.approval_id, reason, error: e.message });
+    }
+  }
+
+  private fireRepeat(approvalId: string, repeatCount: number): void {
+    if (!this.onApprovalRepeat) return;
+    try {
+      this.onApprovalRepeat(approvalId, repeatCount, this.maxRepeats);
+    } catch (e: any) {
+      this.log('重播回调失败', { approval_id: approvalId, error: e.message });
+    }
+  }
+
+  private fireUnheard(approvalId: string): void {
+    if (!this.onApprovalUnheard) return;
+    try {
+      this.onApprovalUnheard(approvalId);
+    } catch (e: any) {
+      this.log('没听清收尾播报回调失败', { approval_id: approvalId, error: e.message });
     }
   }
 

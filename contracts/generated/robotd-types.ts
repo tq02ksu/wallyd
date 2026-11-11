@@ -584,18 +584,29 @@ export interface components {
         /**
          * @description 审批复述请求。**故意没有 `text` 字段**：任意自由文本必须走需审批的
          *     `robot_speak`，否则本端点就成了它的免审批版本。
+         *
+         *     `kind=approval_unheard` 是「复述次数用尽、这次没有执行」的固定收尾提示，
+         *     仍由 robotd 用固定模板渲染；它同样不接受自由文本。
          */
         AnnounceRequest: {
             /** @description agentd 审批记录的 ID；robotd 只用于回显与事件关联，不持有审批状态。 */
             approval_id: string;
             /**
-             * @description 固定播报种类；当前只允许审批复述。
+             * @description 固定播报种类；审批复述或「没听清、未执行」的收尾提示。
              * @enum {string}
              */
-            kind: "approval_repeat";
+            kind: "approval_repeat" | "approval_unheard";
             /** @description 动作的人类可读名称，来自 agentd 的审批记录。 */
             action_label: string;
-            /** @description 关键参数摘要，来自 agentd 的审批记录；robotd 用固定模板念出。 */
+            /**
+             * @description 关键参数摘要，来自 agentd 的审批记录；robotd 用固定模板念出。
+             *
+             *     格式由 `announce-lexicon.json` 唯一定义：数字必须用该词表的中文读法
+             *     （如 `零点一五`，禁止 `0.15`、`2.0`、科学计数法），单位必须用词表里的
+             *     中文词（`米每秒` / `厘米`）。禁止 `大约`、`左右`、`略微` 等不确定词：
+             *     审批复述必须是确定值。超过 60 字或含禁用词的请求一律 400，不允许把
+             *     含糊或过长的内容交给 TTS。
+             */
             args_summary: string;
         };
         AnnounceAccepted: {
@@ -604,7 +615,7 @@ export interface components {
             status: "accepted";
             approval_id: string;
             /** @enum {string} */
-            kind: "approval_repeat";
+            kind: "approval_repeat" | "approval_unheard";
             /** @description robotd 实际交给 TTS 的完整句子（固定模板渲染结果），供 agentd 存审计。 */
             text: string;
         };

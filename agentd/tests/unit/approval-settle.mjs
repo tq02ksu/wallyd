@@ -567,6 +567,55 @@ console.log('— 只用 final：speech.partial 不参与批准');
   runtime.runs.cancelRun(runId, 'cleanup');
 }
 
+// ---------------------------------------------------------------- GH-53：再说一遍
+console.log('— GH-53：再说一遍重播、不重置窗口；第 4 次未执行收尾');
+{
+  const { runId, approval } = await submitFastRun('过来 track:abc');
+  const firstAnnounce = robotdCalls.find(
+    (c) => c.path === '/v1/robot/announce' && c.body.approval_id === approval.approval_id,
+  );
+  check(
+    '首播的 args_summary 走词表（不是 JSON 片段）',
+    firstAnnounce?.body.args_summary === '目标：abc',
+    JSON.stringify(firstAnnounce?.body.args_summary),
+  );
+  const opened = await openWindow(approval.approval_id);
+  const openedAt = opened.window_opens_at;
+  const closesAt = opened.window_closes_at;
+  const announceBefore = robotdCalls.filter((c) => c.path === '/v1/robot/announce').length;
+  const resolvedBefore = countEvents('approval.resolved', approval.approval_id);
+
+  utterance(approval.approval_id, 'utt-repeat-1', '再说一遍');
+  const repeated = await waitFor(
+    () => (robotdCalls.filter((c) => c.path === '/v1/robot/announce').length > announceBefore ? true : null),
+    { timeoutMs: 2000 },
+  );
+  check('「再说一遍」触发第二次系统播报', Boolean(repeated));
+  const latestAnnounce = robotdCalls.filter((c) => c.path === '/v1/robot/announce').at(-1);
+  check('重播仍走 approval_repeat', latestAnnounce?.body.kind === 'approval_repeat', JSON.stringify(latestAnnounce?.body));
+  check('重播没有 text 字段', latestAnnounce && !('text' in latestAnnounce.body));
+  const afterRepeat = approvalById(approval.approval_id);
+  check('审批仍 waiting', afterRepeat.status === 'waiting', afterRepeat.status);
+  check('window_opened_at 不变', afterRepeat.window_opens_at === openedAt, `${afterRepeat.window_opens_at} vs ${openedAt}`);
+  check('window_closes_at 不变', afterRepeat.window_closes_at === closesAt);
+  check('没有新增 approval.resolved', countEvents('approval.resolved', approval.approval_id) === resolvedBefore);
+  check('写 approval.repeat_requested', countEvents('approval.repeat_requested', approval.approval_id) === 1);
+
+  utterance(approval.approval_id, 'utt-repeat-2', '没听清');
+  utterance(approval.approval_id, 'utt-repeat-3', '什么');
+  check('第 3 次后仍 waiting', approvalById(approval.approval_id).status === 'waiting');
+  utterance(approval.approval_id, 'utt-repeat-4', '没听清');
+  const denied = await waitFor(() => (approvalById(approval.approval_id).status === 'denied' ? true : null));
+  check('第 4 次按不执行收尾', Boolean(denied));
+  const resolved = lastEventParams('approval.resolved', approval.approval_id);
+  check('resolved=denied 且 reason=repeat_limit', resolved?.status === 'denied' && resolved?.reason === 'repeat_limit', JSON.stringify(resolved));
+  check('run 未执行（cancelled）', runRow(runId).status === 'cancelled', runRow(runId).status);
+  const unheard = await waitFor(() =>
+    robotdCalls.find((c) => c.path === '/v1/robot/announce' && c.body.kind === 'approval_unheard') ?? null,
+  );
+  check('播报固定收尾句（approval_unheard）', Boolean(unheard), JSON.stringify(robotdCalls.at(-1)?.body));
+}
+
 // ---------------------------------------------------------------- 清理
 await runtime.close();
 runtime.runs.dispose();

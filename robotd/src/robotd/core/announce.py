@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import re
 
+from robotd.announce_lexicon import LexiconError, validate_args_summary
+
 APPROVAL_REPEAT = "approval_repeat"
-SUPPORTED_KINDS = frozenset({APPROVAL_REPEAT})
+APPROVAL_UNHEARD = "approval_unheard"
+SUPPORTED_KINDS = frozenset({APPROVAL_REPEAT, APPROVAL_UNHEARD})
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -35,5 +38,12 @@ def render_announcement(*, kind: str, action_label: str, args_summary: str) -> s
     if kind not in SUPPORTED_KINDS:
         raise ValueError(f"不支持的播报类型 {kind!r}；只允许 {sorted(SUPPORTED_KINDS)}")
     label = _one_line(action_label, field="action_label", max_len=80)
-    summary = _one_line(args_summary, field="args_summary", max_len=200)
-    return f"请确认：{label}。参数：{summary}。确认请说“确认”。"
+    summary = _one_line(args_summary, field="args_summary", max_len=60)
+    try:
+        summary = validate_args_summary(summary)
+    except LexiconError as exc:
+        raise ValueError(str(exc)) from exc
+    if kind == APPROVAL_UNHEARD:
+        # 复述次数用尽：固定收尾句，不把参数再念一遍，也不接受任何自由文本。
+        return "我没有听清，这次没有执行。"
+    return f"请确认：{label}。参数：{summary}。请说确认。"

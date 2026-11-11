@@ -33,6 +33,7 @@ import {
 } from './harness.ts';
 import { createCodexHarnessClient } from './harness-codex.ts';
 import { ApprovalAnnouncer } from './approval-announcer.ts';
+import { formatArgsSummary, LexiconError } from '../../../contracts/tools/announce-lexicon.mjs';
 import { executeApprovedCapability } from './approval-executor.ts';
 import { RunNarrator } from './run-narrator.ts';
 import { FAST_RULES } from './router.ts';
@@ -261,6 +262,14 @@ export async function createRuntime(
     },
     // 取消先落库为 cancelled，再由执行器 abort 真正的 thread。
     onCancel: (runId) => harnessExecutorRef?.abort(runId),
+    // 用户说「再说一遍」：重播同一条复述，不推进审批状态、不重置窗口。
+    onApprovalRepeat: (approvalId) => {
+      void announcerRef?.reannounce(approvalId);
+    },
+    // 复述次数用尽：播报固定的「我没有听清，这次没有执行」。
+    onApprovalUnheard: (approvalId) => {
+      void announcerRef?.announceUnheard(approvalId);
+    },
     // 语音 final 走与 POST /api/run 同一条路径；幂等键用 utterance_id，
     // 断线重连补发同一条 final 不会产生第二个 run。
     submitUtterance: ({ text, utterance_id }): { run_id?: string } =>
@@ -530,7 +539,19 @@ export async function createRuntime(
       if (tool.approvalParams !== undefined) {
         // 先持久化审批，再用系统播报复述，**播完**才开确认窗口（run.waiting_confirmation）。
         // 不能用需审批的 robot_speak：那会让「问用户确认」本身再进入一次等待确认。
-        const summary = compactJson(args).slice(0, 200);
+        // 参数必须先过词表：数字 → 中文读法、单位 → 中文词；拼不下就拒绝执行，
+        // 不允许把含糊/超长的内容交给 TTS。
+        let summary: string;
+        try {
+          summary = formatArgsSummary(args, tool.approvalParams);
+        } catch (e: any) {
+          const detail =
+            e instanceof LexiconError
+              ? `参数无法在播报词表内安全复述：${e.message}；未执行`
+              : `参数摘要生成失败：${e?.message ?? e}；未执行`;
+          runs.transition(runId, 'failed', { reason: 'args_summary_unrepresentable', detail });
+          return;
+        }
         const approval = runs.createApproval({
           runId,
           capability,

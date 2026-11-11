@@ -41,7 +41,10 @@ class FakeRobotd {
       status: 'accepted',
       approval_id: input.approval_id,
       kind: input.kind,
-      text: `请确认：${input.action_label}。参数：${input.args_summary}。确认请说“确认”。`,
+      text:
+        input.kind === 'approval_unheard'
+          ? '我没有听清，这次没有执行。'
+          : `请确认：${input.action_label}。参数：${input.args_summary}。请说确认。`,
     };
   }
 }
@@ -51,19 +54,24 @@ const events = new EventLog(store, loadRegistry(), 'boot-announcer');
 const runs = new RunService({ store, events, log: () => {} });
 const robotd = new FakeRobotd();
 const noted = [];
+let bridgeHook = null;
 const announcer = new ApprovalAnnouncer({
   runs,
   robotd,
   log: () => {},
   windowMs: 30_000,
   announceTimeoutMs: 30_000,
-  noteSpeak: (taskId, text) => noted.push({ taskId, text }),
+  noteSpeak: (taskId, text) => {
+    noted.push({ taskId, text });
+    bridgeHook?.noteSpeak(taskId, text);
+  },
 });
 const bridge = new RobotdEventBridge({
   events,
   store,
   hooks: { onAnnouncementFinished: (outcome) => announcer.onFinished(outcome) },
 });
+bridgeHook = bridge;
 
 function approvalFor(prompt) {
   const run = runs.submitRun({ prompt, route: 'fast' });
@@ -92,7 +100,7 @@ console.log('— 成功路径：受理 → tts_finished → 开窗');
   check('announce 成功', res.ok === true);
   check('调用的是结构化系统播报', robotd.calls[0]?.kind === 'approval_repeat');
   check('请求里没有 text 字段', !('text' in robotd.calls[0]));
-  check('正文由 robotd 渲染并回传', res.text.includes('确认请说'));
+  check('正文由 robotd 渲染并回传（含可闻边界）', res.text.includes('请说确认'));
   check('记录播报摘要', noted.length === 1 && noted[0].taskId === res.task_id);
 
   check('受理后仍不是 waiting_confirmation', runs.getRunDetail(run.run_id).run.status !== 'waiting_confirmation');
@@ -229,7 +237,7 @@ console.log('— 完成事件抢在 HTTP 响应之前：仍只开一次窗，正
   check('HTTP 响应随后返回成功', res.ok === true);
   const row = runs.getApproval(approval.approval_id);
   check('开窗状态没有被响应回退', row.status === 'waiting');
-  check('审计正文仍被补上', typeof row.prompt_text === 'string' && row.prompt_text.includes('确认请说'));
+  check('审计正文仍被补上', typeof row.prompt_text === 'string' && row.prompt_text.includes('请说确认'));
   check('窗口事件只有一条', countEvents('run.waiting_confirmation', approval.approval_id) === 1);
   robotd.beforeReturn = null;
   runs.cancelRun(run.run_id, '清理');
@@ -309,6 +317,95 @@ console.log('— 已开窗的审批不再二次播报');
   check('二次播报被拒绝', again.ok === false);
   check('没有再次调用 robotd', robotd.calls.length === callsBefore);
   runs.cancelRun(run.run_id, '清理');
+}
+
+console.log('— GH-53：再说一遍重播同一条复述，不重置窗口');
+{
+  const { run, approval } = approvalFor('再说一遍');
+  const first = await announcer.announce(approval.approval_id);
+  bridge.handle({
+    type: 'speech.tts_finished',
+    payload: {
+      response_id: 'tts-first',
+      approval_id: approval.approval_id,
+      kind: 'approval_repeat',
+      task_id: first.task_id,
+      chunks: 1,
+      played: 1,
+    },
+  });
+  const waiting = runs.getApproval(approval.approval_id);
+  check('第一轮已开窗', waiting.status === 'waiting');
+  const openedAt = waiting.window_opens_at;
+  const closesAt = waiting.window_closes_at;
+  const resolvedBefore = countEvents('approval.resolved', approval.approval_id);
+  const waitingEventsBefore = countEvents('run.waiting_confirmation', approval.approval_id);
+  const callsBefore = robotd.calls.length;
+
+  const repeat = await announcer.reannounce(approval.approval_id);
+  check('重播被受理', repeat.ok === true, JSON.stringify(repeat));
+  check('重播仍走 approval_repeat', robotd.calls.at(-1)?.kind === 'approval_repeat');
+  check('重播没有 text 字段', !('text' in robotd.calls.at(-1)));
+  check('重播的参数摘要与首播一致', robotd.calls.at(-1)?.args_summary === robotd.calls[callsBefore - 1]?.args_summary);
+  check('robotd 再次被调用', robotd.calls.length === callsBefore + 1);
+  check('窗口开启时刻不变', runs.getApproval(approval.approval_id).window_opens_at === openedAt);
+  check('窗口关闭时刻不变', runs.getApproval(approval.approval_id).window_closes_at === closesAt);
+  check('审批仍 waiting', runs.getApproval(approval.approval_id).status === 'waiting');
+  check('没有新增 approval.resolved', countEvents('approval.resolved', approval.approval_id) === resolvedBefore);
+
+  bridge.handle({
+    type: 'speech.tts_started',
+    payload: { response_id: 'tts-repeat', task_id: repeat.task_id },
+  });
+  bridge.handle({
+    type: 'speech.tts_finished',
+    payload: {
+      response_id: 'tts-repeat',
+      approval_id: approval.approval_id,
+      kind: 'approval_repeat',
+      task_id: repeat.task_id,
+      chunks: 1,
+      played: 1,
+    },
+  });
+  check('重播完成不开第二个窗口', countEvents('run.waiting_confirmation', approval.approval_id) === waitingEventsBefore);
+  check('窗口仍未重置', runs.getApproval(approval.approval_id).window_opens_at === openedAt);
+  const spoken = store.one(
+    "SELECT params_json FROM events WHERE type = 'speech.spoken' ORDER BY seq DESC LIMIT 1",
+  );
+  const spokenParams = JSON.parse(spoken.params_json);
+  check('speech.spoken 带 kind（可观测边界）', spokenParams.kind === 'approval_repeat', spoken.params_json);
+  check('speech.spoken 带 approval_id', spokenParams.approval_id === approval.approval_id, spoken.params_json);
+  check('excerpt 能看到「请说确认」', String(spokenParams.excerpt ?? '').includes('请说确认'), spoken.params_json);
+
+  const unheard = await announcer.announceUnheard(approval.approval_id);
+  check('没听清收尾播报被受理', unheard.ok === true, JSON.stringify(unheard));
+  check('收尾播报走 approval_unheard', robotd.calls.at(-1)?.kind === 'approval_unheard');
+  check('收尾正文是固定句', unheard.text === '我没有听清，这次没有执行。', unheard.text);
+  runs.cancelRun(run.run_id, '清理');
+}
+
+console.log('— GH-53：含糊摘要不发给 robotd');
+{
+  const run = runs.submitRun({ prompt: '含糊播报', route: 'fast' });
+  const approval = runs.createApproval({
+    runId: run.run_id,
+    capability: 'robot_follow',
+    actionLabel: '向前跟随',
+    argsSummary: '走一点点',
+    argsJson: '{"x":1}',
+  });
+  const callsBefore = robotd.calls.length;
+  const res = await announcer.announce(approval.approval_id);
+  check('含糊摘要被拒绝', res.ok === false, JSON.stringify(res));
+  check('没有发给 robotd', robotd.calls.length === callsBefore);
+  check('run 未执行（failed）', runs.getRunDetail(run.run_id).run.status === 'failed');
+  check('审批 cancelled', runs.getApproval(approval.approval_id).status === 'cancelled');
+  const unavailable = store.one(
+    "SELECT params_json FROM events WHERE type = 'approval.unavailable' AND approval_id = ? ORDER BY seq DESC LIMIT 1",
+    approval.approval_id,
+  );
+  check('留 approval.unavailable 且原因可辨', JSON.parse(unavailable.params_json).kind === 'invalid_args_summary', unavailable.params_json);
 }
 
 store.close();

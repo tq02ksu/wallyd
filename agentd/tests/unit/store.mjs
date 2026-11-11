@@ -58,6 +58,9 @@ raw.exec(`CREATE TABLE runs (
   blocking_reason TEXT, error_code TEXT, harness_exit INTEGER,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT)`);
 raw.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+// v1 的真实 schema 包含 approvals；夹具之前漏了这张表，v4 的 ALTER 会因此失真。
+raw.exec(`CREATE TABLE approvals (
+  approval_id TEXT PRIMARY KEY, run_id TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL)`);
 raw.exec('PRAGMA user_version=1');
 raw.close();
 const migrated = new Store(pV1, { log: () => {} });
@@ -72,6 +75,12 @@ check(
   'v1 库升级后补上 thread_id（v3）',
   migratedSessionCols.includes('thread_id'),
   migratedSessionCols.join(','),
+);
+const migratedApprovalCols = migrated.all('PRAGMA table_info(approvals)').map((c) => c.name);
+check(
+  'v1 库升级后补上 repeat_count（v4）',
+  migratedApprovalCols.includes('repeat_count'),
+  migratedApprovalCols.join(','),
 );
 check('v1 升级后版本正确', migrated.stats().schema_version === SCHEMA_VERSION);
 migrated.close();
@@ -94,6 +103,8 @@ rawV2.exec(`CREATE TABLE runs (
 rawV2.exec(`INSERT INTO sessions(session_id,title,created_at,updated_at)
   VALUES('sess-v2','老会话','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`);
 rawV2.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+rawV2.exec(`CREATE TABLE approvals (
+  approval_id TEXT PRIMARY KEY, run_id TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL)`);
 rawV2.exec('PRAGMA user_version=2');
 rawV2.close();
 const migratedV2 = new Store(pV2, { log: () => {} });
