@@ -91,10 +91,40 @@ export interface SpeechRouterHooks {
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
+/** 安全停止需要的最小 run 能力（结构类型，单测可直接传 RunService）。 */
+export interface SafetyRunIndex {
+  findRunByRobotTask(robotTaskId: string): { run_id: string; status: string } | null;
+  cancelRun(runId: string, reason: string | null): unknown;
+}
+
+/** 契约 `safety.stop_requested.cause` 的枚举；不在表里的一律拒绝落库。 */
+export const STOP_CAUSES = [
+  'user_voice',
+  'user_stop_api',
+  'obstacle',
+  'watchdog_timeout',
+  'param_out_of_range',
+  'observation_stale',
+  'device_lost',
+  'bridge_exit',
+  'internal_error',
+] as const;
+
+export type StopCause = (typeof STOP_CAUSES)[number];
+
+const TERMINAL_RUN_STATUSES = new Set([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'outcome_unknown',
+]);
+
 export class RobotdEventBridge {
   private events: EventLog;
   private store: Store;
   private hooks: SpeechRouterHooks;
+  private runs: SafetyRunIndex | null;
   /** 上一次播报的摘要文本（按 response_id 存，用于 tts_finished 时带上 excerpt） */
   private speakText = new Map<string, string>();
   /** 待播报文本（按 task_id 存，等 tts_started 到达后转成 response_id 关联） */
@@ -108,10 +138,16 @@ export class RobotdEventBridge {
   /** 正在播放的 TTS response；用于判断一轮 utterance 是否发生在播报期间。 */
   private activeResponses = new Set<string>();
 
-  constructor(deps: { events: EventLog; store: Store; hooks?: SpeechRouterHooks }) {
+  constructor(deps: {
+    events: EventLog;
+    store: Store;
+    hooks?: SpeechRouterHooks;
+    runs?: SafetyRunIndex;
+  }) {
     this.events = deps.events;
     this.store = deps.store;
     this.hooks = deps.hooks ?? {};
+    this.runs = deps.runs ?? null;
   }
 
   /** 处理一条 robotd 事件。未知类型静默忽略（robotd 的事件面比 agentd 大）。 */
@@ -257,11 +293,63 @@ export class RobotdEventBridge {
         }
         return;
 
+      case 'safety.stop_requested':
+        this.onSafetyStop(p);
+        return;
+
       default:
-        // speech.partial / audio.state / task.* / safety.* 等：不在这里落库。
-        // task.* 与 safety.* 各有自己的语义事件产生点（runs / stop 路由）。
+        // speech.partial / audio.state / task.* / safety.stopped 等：不在这里落库。
+        // task.* 有自己的语义事件产生点（runs）；safety.stopped 由 stop_requested 承载原因。
         return;
     }
+  }
+
+  /**
+   * 安全停止（板侧看门狗/障碍物/掉线或用户停止）→ run 的结构化 blocking_reason。
+   *
+   * 归属只用 robotd 给出的 `task_id`：语音「停」本身就是一次 run，若退回
+   * `activeRun()` 会把这条停止指令自己取消掉。找不到对应 run 时只记事件，不猜。
+   * run 已终结时不改写状态（例如任务已经 succeeded，事后到的停止不能回溯改判）。
+   */
+  private onSafetyStop(p: Record<string, unknown>): void {
+    const cause = typeof p.cause === 'string' && (STOP_CAUSES as readonly string[]).includes(p.cause)
+      ? (p.cause as StopCause)
+      : null;
+    if (!cause) {
+      this.hooks.log?.('忽略无合法 cause 的 safety.stop_requested', { cause: p.cause });
+      return;
+    }
+    const state =
+      p.state === 'requested' || p.state === 'confirmed' || p.state === 'unknown'
+        ? p.state
+        : 'unknown';
+    const detail = typeof p.detail === 'string' && p.detail ? p.detail : cause;
+    const taskId = typeof p.task_id === 'string' && p.task_id ? p.task_id : undefined;
+
+    let runId: string | null = null;
+    if (taskId && this.runs) {
+      const run = this.runs.findRunByRobotTask(taskId);
+      if (run) {
+        runId = run.run_id;
+        if (!TERMINAL_RUN_STATUSES.has(run.status)) {
+          try {
+            this.runs.cancelRun(run.run_id, cause);
+          } catch (e: any) {
+            this.hooks.log?.('安全停止写 run 终态失败', {
+              run_id: run.run_id,
+              cause,
+              error: e?.message,
+            });
+          }
+        }
+      }
+    }
+
+    this.emit(
+      'safety.stop_requested',
+      { cause, state, detail, ...(runId ? { run_id: runId } : {}) },
+      runId,
+    );
   }
 
   // ---------------------------------------------------------------- 听

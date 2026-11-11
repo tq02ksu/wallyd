@@ -642,7 +642,10 @@ created ─► running ─┬─► completed        （正常结束）    │
          (started) │                                   │
                    ├─► failed           （错误 / 超时 / 板侧复位）
                    ├─► cancelled        （stop / task.cancel / 抢占）
-                   └─► superseded       （被更高优先级任务取代）
+                   ├─► superseded       （被更高优先级任务取代）
+                   └─► paused ─┬─► running   （resume：不重签审批）
+                               ├─► cancelled （stop / task.cancel / 暂停超时）
+                               └─► failed    （板侧故障等）
 ```
 
 - `superseded` 与 `cancelled` 必须区分：`stop` 抢占后原任务记 `cancelled` 是**语义失真**——
@@ -651,7 +654,10 @@ created ─► running ─┬─► completed        （正常结束）    │
   `estop` 命令、工具及 `estop: true` 事件字段均待实现，不能把它描述为现有能力（见 [ADR-0004](decisions/0004-serial-contract-redlines.md)）。
   未来物理急停须是独立于 daemon、Worker、串口与软件 `robot_stop` 的硬件断能/禁止驱动路径；具体电路未定且未验证，
   不能以面板软件按钮替代，也不能声称已经具备。
-- **`stop` 是唯一、幂等、可抢占的最高优先级命令**，能打断任何任务；机器人只有一个身体
+- `paused` 是**中间态**，不是终态：速度归零、位置保持、任务不终结（GH-48）。
+  `resume` 不新建任务、不重新签发审批凭据（没有改变任何被确认过的参数）；
+  暂停有上限（默认 120s），到期转 `cancelled` 并如实播报，不无限期悬着。
+- **`stop` 是唯一、幂等、可抢占的最高优先级命令**，能打断任何任务（含 `paused`）；机器人只有一个身体
   → 同一时刻只允许一个运动任务，`RobotState.mode` 就是这把互斥锁。
 
 ### 9.3 链路 B：首次开机自动配置

@@ -126,6 +126,8 @@ export interface StopResult {
   at: number;
   board_ack: boolean | null;
   stopped_tasks: number;
+  cause?: string;
+  state?: 'requested' | 'confirmed' | 'unknown';
 }
 
 export interface AnnounceInput {
@@ -387,8 +389,8 @@ export class RobotdClient {
    *
    * 返回值只表示「robotd 受理了什么」：`board_ack !== true` 时不得宣称已停稳。
    */
-  async stop(reason = 'api'): Promise<StopResult> {
-    return (await this.request('POST', '/v1/robot/stop', { reason }, 6000)) as StopResult;
+  async stop(cause = 'user_stop_api'): Promise<StopResult> {
+    return (await this.request('POST', '/v1/robot/stop', { cause }, 6000)) as StopResult;
   }
 
   // ---------------------------------------------------------------- 系统播报

@@ -1,0 +1,32 @@
+{"aec":false,"asr_engine":"system","auto_listen":true,"engine_started":true,"ev":"bridge_ready","locale":"zh_CN","pid":4242,"preroll":0,"t_ms":800,"ts_mono_ns":800000000,"tts_engine":"system","tts_queue_capacity":4}
+{"ambient_db":-52.0,"ev":"vad_calibrated","t_ms":900,"ts_mono_ns":900000000}
+{"db":-51.2,"ev":"aec_echo_probe","t_ms":1000,"ts_mono_ns":1000000000}
+{"db":-50.8,"ev":"aec_echo_probe","t_ms":1100,"ts_mono_ns":1100000000}
+{"chars":30,"chunks":3,"dry_run":false,"ev":"tts_started","response_id":"smoke-voice","t_ms":1200,"ts_mono_ns":1200000000,"tts_engine":"system","voice":"com.apple.voice.compact.zh-CN.Tingting"}
+{"db":-44.1,"ev":"aec_echo_probe","t_ms":1300,"ts_mono_ns":1300000000}
+{"ev":"tts_chunk_started","index":0,"response_id":"smoke-voice","t_ms":1350,"text":"你好，我是瓦力。","ts_mono_ns":1350000000}
+{"db":-38.4,"ev":"aec_echo_probe","t_ms":1500,"ts_mono_ns":1500000000}
+{"ev":"tts_chunk_finished","index":0,"played":1,"response_id":"smoke-voice","t_ms":1500,"ts_mono_ns":1500000000}
+{"ev":"tts_played","index":0,"played":1,"response_id":"smoke-voice","t_ms":1510,"ts_mono_ns":1510000000}
+{"db":-37.9,"ev":"aec_echo_probe","t_ms":1700,"ts_mono_ns":1700000000}
+{"db":-38.2,"ev":"aec_echo_probe","t_ms":1900,"ts_mono_ns":1900000000}
+{"db":-37.5,"ev":"aec_echo_probe","t_ms":2100,"ts_mono_ns":2100000000}
+{"ev":"tts_chunk_started","index":1,"response_id":"smoke-voice","t_ms":2200,"text":"这是一次 AEC 冒烟播报测试。","ts_mono_ns":2200000000}
+{"db":-36.8,"ev":"aec_echo_probe","t_ms":2300,"ts_mono_ns":2300000000}
+{"ev":"tts_chunk_started","index":1,"response_id":"smoke-voice","t_ms":2400,"text":"这是一次 AEC 冒烟播报测试。","ts_mono_ns":2400000000}
+{"db":-37.1,"ev":"aec_echo_probe","t_ms":2500,"ts_mono_ns":2500000000}
+{"db":-38.0,"ev":"aec_echo_probe","t_ms":2700,"ts_mono_ns":2700000000}
+{"ev":"tts_chunk_finished","index":1,"played":2,"response_id":"smoke-voice","t_ms":2700,"ts_mono_ns":2700000000}
+{"ev":"tts_played","index":1,"played":2,"response_id":"smoke-voice","t_ms":2710,"ts_mono_ns":2710000000}
+{"db":-38.6,"ev":"aec_echo_probe","t_ms":2900,"ts_mono_ns":2900000000}
+{"db":-39.1,"ev":"aec_echo_probe","t_ms":3100,"ts_mono_ns":3100000000}
+{"db":-38.9,"ev":"aec_echo_probe","t_ms":3300,"ts_mono_ns":3300000000}
+{"db":-38.3,"ev":"aec_echo_probe","t_ms":3500,"ts_mono_ns":3500000000}
+{"ev":"tts_chunk_started","index":2,"response_id":"smoke-voice","t_ms":3500,"text":"看到 PASS 与计数即正常。","ts_mono_ns":3500000000}
+{"db":-39.4,"ev":"aec_echo_probe","t_ms":3700,"ts_mono_ns":3700000000}
+{"db":-40.0,"ev":"aec_echo_probe","t_ms":3900,"ts_mono_ns":3900000000}
+{"ev":"tts_chunk_finished","index":2,"played":3,"response_id":"smoke-voice","t_ms":3900,"ts_mono_ns":3900000000}
+{"ev":"tts_played","index":2,"played":3,"response_id":"smoke-voice","t_ms":3910,"ts_mono_ns":3910000000}
+{"chunks":3,"dropped":0,"ev":"tts_finished","peak":1,"played":3,"response_id":"smoke-voice","stop_reason":"done","t_ms":4000,"ts_mono_ns":4000000000}
+{"engine_running":true,"ev":"status","t_ms":4100,"ts_mono_ns":4100000000}
+{"ev":"bridge_bye","t_ms":5000,"ts_mono_ns":5000000000}

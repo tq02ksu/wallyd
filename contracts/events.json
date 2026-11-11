@@ -70,9 +70,50 @@
         "reason": {
           "type": "string",
           "required": true,
-          "enum": ["requested", "stop", "preempted", "deadline"]
+          "enum": ["requested", "stop", "preempted", "deadline", "pause_timeout"]
         }
-      }
+      },
+      "notes": "pause_timeout = 暂停超过上限（pause_max_seconds）自动取消；同时会先发 task.pause_expired。"
+    },
+    {
+      "type": "task.paused",
+      "category": "task",
+      "no_state": true,
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "capability": {"type": "string", "required": true},
+        "pause_expires_at": {
+          "type": "integer",
+          "required": true,
+          "notes": "本次暂停的自动取消截止时间（Unix epoch 毫秒）；到期转 cancelled/reason=pause_timeout。"
+        }
+      },
+      "notes": "暂停不是终态：任务仍在表里、finished_at 为 null。它也不是 mute——音频与播报不受影响。"
+    },
+    {
+      "type": "task.resumed",
+      "category": "task",
+      "no_state": true,
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "capability": {"type": "string", "required": true},
+        "paused_ms": {"type": "integer", "required": true, "notes": "本次暂停持续时长（毫秒）。"}
+      },
+      "notes": "恢复不新建任务、不重新签发审批凭据：任务 id 不变，也不会有第二个 task.started。"
+    },
+    {
+      "type": "task.pause_expired",
+      "category": "task",
+      "no_state": true,
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "announced": {
+          "type": "boolean",
+          "required": true,
+          "notes": "固定提示是否真的交给了 TTS。音频桥不可用时为 false——不伪造「已播报」。"
+        }
+      },
+      "notes": "暂停超过上限：随后任务转 cancelled(reason=pause_timeout)。单独一条事件让「为什么停」在时间线上可读，而不是只靠 reason 猜。"
     },
     {
       "type": "motion.plan",
@@ -93,12 +134,64 @@
         "reason": {
           "type": "string",
           "required": true,
-          "enum": ["stop", "watchdog", "watchdog_release", "task_cancel", "link_lost", "startup"]
+          "enum": ["stop", "watchdog", "watchdog_release", "task_cancel", "task_pause", "link_lost", "startup"]
         },
         "source": {"type": "string", "required": true, "enum": ["host", "board"]},
         "task_id": {"type": "string", "required": false}
       },
       "notes": "只表示停止动作已发生，不表示物理静止（板侧应答 ≠ 物理静止证明）。"
+    },
+    {
+      "type": "safety.stop_requested",
+      "category": "safety",
+      "no_state": true,
+      "payload": {
+        "cause": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "user_voice",
+            "user_stop_api",
+            "obstacle",
+            "watchdog_timeout",
+            "param_out_of_range",
+            "observation_stale",
+            "device_lost",
+            "bridge_exit",
+            "internal_error"
+          ],
+          "notes": "结构化停止原因。上层判据只读本字段；detail 只供人读，不得用中文 grep 代替 cause。"
+        },
+        "state": {
+          "type": "string",
+          "required": true,
+          "enum": ["requested", "confirmed", "unknown"],
+          "notes": "confirmed 只表示板侧已应答停止；unknown 表示无法确认板侧停稳（例如链路已断），不得升级成 confirmed。"
+        },
+        "detail": {"type": "string", "required": true},
+        "task_id": {
+          "type": "string",
+          "required": false,
+          "notes": "被停止的运动任务（若本次停止确实终止了一个运动任务）；agentd 用它把安全停止关联回发起该任务的 run。"
+        },
+        "run_id": {
+          "type": "string",
+          "required": false,
+          "notes": "agentd 语义事件可回填的 run 关联；robotd 本身不产生 run_id。"
+        }
+      },
+      "notes": "「为什么停」的唯一结构化事实。safety.stopped 只说明停止动作发生，本事件补 cause/确认状态。"
+    },
+    {
+      "type": "safety.slowdown",
+      "category": "safety",
+      "no_state": true,
+      "payload": {
+        "active": {"type": "boolean", "required": true},
+        "reason": {"type": "string", "required": true},
+        "detail": {"type": "string", "required": false}
+      },
+      "notes": "减速提示**仅在减速状态变化时发送**（进入或解除各一条），不是逐帧/逐次控制流；完整 Nav/障碍物算法不在本 issue 范围。"
     },
     {
       "type": "device.ready",

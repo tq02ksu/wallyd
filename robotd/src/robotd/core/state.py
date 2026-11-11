@@ -5,8 +5,9 @@
 
 关键纪律（plan R05、ADR-0006）：
 
-- ``mode`` 由 ``derive_mode()`` **单一推导**：链路不可用 → degraded；有排他运动任务 → moving；
-  否则 idle。旧 TS 实现把这条三元表达式抄了五处，这里是唯一副本。
+- ``mode`` 由 ``derive_mode()`` **单一推导**：链路不可用 → degraded；有**未暂停**的排他
+  运动任务 → moving；否则 idle。旧 TS 实现把这条三元表达式抄了五处，这里是唯一副本。
+  ``paused`` 任务仍占运动槽位，但身体没在动 → idle（GH-48 D3）。
 - ``pose.valid`` 只能由板复位 / 标定变更 / 未回零置 false，**不能**被「任务结束」顺带改回 true。
 - ``battery`` 无权威源时 ``source=unimplemented`` 且值为 null，永不估算。
 - ``odometry`` 未装编码器时实际值为 null，**应发步数不冒充实走位移**。
@@ -48,6 +49,9 @@ def derive_mode(*, link_ready: bool, has_motion_task: bool) -> RobotMode:
 
     顺序即优先级：链路优先于任务。链路断了就是 degraded，不管有没有任务在跑——
     因为此时 robotd 已经无法保证「意图送达板侧」。
+
+    ``has_motion_task`` 的实参由内核按「运动是否真的在进行」给出：``paused`` 的任务
+    不传 True（否则 UI 会在机器人静止时显示 moving）。
     """
     if not link_ready:
         return RobotMode.DEGRADED
