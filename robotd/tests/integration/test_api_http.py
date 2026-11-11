@@ -235,15 +235,19 @@ def test_task_pause_and_resume_over_http(live):
     app, port = live
     from robotd.core.types import Exclusivity
 
-    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
-    app.kernel.mark_running(task.task_id)
+    # 先订阅再建任务：subscribe() 不回放历史，晚订阅会漏掉 task.started，
+    # 那样「没有第二个 task.started」的断言就退化成恒真（0 == 1 反而变成假失败）。
     events: list = []
     app.kernel.subscribe(["task.*"], events.append)
+    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
+    app.kernel.mark_running(task.task_id)
 
     status, body, _ = call(port, "POST", f"/v1/tasks/{task.task_id}/pause")
     assert status == 200, body
     assert body["state"] == "paused"
-    assert body["finished_at"] is None
+    # 契约里 `finished_at` 是可选字段：未结束（含 paused）时不出现，出现时必须非 null。
+    # 这里断言的是「暂停没有终结任务」，不是某个 DTO 键一定存在。
+    assert body.get("finished_at") is None
     assert isinstance(body["pause_expires_at"], int)
 
     status, body, _ = call(port, "GET", "/v1/tasks?state=paused")
