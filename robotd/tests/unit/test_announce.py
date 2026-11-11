@@ -112,6 +112,10 @@ def test_announce_rejects_free_text_and_unknown_shapes(body):
     with pytest.raises(RobotdError) as exc:
         _h_announce(ctx(app, body))
     assert exc.value.code is ErrorCode.VALIDATION
+    # 判据 2 要的是 HTTP 400，不只是内部错误码；这里不绑 socket 也能证明映射。
+    # 真实 HTTP 传输由 CI 的集成 lane 覆盖，受限沙箱不能监听回环端口。
+    assert exc.value.http_status == 400
+    assert exc.value.to_public()["error"]["code"] == "E_VALIDATION"
 
 
 def test_announce_accepts_lexicon_number_reading():
