@@ -1200,6 +1200,18 @@ components:
             state:
               type: string
               enum: [requested, confirmed, unknown, not_applicable]
+            cause:
+              type: string
+              enum:
+                - user_voice
+                - user_stop_api
+                - obstacle
+                - watchdog_timeout
+                - param_out_of_range
+                - observation_stale
+                - device_lost
+                - bridge_exit
+                - internal_error
             detail:
               type: string
             board_ack:

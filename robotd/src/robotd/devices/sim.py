@@ -136,6 +136,19 @@ class SimBoard:
                 {"device": "esp32", "firmware": fw, "pose_valid": False, "odometry_reset": True},
             )
 
+    def sim_board_stop(self, reason: str = "watchdog") -> None:
+        """模拟板侧主动停机上报（GH-57）。
+
+        真实板侧看门狗/障碍物停机由固件产生；仿真板用同一事件形状把它们送进
+        ``App._board_event``，让 robotd 的映射路径（而不是测试里的旁路）被覆盖。
+        """
+        with self._lock:
+            self.state.steps_left = 0
+            self.state.steps_right = 0
+            self.state.enabled = False
+        if self._on_event:
+            self._on_event("safety.stopped", {"reason": reason, "source": "board"})
+
 
 def sleep_ms(ms: float) -> None:
     if ms > 0:

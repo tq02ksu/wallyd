@@ -93,7 +93,8 @@ def test_stop_event_is_emitted():
     seen: list[str] = []
     app.kernel.subscribe(["safety.*"], lambda ev: seen.append(ev.type))
     app.request_stop()
-    assert seen == ["safety.stopped"]
+    # 动作 + 结构化原因；判据只读 cause（见 test_safety_cause.py）。
+    assert seen == ["safety.stopped", "safety.stop_requested"]
 
 
 def test_shutdown_is_idempotent():

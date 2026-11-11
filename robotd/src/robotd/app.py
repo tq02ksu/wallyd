@@ -40,6 +40,16 @@ from .core.audio_runtime import (
 from .core.announce import PAUSE_EXPIRED_TEXT
 from .core.errors import ErrorCode, RobotdError
 from .core.kernel import EventKernel
+from .core.safety import (
+    LEGACY_REASON_TO_CAUSE,
+    STOP_CAUSES,
+    StopCause,
+    StopState,
+    coerce_stop_cause,
+    default_detail,
+    is_valid_cause,
+    legacy_stop_reason,
+)
 from .core.state import RobotStateStore
 from .core.types import DeviceStatus, Exclusivity, Task, TaskError, TaskState, now_ms
 
@@ -285,10 +295,55 @@ class App:
 
     def _board_event(self, event_type: str, payload: dict[str, Any]) -> None:
         """板侧上报的统一入口。"""
+        payload = dict(payload or {})
+        if event_type == "safety.stopped" and str(payload.get("source") or "") == "board":
+            # 板侧主动停机（看门狗/障碍物/越界等）。板侧已经停了，不能再发 stop；
+            # 是否 confirmed 取决于链路是否仍然可用——链路断了就只能诚实报 unknown。
+            reason = str(payload.get("reason") or "watchdog")
+            cause = coerce_stop_cause(reason)
+            if reason not in STOP_CAUSES and reason not in LEGACY_REASON_TO_CAUSE:
+                cause = StopCause.INTERNAL_ERROR
+            confirmed = self.state.link_ready
+            self.request_stop(
+                cause=cause,
+                notify_board=False,
+                state=StopState.CONFIRMED if confirmed else StopState.UNKNOWN,
+                detail=f"板侧主动停机（{reason}）",
+                source="board",
+            )
+            return
+
+        if event_type == "safety.stop_requested":
+            cause_value = payload.get("cause")
+            if is_valid_cause(cause_value):
+                state = payload.get("state")
+                if state not in {s.value for s in StopState}:
+                    state = StopState.CONFIRMED if self.state.link_ready else StopState.UNKNOWN
+                self.request_stop(
+                    cause=StopCause(str(cause_value)),
+                    notify_board=False,
+                    state=StopState(str(state)),
+                    detail=str(payload.get("detail") or default_detail(StopCause(str(cause_value)))),
+                    source="board",
+                )
+                return
+            log.warning("板侧 safety.stop_requested 缺合法 cause：%r", cause_value)
+            return
+
         try:
             self.kernel.emit(event_type, payload)
         except Exception:  # noqa: BLE001
             log.warning("板侧事件 %s 处理失败", event_type, exc_info=True)
+
+        if event_type == "device.lost" and str(payload.get("device")) == "esp32":
+            # 串口/链路掉线：主机侧已经无法确认板侧是否停稳。
+            # 这不是「已停稳」，也不是「失败」——按契约发 unknown/device_lost。
+            self.request_stop(
+                cause=StopCause.DEVICE_LOST,
+                notify_board=False,
+                state=StopState.UNKNOWN,
+                detail="板侧链路丢失，无法确认机器人已停稳",
+            )
 
     def _start_board_link(self) -> None:
         """建立板侧链路。
@@ -498,30 +553,55 @@ class App:
             log.warning("暂停超时提示未能播报（音频桥不可用）", exc_info=True)
             return False
 
-    def request_stop(self, *, reason: str = "stop") -> dict[str, Any]:
+    def request_stop(
+        self,
+        *,
+        reason: str = "stop",
+        cause: str | StopCause | None = None,
+        detail: str | None = None,
+        state: StopState | str | None = None,
+        notify_board: bool = True,
+        source: str = "host",
+    ) -> dict[str, Any]:
         """有序停止的**本地部分**。
 
         板侧下发在 R08；这里先把「停止」这件事在状态与任务表上落实，
         并明确报告是否真的联系到了板侧——**不把「本地已停」说成「物理已停」**。
 
+        每次停止都发两条事件：``safety.stopped``（动作发生）与
+        ``safety.stop_requested``（结构化原因 + 确认状态）。``cause`` 是唯一判据；
+        ``detail`` 只供人读。板侧已主动停机时用 ``notify_board=False``，避免反向再发 stop。
+
         系统播报（审批复述）免审批，但**必须能被 stop 打断**：用户说「停」要立刻停，
         不能等桥回应，也不能因为桥不可用就静默成功。``abort_response`` 会立刻发出
         ``speech.tts_cancelled``（带 approval_id），agentd 据此不会开启确认窗口。
         """
+        if cause is not None:
+            if isinstance(cause, StopCause):
+                stop_cause = cause
+            elif is_valid_cause(cause):
+                stop_cause = StopCause(str(cause))
+            else:
+                raise RobotdError(ErrorCode.VALIDATION, f"未知停止原因：{cause!r}")
+        else:
+            stop_cause = coerce_stop_cause(reason)
         self.audio.abort_response("stop")
         stopped_motion = 0
+        stopped_task_id: str | None = None
         for task in self.kernel.list_tasks():
             if task.exclusivity is Exclusivity.MOTION and not task.terminal:
                 # stop 仍能打断 paused（它仍是取消，语义不变）；定时器一并撤销。
                 self.clear_pause_timer(task.task_id)
-                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason="stop")
+                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason=stop_cause.value)
                 stopped_motion += 1
+                if stopped_task_id is None:
+                    stopped_task_id = task.task_id
             elif task.capability in {"robot.speak", "robot.announce"} and not task.terminal:
                 # 兜底：没有活跃 response 的播报任务（例如桥未接上）也必须收尾为 cancelled，
                 # 不能留在 running 让调用方以为还在念。
-                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason="stop")
+                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason=stop_cause.value)
         board_ack: bool | None = None
-        if self.board is not None:
+        if notify_board and self.board is not None:
             if self.state.link_ready:
                 try:
                     self.board.notify("stop", {})
@@ -533,14 +613,70 @@ class App:
                 # None 只用于「没有板侧适配」这一种情况（仿真/骨架期），
                 # 否则调用方会把「没联系上」误读成「已停稳」。
                 board_ack = False
-        self.kernel.emit("safety.stopped", reason=reason, source="host")
+
+        if state is not None:
+            stop_state = StopState(state)
+        elif not notify_board:
+            # 没有向板侧发 stop 的路径（板侧已停 / 链路已断）：默认只能是 unknown，
+            # 除非调用方明确给出 confirmed。绝不默认 confirmed。
+            stop_state = StopState.UNKNOWN
+        elif board_ack is True:
+            stop_state = StopState.CONFIRMED
+        elif board_ack is False:
+            stop_state = StopState.UNKNOWN
+        else:
+            stop_state = StopState.REQUESTED
+
+        if stop_cause is StopCause.DEVICE_LOST:
+            # 设备掉线时没有可信的板侧确认通道：无论调用方怎么传，都只能是 unknown。
+            stop_state = StopState.UNKNOWN
+
+        if detail is None:
+            detail = default_detail(stop_cause)
+            if stopped_motion:
+                detail = f"{detail}（终止 {stopped_motion} 个运动任务）"
+
+        self.kernel.emit("safety.stopped", reason=legacy_stop_reason(stop_cause), source=source)
+        self._emit_stop_requested(stop_cause, stop_state, detail, stopped_task_id)
         return {
             "ok": True,
             "stopped": True,
             "at": self.clock.now_ms(),
             "board_ack": board_ack,
             "stopped_tasks": stopped_motion,
+            "cause": stop_cause.value,
+            "state": stop_state.value,
         }
+
+    def _emit_stop_requested(
+        self,
+        cause: StopCause,
+        state: StopState,
+        detail: str,
+        task_id: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "cause": cause.value,
+            "state": state.value,
+            "detail": detail,
+        }
+        if task_id:
+            payload["task_id"] = task_id
+        self.kernel.emit("safety.stop_requested", payload)
+
+    def report_safety_stop(self, *, cause: str | StopCause, detail: str | None = None) -> dict[str, Any]:
+        """安全判定模块（Nav/感知/参数校验）的**唯一**停机交入口。
+
+        判定仍发生在本进程内；agentd 不参与。当前尚无完整 Nav，测试用本方法或
+        假传输注入板侧事件来覆盖尚不能自然触发的 cause。
+        """
+        if isinstance(cause, StopCause):
+            stop_cause = cause
+        elif is_valid_cause(cause):
+            stop_cause = StopCause(str(cause))
+        else:
+            raise RobotdError(ErrorCode.VALIDATION, f"未知停止原因：{cause!r}")
+        return self.request_stop(cause=stop_cause, detail=detail)
 
     def attach_audio_bridge(self, app_path: Path, *, locale: str = "zh_CN", aec: bool = False) -> None:
         """装配常驻语音桥（R14 / ADR-0011）。
@@ -632,7 +768,11 @@ class App:
             return
         self._stopping.set()
         try:
-            self.request_stop(reason="startup" if not self._started else "stop")
+            # 有序关闭也是“桥/宿主退出”这一类停止；reason=startup 的旧语义不再需要。
+            self.request_stop(
+                cause=StopCause.BRIDGE_EXIT,
+                detail="robotd 正在关闭，停止运动",
+            )
         except Exception:  # noqa: BLE001
             log.warning("关机停止路径失败", exc_info=True)
         self._close_components()

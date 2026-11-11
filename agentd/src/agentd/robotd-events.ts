@@ -86,6 +86,7 @@ export const NODE_EVENT_TYPES = [
   'device.reset',
   'device.changed',
   'safety.stopped',
+  'safety.stop_requested',
 ] as const;
 
 export class RobotdEventSubscriber extends EventEmitter {

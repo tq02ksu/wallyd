@@ -145,18 +145,10 @@ Pose 的坐标系、角度单位及运动字段单位必须在机器可读契约
 
 ```text
 accepted → running → completed | failed | cancelled
-                 └─► paused → running | cancelled | failed
 ```
 
 `accepted` 是受理响应，不代表已经开始运动。终态不可再转移。任务对象包含 `task_id`、`capability`、
-`state`、`progress`、`started_at`、`finished_at`、`cancelable`；`paused` 时另有 `pause_expires_at`；
-时间戳为 Unix epoch 毫秒。
-
-`paused` 是中间态（GH-48）：速度归零、位置保持、任务不终结，也不是 mute。只对运动任务有效。
-`POST /v1/tasks/{task_id}/pause` 先下发板侧停止再转 `paused`；暂停有上限（默认 120s），
-到期转 `cancelled(reason=pause_timeout)` 并尽力播报。
-`POST /v1/tasks/{task_id}/resume` 从 `paused` 回到 `running`，**不新建任务、不重新签发审批凭据**；
-板侧链路不可用时返回 `503/E_LINK` 并保持 `paused`（暂停上限照旧生效，到期转 `cancelled`）。
+`state`、`progress`、`started_at`、`finished_at`、`cancelable`；时间戳为 Unix epoch 毫秒。
 任务仅保证在 robotd 当前进程生命周期内可查询；进程重启后，调用方必须重新读取状态，不能假设任务持久化。
 
 `DELETE /v1/tasks/{task_id}` 取消指定任务；运动任务被取消后还必须确认执行 stop 路径。
@@ -224,7 +216,7 @@ accepted → running → completed | failed | cancelled
 | 类别 | 事件示例 | 最低必要信息 |
 | --- | --- | --- |
 | 任务 | `task.started`, `task.progress`, `task.paused`, `task.resumed`, `task.pause_expired`, `task.completed`, `task.failed`, `task.cancelled` | `task_id`、能力名、进度或终态/错误；暂停带 `pause_expires_at`，恢复带 `paused_ms` |
-| 运动/安全 | `motion.plan`, `safety.stopped` | 计划摘要或停止原因；不宣称实际到位 |
+| 运动/安全 | `motion.plan`, `safety.stopped`, `safety.stop_requested`, `safety.slowdown` | 计划摘要、停止动作、结构化停止原因与确认状态；`slowdown` 仅在减速状态变化时发；不宣称实际到位 |
 | 设备 | `device.ready`, `device.lost`, `device.recovered`, `device.reset`, `device.changed` | 设备名、变化/原因、可确认的固件信息 |
 | 状态 | `state.rejected` | 被拒事件的 `type`、`payload_keys` 与 `reason`；不含 payload 原文 |
 | 视觉 | `vision.*`, `camera.*`, `people.*`, `person.*` | 观测、有效性与时间信息；不得把模型原始格式直接作为稳定能力契约 |

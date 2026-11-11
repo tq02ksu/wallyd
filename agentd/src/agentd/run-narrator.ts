@@ -80,17 +80,52 @@ export function composeNarrationText(run: NarrationRunFacts, steps: readonly Nar
 
 function fallbackPhrase(run: NarrationRunFacts): string {
   const reason = normalize(run.blocking_reason);
+  const label = reason ? blockingReasonLabel(reason) : '';
   switch (run.status) {
     case 'succeeded':
       return '做完了';
     case 'failed':
-      return reason ? `没做成，原因：${reason}` : '没做成，执行失败了';
+      return label ? `没做成，原因：${label}` : '没做成，执行失败了';
+    case 'cancelled':
+      // 安全停止是 cancelled（不是 succeeded），播报（若上层决定播）必须说出原因。
+      return label ? `已停止，原因：${label}` : '任务已取消';
     case 'interrupted':
-      return '没做成，任务中断了';
+      return label ? `没做成，任务中断了（${label}）` : '没做成，任务中断了';
     case 'outcome_unknown':
       return '动作已经发出，但结果没确认';
     default:
       return '任务已结束';
+  }
+}
+
+/**
+ * `blocking_reason` 里的结构化 cause → 人话。
+ *
+ * 判据与存储始终是枚举值；这里只在播报层转述，未知原因原样说出，
+ * 不把未识别值吞成泛化短语（那会让用户以为原因已知）。
+ */
+export function blockingReasonLabel(reason: string): string {
+  switch (reason) {
+    case 'user_voice':
+      return '用户语音请求停止';
+    case 'user_stop_api':
+      return '用户停止指令';
+    case 'obstacle':
+      return '检测到障碍物';
+    case 'watchdog_timeout':
+      return '板侧看门狗超时';
+    case 'param_out_of_range':
+      return '控制参数越界';
+    case 'observation_stale':
+      return '观测过期';
+    case 'device_lost':
+      return '设备掉线';
+    case 'bridge_exit':
+      return '语音桥退出';
+    case 'internal_error':
+      return '内部错误';
+    default:
+      return reason;
   }
 }
 

@@ -500,7 +500,8 @@ def test_stop_cancels_paused_task_and_clears_timer():
     assert scheduler.cancelled >= 1
     assert app._pause_timers == {}
     scheduler.fire_all()  # 过期回调不得再动一个已取消任务
-    assert app.kernel.get_task(task_id).reason == "stop"
+    # GH-57 起终态 reason 记结构化 cause；旧的 "stop" 文案映射为 user_stop_api。
+    assert app.kernel.get_task(task_id).reason == "user_stop_api"
     app.shutdown()
 
 

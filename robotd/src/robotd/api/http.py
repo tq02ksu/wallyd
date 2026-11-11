@@ -33,6 +33,7 @@ from ..approval import CREDENTIAL_HEADER, enforce_approval
 from ..app import App, resolve_work_dir
 from ..core.announce import APPROVAL_REPEAT, render_announcement
 from ..core.errors import ErrorCode, RobotdError, wrap_unexpected
+from ..core.safety import StopCause, is_valid_cause
 from ..core.types import Exclusivity, TaskError, TaskState
 from . import events as events_api
 from .ws import WsProtocolError, parse_handshake
@@ -197,11 +198,37 @@ def _h_state(ctx: RouteContext) -> dict[str, Any]:
 def _h_stop(ctx: RouteContext) -> dict[str, Any]:
     # 停止不需要审批，也不等模型：这是安全旁路（契约 /v1/robot/stop）
     body = ctx.body
-    _reject_unknown(body, {"reason"})
+    _reject_unknown(body, {"reason", "cause", "detail"})
+    detail = body.get("detail")
+    if detail is not None and not isinstance(detail, str):
+        raise RobotdError(ErrorCode.VALIDATION, "字段 detail 必须是字符串")
+    cause = body.get("cause")
+    if cause is not None:
+        if not is_valid_cause(cause):
+            raise RobotdError(
+                ErrorCode.VALIDATION,
+                f"未知停止原因：{cause!r}",
+                {"allowed": sorted(c.value for c in StopCause)},
+            )
+        result = _call_capability(
+            ctx.app,
+            "robot.stop",
+            lambda _cap: ctx.app.request_stop(cause=StopCause(str(cause)), detail=detail),
+        )
+        return _stop_result_or_timeout(result)
+
     reason = body.get("reason") if isinstance(body.get("reason"), str) else "stop"
     if reason not in {"stop", "user", "api", "shutdown"}:
         reason = "stop"
-    result = _call_capability(ctx.app, "robot.stop", lambda _cap: ctx.app.request_stop(reason=reason))
+    result = _call_capability(
+        ctx.app,
+        "robot.stop",
+        lambda _cap: ctx.app.request_stop(reason=reason, detail=detail),
+    )
+    return _stop_result_or_timeout(result)
+
+
+def _stop_result_or_timeout(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("board_ack") is False:
         # 契约：未收到板侧应答报 504，不返回 200（调用方不得据此认为机器人仍在动）
         raise RobotdError(

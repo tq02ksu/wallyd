@@ -194,6 +194,39 @@
       ]
     },
     {
+      "type": "safety.stop_requested",
+      "category": "safety",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "cause",
+        "state",
+        "detail",
+        "task_id",
+        "run_id"
+      ],
+      "required_fields": [
+        "cause",
+        "state",
+        "detail"
+      ]
+    },
+    {
+      "type": "safety.slowdown",
+      "category": "safety",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "active",
+        "reason",
+        "detail"
+      ],
+      "required_fields": [
+        "active",
+        "reason"
+      ]
+    },
+    {
       "type": "device.ready",
       "category": "device",
       "payload_ref": null,
