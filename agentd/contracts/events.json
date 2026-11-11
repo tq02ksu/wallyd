@@ -488,6 +488,36 @@
       }
     },
     {
+      "type": "approval.repeat_requested",
+      "category": "approval",
+      "severity": "info",
+      "title": "用户要求再说一遍",
+      "summary": "复述第 {repeat_count} 次重播「{action_label}」；确认窗口不重置。",
+      "impact": "没有推进审批状态，也不算一次拒绝。",
+      "payload": {
+        "approval_id": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "repeat_count": {
+          "type": "integer",
+          "required": true
+        },
+        "max_repeats": {
+          "type": "integer",
+          "required": true
+        },
+        "utterance_id": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    {
       "type": "approval.resolved",
       "category": "approval",
       "severity": "info",
@@ -514,6 +544,11 @@
           "type": "string",
           "required": false,
           "description": "采纳的那一轮 speech.final 的 utterance_id（审计用）"
+        },
+        "reason": {
+          "type": "string",
+          "required": false,
+          "description": "结束原因（如 denied / repeat_limit）；不改变 status 枚举，只解释这一次为什么这样收尾。"
         }
       }
     },
@@ -591,7 +626,9 @@
             "no_audio",
             "announce_timeout",
             "audit_failed",
-            "robotd_no_check"
+            "robotd_no_check",
+            "repeat_failed",
+            "invalid_args_summary"
           ]
         }
       }
@@ -908,6 +945,16 @@
         "excerpt": {
           "type": "string",
           "required": false
+        },
+        "approval_id": {
+          "type": "string",
+          "required": false,
+          "description": "审批复述时关联的 approval_id；让「请说确认」的边界在事件里可观测。"
+        },
+        "kind": {
+          "type": "string",
+          "required": false,
+          "description": "系统播报种类（approval_repeat / approval_unheard）；普通播报没有。"
         }
       }
     },

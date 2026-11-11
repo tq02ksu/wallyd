@@ -130,7 +130,7 @@ export interface StopResult {
 
 export interface AnnounceInput {
   approval_id: string;
-  kind: 'approval_repeat';
+  kind: 'approval_repeat' | 'approval_unheard';
   action_label: string;
   args_summary: string;
 }
@@ -139,7 +139,7 @@ export interface AnnounceAccepted {
   task_id: string;
   status: 'accepted';
   approval_id: string;
-  kind: 'approval_repeat';
+  kind: 'approval_repeat' | 'approval_unheard';
   /** robotd 实际交给 TTS 的固定模板句子，供审计与界面展示。 */
   text: string;
 }

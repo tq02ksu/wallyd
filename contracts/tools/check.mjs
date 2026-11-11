@@ -217,6 +217,51 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
   }
 }
 
+// 2.7 审批复述安全词表：单一真值，且契约上限/读法不能与词表各说各话。
+{
+  const lexPath = path.join(ROOT, 'announce-lexicon.json');
+  if (!fs.existsSync(lexPath)) {
+    semantic.push('缺少 contracts/announce-lexicon.json（审批复述的唯一词表）');
+  } else {
+    const lex = JSON.parse(fs.readFileSync(lexPath, 'utf8'));
+    const announce = spec.components?.schemas?.AnnounceRequest;
+    const summary = announce?.properties?.args_summary;
+    const kind = announce?.properties?.kind;
+    if (announce?.['x-announce-lexicon'] !== 'announce-lexicon.json') {
+      semantic.push('AnnounceRequest 必须标 x-announce-lexicon: announce-lexicon.json');
+    }
+    if (summary?.maxLength !== lex.args_summary?.max_chars) {
+      semantic.push(
+        `AnnounceRequest.args_summary.maxLength=${summary?.maxLength} 与词表 max_chars=${lex.args_summary?.max_chars} 不一致`,
+      );
+    }
+    for (const allowed of ['approval_repeat', 'approval_unheard']) {
+      if (!Array.isArray(kind?.enum) || !kind.enum.includes(allowed)) {
+        semantic.push(`AnnounceRequest.kind.enum 缺 ${allowed}`);
+      }
+    }
+    if (!Number.isInteger(lex.repeat?.max_attempts) || lex.repeat.max_attempts <= 0) {
+      semantic.push('announce-lexicon.json 的 repeat.max_attempts 必须是正整数');
+    }
+    const toolsPath = path.join(ROOT, 'generated', 'mcp-tools.json');
+    if (fs.existsSync(toolsPath)) {
+      const mcpTools = JSON.parse(fs.readFileSync(toolsPath, 'utf8'));
+      for (const tool of mcpTools) {
+        for (const param of tool.approvalParams ?? []) {
+          if (!lex.fields?.[param]) {
+            semantic.push(`审批字段 ${tool.name}.${param} 在 announce-lexicon.json 里没有读法`);
+          }
+        }
+      }
+    }
+    for (const [name, rel] of Object.entries(lex.implementations ?? {})) {
+      if (!fs.existsSync(path.join(ROOT, '..', rel))) {
+        semantic.push(`announce-lexicon.json 声明的 ${name} 实现不存在：${rel}`);
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------- 3. agentd 契约（ADR-0007 双契约门禁）
 // agentd 的契约与生成物独立维护。这里只做「生成物一致 + 三条硬约束」，
 // 不复用 robotd 的断言：两边的安全模型不同（agentd 没有模型工具面，反而有审批写入口禁令）。

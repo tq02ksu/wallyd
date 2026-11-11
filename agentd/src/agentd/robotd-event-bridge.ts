@@ -175,6 +175,9 @@ export class RobotdEventBridge {
           chunks: int(p.chunks),
           played: int(p.played),
           excerpt: this.speakText.get(String(p.response_id ?? '')),
+          // 审批复述的「现在轮到你说」边界必须可观测：只靠 80 字 excerpt 会在长参数时被截掉。
+          approval_id: typeof p.approval_id === 'string' && p.approval_id ? p.approval_id : undefined,
+          kind: typeof p.kind === 'string' && p.kind ? p.kind : undefined,
         }, finishedTask ? this.taskRun.get(finishedTask) : undefined);
         this.hooks.onSpeechOutcome?.({
           response_id: String(p.response_id ?? ''),

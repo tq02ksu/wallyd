@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "name": "wally-announce-lexicon",
+  "description": "审批复述的安全词表（唯一真值）。robotd 用它校验/渲染，agentd 用它拼 args_summary；两端都必须读这一份，不得各写一份。",
+  "args_summary": {
+    "max_chars": 60,
+    "max_fields": 4,
+    "field_separator": "，",
+    "text_separator": "：",
+    "max_decimals": 3,
+    "max_abs": 1000000,
+    "number_format": "chinese_numeral",
+    "negative_prefix": "负",
+    "decimal_point": "点",
+    "forbidden_phrases": [
+      "大约",
+      "大概",
+      "左右",
+      "略微",
+      "差不多",
+      "一点点",
+      "少许",
+      "少量",
+      "稍微",
+      "可能",
+      "也许",
+      "约莫"
+    ]
+  },
+  "digits": {
+    "0": "零",
+    "1": "一",
+    "2": "二",
+    "3": "三",
+    "4": "四",
+    "5": "五",
+    "6": "六",
+    "7": "七",
+    "8": "八",
+    "9": "九"
+  },
+  "small_units": {
+    "10": "十",
+    "100": "百",
+    "1000": "千"
+  },
+  "large_units": {
+    "10000": "万"
+  },
+  "booleans": {
+    "true": "是",
+    "false": "否"
+  },
+  "units": {
+    "m": "米",
+    "cm": "厘米",
+    "mm": "毫米",
+    "km": "千米",
+    "m/s": "米每秒",
+    "mm/s": "毫米每秒",
+    "deg": "度",
+    "s": "秒",
+    "ms": "毫秒",
+    "%": "百分比"
+  },
+  "fields": {
+    "target_track_id": {"label": "目标", "type": "text"},
+    "target": {"label": "目标", "type": "text"},
+    "text": {"label": "内容", "type": "text"},
+    "note": {"label": "备注", "type": "text"},
+    "voice": {"label": "音色", "type": "text"},
+    "max_distance_m": {"label": "最远距离", "type": "number", "unit": "m"},
+    "speed_mps": {"label": "速度", "type": "number", "unit": "m/s"},
+    "duration_s": {"label": "时长", "type": "number", "unit": "s"},
+    "angle_deg": {"label": "角度", "type": "number", "unit": "deg"},
+    "steps_per_m": {"label": "每米步数", "type": "number"},
+    "wheelbase_mm": {"label": "轴距", "type": "number", "unit": "mm"},
+    "rate": {"label": "语速", "type": "number"}
+  },
+  "repeat": {
+    "max_attempts": 3
+  },
+  "implementations": {
+    "typescript": "contracts/tools/announce-lexicon.mjs",
+    "python": "robotd/src/robotd/announce_lexicon.py",
+    "cli": "contracts/tools/announce-lexicon-cli.mjs"
+  }
+}

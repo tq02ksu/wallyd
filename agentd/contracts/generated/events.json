@@ -38,6 +38,7 @@
   "registered_types": [
     "approval.expired",
     "approval.ignored",
+    "approval.repeat_requested",
     "approval.resolved",
     "approval.unavailable",
     "approval.waiting",
@@ -468,6 +469,29 @@
       ]
     },
     {
+      "type": "approval.repeat_requested",
+      "category": "approval",
+      "severity": "info",
+      "title": "用户要求再说一遍",
+      "summary": "复述第 {repeat_count} 次重播「{action_label}」；确认窗口不重置。",
+      "impact": "没有推进审批状态，也不算一次拒绝。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "approval_id",
+        "action_label",
+        "repeat_count",
+        "max_repeats",
+        "utterance_id"
+      ],
+      "required_fields": [
+        "approval_id",
+        "action_label",
+        "repeat_count",
+        "max_repeats"
+      ]
+    },
+    {
       "type": "approval.resolved",
       "category": "approval",
       "severity": "info",
@@ -481,7 +505,8 @@
         "action_label",
         "status",
         "decided_by",
-        "utterance_id"
+        "utterance_id",
+        "reason"
       ],
       "required_fields": [
         "approval_id",
@@ -796,7 +821,9 @@
         "response_id",
         "chunks",
         "played",
-        "excerpt"
+        "excerpt",
+        "approval_id",
+        "kind"
       ],
       "required_fields": [
         "response_id",

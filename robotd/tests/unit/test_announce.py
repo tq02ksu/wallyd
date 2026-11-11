@@ -81,6 +81,7 @@ def test_announce_accepts_structured_request_and_returns_rendered_text():
     assert result["kind"] == "approval_repeat"
     assert "向前跟随" in result["text"]
     assert "确认" in result["text"]
+    assert "请说确认" in result["text"], "复述与确认之间必须有可闻的固定尾缀"
     speak = [c for c in bridge.sent if c.get("cmd") == "speak"]
     assert len(speak) == 1
     assert speak[0]["text"] == result["text"]
@@ -91,9 +92,19 @@ def test_announce_accepts_structured_request_and_returns_rendered_text():
     [
         {"text": "任意自由文本"},
         valid_body(text="夹带自由文本"),
+        valid_body(kind="approval_unheard", text="夹带自由文本"),
         valid_body(kind="free_speech"),
         valid_body(action_label=""),
-        valid_body(args_summary="x" * 201),
+        valid_body(args_summary="x" * 61),
+        # GH-53：含糊词/未按词表读法的数字/科学计数法必须在契约层被拒绝，
+        # 不能交给 TTS 去「随机读」。
+        valid_body(args_summary="走一点点"),
+        valid_body(args_summary="大约二米"),
+        valid_body(args_summary="左右"),
+        valid_body(args_summary="0.15 米每秒"),
+        valid_body(args_summary="2.0 米"),
+        valid_body(args_summary="1e-3 米"),
+        valid_body(args_summary="速度二 m/s"),
     ],
 )
 def test_announce_rejects_free_text_and_unknown_shapes(body):
@@ -101,6 +112,26 @@ def test_announce_rejects_free_text_and_unknown_shapes(body):
     with pytest.raises(RobotdError) as exc:
         _h_announce(ctx(app, body))
     assert exc.value.code is ErrorCode.VALIDATION
+
+
+def test_announce_accepts_lexicon_number_reading():
+    """数字必须先变成词表里的中文读法；robotd 与 agentd 读同一份词表。"""
+    app, bridge = make_app()
+    assert bridge is not None
+    result = _h_announce(ctx(app, valid_body(args_summary="速度零点一五米每秒，最远距离二米")))
+    assert "速度零点一五米每秒" in result["text"]
+    assert "请说确认" in result["text"]
+
+
+def test_announce_unheard_uses_fixed_template_without_free_text():
+    """复述次数用尽：robotd 念固定收尾句，仍不接受自由文本。"""
+    app, bridge = make_app()
+    assert bridge is not None
+    result = _h_announce(ctx(app, valid_body(kind="approval_unheard", args_summary="最远距离二米")))
+    assert result["kind"] == "approval_unheard"
+    assert result["text"] == "我没有听清，这次没有执行。"
+    speak = [c for c in bridge.sent if c.get("cmd") == "speak"]
+    assert speak and speak[0]["text"] == result["text"]
 
 
 def test_announce_without_bridge_fails_loudly_with_event():
