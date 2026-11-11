@@ -88,9 +88,10 @@ def test_mcp_tool_face_matches_contract_tools(tools):
     assert "debug_serial" not in names
     assert "events_subscribe" not in names
     assert "robot_announce" not in names
-    # GH-6 新增 speech_abort：工具面从 14 增到 15。数量是契约的一部分，
-    # 增删端点必须同时改这里，否则「契约悄悄多了一条路」不会被发现。
-    assert len(tools) == 15, f"MCP 工具面必须保持 15 项，实际 {len(tools)}"
+    # GH-6 新增 speech_abort：14 → 15；GH-48 新增 task_pause/task_resume：15 → 17。
+    # 数量是契约的一部分，增删端点必须同时改这里，
+    # 否则「契约悄悄多了一条路」不会被发现。
+    assert len(tools) == 17, f"MCP 工具面必须保持 17 项，实际 {len(tools)}"
 
 
 def test_robot_announce_is_contract_declared_system_path(spec, tools):
@@ -271,6 +272,29 @@ def test_approval_flags_in_contract_are_reflected_in_routes(spec):
     assert announce.method == "POST"
     assert announce.template == "/v1/robot/announce"
     assert announce.requires_approval is False
+
+
+def test_pause_resume_are_resource_subpaths_without_approval(spec):
+    """GH-48：暂停/恢复只有一种能力面形态，且不要求审批。
+
+    反向判据的保护：如果实现改回「发 stop 再重发 follow」，就必须新增审批与动作调用；
+    这里锁死 resume 不带 ``x-requires-approval``，并禁止并行的全局动词路由。
+    """
+    pause = spec["paths"]["/v1/tasks/{task_id}/pause"]["post"]
+    resume = spec["paths"]["/v1/tasks/{task_id}/resume"]["post"]
+    assert pause["operationId"] == "task_pause"
+    assert resume["operationId"] == "task_resume"
+    assert _approval_params(pause) is None
+    assert _approval_params(resume) is None
+    assert "paused" in spec["components"]["schemas"]["TaskState"]["enum"]
+    verb_paths = [
+        path
+        for path in spec["paths"]
+        if path.endswith(("/pause", "/resume"))
+        and path != "/v1/tasks/{task_id}/pause"
+        and path != "/v1/tasks/{task_id}/resume"
+    ]
+    assert not verb_paths, f"不允许并行的暂停/恢复动词路由：{verb_paths}"
 
 
 def test_task_state_enum_matches_implementation(spec):

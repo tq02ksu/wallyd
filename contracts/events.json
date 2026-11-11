@@ -70,9 +70,50 @@
         "reason": {
           "type": "string",
           "required": true,
-          "enum": ["requested", "stop", "preempted", "deadline"]
+          "enum": ["requested", "stop", "preempted", "deadline", "pause_timeout"]
         }
-      }
+      },
+      "notes": "pause_timeout = 暂停超过上限（pause_max_seconds）自动取消；同时会先发 task.pause_expired。"
+    },
+    {
+      "type": "task.paused",
+      "category": "task",
+      "no_state": true,
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "capability": {"type": "string", "required": true},
+        "pause_expires_at": {
+          "type": "integer",
+          "required": true,
+          "notes": "本次暂停的自动取消截止时间（Unix epoch 毫秒）；到期转 cancelled/reason=pause_timeout。"
+        }
+      },
+      "notes": "暂停不是终态：任务仍在表里、finished_at 为 null。它也不是 mute——音频与播报不受影响。"
+    },
+    {
+      "type": "task.resumed",
+      "category": "task",
+      "no_state": true,
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "capability": {"type": "string", "required": true},
+        "paused_ms": {"type": "integer", "required": true, "notes": "本次暂停持续时长（毫秒）。"}
+      },
+      "notes": "恢复不新建任务、不重新签发审批凭据：任务 id 不变，也不会有第二个 task.started。"
+    },
+    {
+      "type": "task.pause_expired",
+      "category": "task",
+      "no_state": true,
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "announced": {
+          "type": "boolean",
+          "required": true,
+          "notes": "固定提示是否真的交给了 TTS。音频桥不可用时为 false——不伪造「已播报」。"
+        }
+      },
+      "notes": "暂停超过上限：随后任务转 cancelled(reason=pause_timeout)。单独一条事件让「为什么停」在时间线上可读，而不是只靠 reason 猜。"
     },
     {
       "type": "motion.plan",
@@ -93,7 +134,7 @@
         "reason": {
           "type": "string",
           "required": true,
-          "enum": ["stop", "watchdog", "watchdog_release", "task_cancel", "link_lost", "startup"]
+          "enum": ["stop", "watchdog", "watchdog_release", "task_cancel", "task_pause", "link_lost", "startup"]
         },
         "source": {"type": "string", "required": true, "enum": ["host", "board"]},
         "task_id": {"type": "string", "required": false}

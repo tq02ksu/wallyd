@@ -117,6 +117,52 @@
       ]
     },
     {
+      "type": "task.paused",
+      "category": "task",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "capability",
+        "pause_expires_at"
+      ],
+      "required_fields": [
+        "task_id",
+        "capability",
+        "pause_expires_at"
+      ]
+    },
+    {
+      "type": "task.resumed",
+      "category": "task",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "capability",
+        "paused_ms"
+      ],
+      "required_fields": [
+        "task_id",
+        "capability",
+        "paused_ms"
+      ]
+    },
+    {
+      "type": "task.pause_expired",
+      "category": "task",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "announced"
+      ],
+      "required_fields": [
+        "task_id",
+        "announced"
+      ]
+    },
+    {
       "type": "motion.plan",
       "category": "motion",
       "payload_ref": null,

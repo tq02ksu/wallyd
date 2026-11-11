@@ -229,6 +229,94 @@ def test_task_list_filter(live):
     assert any(x["task_id"] == t.task_id for x in body["tasks"])
 
 
+# --------------------------------------------------------------------- 暂停 / 恢复（GH-48）
+def test_task_pause_and_resume_over_http(live):
+    """判据 1/2/5：paused 是任务状态、resume 复用同一任务、全程没有审批头。"""
+    app, port = live
+    from robotd.core.types import Exclusivity
+
+    # 先订阅再建任务：subscribe() 不回放历史，晚订阅会漏掉 task.started，
+    # 那样「没有第二个 task.started」的断言就退化成恒真（0 == 1 反而变成假失败）。
+    events: list = []
+    app.kernel.subscribe(["task.*"], events.append)
+    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
+    app.kernel.mark_running(task.task_id)
+
+    status, body, _ = call(port, "POST", f"/v1/tasks/{task.task_id}/pause")
+    assert status == 200, body
+    assert body["state"] == "paused"
+    # 契约里 `finished_at` 是可选字段：未结束（含 paused）时不出现，出现时必须非 null。
+    # 这里断言的是「暂停没有终结任务」，不是某个 DTO 键一定存在。
+    assert body.get("finished_at") is None
+    assert isinstance(body["pause_expires_at"], int)
+
+    status, body, _ = call(port, "GET", "/v1/tasks?state=paused")
+    assert status == 200
+    assert [t["task_id"] for t in body["tasks"]] == [task.task_id]
+
+    # resume：不带任何审批头也必须成功（没有改变任何被确认过的参数）。
+    status, body, _ = call(port, "POST", f"/v1/tasks/{task.task_id}/resume")
+    assert status == 200, body
+    assert body["task_id"] == task.task_id
+    assert body["state"] == "running"
+    assert "pause_expires_at" not in body
+
+    types = [ev.type for ev in events]
+    assert types.count("task.started") == 1
+    assert "task.paused" in types and "task.resumed" in types
+    assert "task.cancelled" not in types and "task.completed" not in types
+
+
+def test_task_pause_rejects_terminal_and_soft_tasks(live):
+    app, port = live
+    from robotd.core.types import Exclusivity, TaskState
+
+    soft = app.kernel.new_task("speech.listen", Exclusivity.SOFT)
+    app.kernel.mark_running(soft.task_id)
+    status, body, _ = call(port, "POST", f"/v1/tasks/{soft.task_id}/pause")
+    assert status == 409 and body["error"]["code"] == "E_STATE"
+
+    done = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
+    app.kernel.mark_running(done.task_id)
+    app.kernel.finish(done.task_id, TaskState.COMPLETED)
+    status, body, _ = call(port, "POST", f"/v1/tasks/{done.task_id}/pause")
+    assert status == 409 and body["error"]["code"] == "E_STATE"
+    status, body, _ = call(port, "POST", f"/v1/tasks/{done.task_id}/resume")
+    assert status == 409 and body["error"]["code"] == "E_STATE"
+
+
+def test_task_pause_unknown_task_is_404_and_unknown_field_is_400(live):
+    app, port = live
+    from robotd.core.types import Exclusivity
+
+    status, body, _ = call(port, "POST", "/v1/tasks/nope/pause")
+    assert status == 404 and body["error"]["code"] == "E_NO_TASK"
+
+    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
+    app.kernel.mark_running(task.task_id)
+    status, body, _ = call(port, "POST", f"/v1/tasks/{task.task_id}/pause", {"seconds": 5})
+    assert status == 400 and body["error"]["code"] == "E_VALIDATION"
+
+
+def test_stop_still_cancels_a_paused_task(live):
+    """判据 4：stop 仍是取消、幂等，且永远能打断 paused。"""
+    app, port = live
+    from robotd.core.types import Exclusivity
+
+    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
+    app.kernel.mark_running(task.task_id)
+    status, body, _ = call(port, "POST", f"/v1/tasks/{task.task_id}/pause")
+    assert status == 200 and body["state"] == "paused"
+
+    status, body, _ = call(port, "POST", "/v1/robot/stop", {"reason": "stop"})
+    assert status == 200, body
+    status, body, _ = call(port, "GET", f"/v1/tasks/{task.task_id}")
+    assert status == 200 and body["state"] == "cancelled"
+    # 再 stop 一次：幂等，不改写已终结任务。
+    status, body, _ = call(port, "POST", "/v1/robot/stop", {"reason": "stop"})
+    assert status == 200
+
+
 # --------------------------------------------------------------------- 系统播报
 class FakeAudioBridge:
     """只回答 ready() 并记录命令的桥替身（不碰麦克风/扬声器）。"""

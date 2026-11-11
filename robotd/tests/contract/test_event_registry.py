@@ -190,9 +190,11 @@ def _reduce_branch_events() -> set[str]:
 # ---------------------------------------------------------------- 登记表边界
 def test_registry_boundary_semantics():
     registry = load_event_registry()
-    # events[] 是 31 条精确名（GH-57 新增 safety.stop_requested / safety.slowdown），
-    # 没有一条含星号；device.* 只是订阅过滤语义。
-    assert len(registry.exact) == 31
+    # events[] 的精确名必须与契约源逐个对齐，而不是硬编码总数：别的 PR 新增事件
+    # 不应让本文件变红，漏登记一条则必须变红。device.* 只是订阅过滤语义。
+    spec = json.loads((CONTRACTS / "events.json").read_text(encoding="utf-8"))
+    expected = {event["type"] if isinstance(event, dict) else event for event in spec.get("events", spec)}
+    assert registry.exact == expected
     assert not any("*" in name for name in registry.exact)
     assert registry.allows("device.recovered")
     assert not registry.allows("device.recoverd")

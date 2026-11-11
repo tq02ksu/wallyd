@@ -94,6 +94,17 @@ console.log('— 判据 5：板侧看门狗停止写 run 的 blocking_reason');
   check('原因标签可读', blockingReasonLabel('device_lost') === '设备掉线');
 }
 
+console.log('— 判据 5：九种 cause 在播报里都说出原因，不吞成泛化「任务中断了」');
+for (const cause of STOP_CAUSES) {
+  const label = blockingReasonLabel(cause);
+  const text = composeNarrationText(
+    { status: 'cancelled', blocking_reason: cause, result_summary: null },
+    [],
+  );
+  check(`cause=${cause} 有可读标签`, label !== cause, label);
+  check(`cause=${cause} 播报包含该原因`, text.includes(label), text);
+}
+
 console.log('— 语音停止不能取消停止指令自己的 run');
 {
   const stopRun = runs.submitRun({ prompt: '停', route: 'fast' });

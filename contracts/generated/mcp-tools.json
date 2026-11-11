@@ -362,5 +362,51 @@
         "task_id"
       ]
     }
+  },
+  {
+    "name": "task_pause",
+    "description": "暂停运动任务：速度归零、位置保持、任务不终结（幂等）\n语义是「先别动了，等我一下」，**不是停止、不是取消、不是静音**：\n\n- 先把有序停止下发板侧（速度归零），成功后才把任务转 `paused`；\n  板侧联系不上时**不进入 paused**——不允许「daemon 挂着、板子以为在跑」。\n- `paused` 期间任务仍在任务表里，运动槽位仍被占用（新运动任务仍 `409/E_BUSY`）；\n  `GET /v1/tasks/{id}` 的 `state` 为 `paused`，`finished_at` 保持 null。\n- 事件流发 `task.paused`（不是 `task.completed`/`task.cancelled`）。\n- 暂停有上限（robotd 配置 `pause_max_seconds`，默认 120s）；到期仍在 paused\n  会发 `task.pause_expired` 并转 `cancelled`（`reason: pause_timeout`），\n  同时尽力播报固定提示。**不允许无限期悬着**。\n- 只对运动任务有效；`soft` 任务（语音等）返回 `409/E_STATE`。\n- 幂等：已 `paused` 时再调用返回当前任务，不重复发事件。\n- **不需要审批**：暂停只降低风险；恢复也不需要重新签发凭据（见 resume）。\n- `robot_stop` 仍能打断 paused（它仍是取消），语义不变。\n",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "additionalProperties": false
+    },
+    "operation": {
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/pause",
+      "pathParams": [
+        "task_id"
+      ]
+    }
+  },
+  {
+    "name": "task_resume",
+    "description": "从 paused 恢复原任务（幂等；不重新签发审批凭据）\n从 `paused` 回到 `running`，**不新建任务、不重新调用任何动作能力**：\n\n- 任务 id 不变，事件流只发 `task.resumed`，不会出现第二个 `task.started`、\n  也不会出现第二次审批（`approval.waiting`）。这是本条与「取消后重发 follow」\n  的本质区别：目标、距离、速度上限全都没有变。\n- 恢复后由该能力自己的运动控制继续执行；`robot_follow` 等能力尚未实现时，\n  恢复仅改变任务状态，不宣称已经产生真实速度曲线（R15/R17 未完成）。\n- 已 `running` 时幂等返回；终态任务返回 `409/E_STATE`，不复活。\n- 只对运动任务有效；`soft` 任务返回 `409/E_STATE`。\n- 板侧链路不可用时返回 `503/E_LINK` 且**保持 `paused`**：恢复意味着「身体可以继续动」，\n  联系不上板侧就不能声称已恢复。任务不会因此变成无限期 running——暂停截止时间照旧，\n  到期仍会转 `cancelled`（`reason: pause_timeout`）。\n- **不需要审批**：没有改变任何被用户确认并绑定过的参数（见 approval-digest 的\n  `risk_policy`：降低风险的变更不触发重签，提高风险的才触发）。\n",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "additionalProperties": false
+    },
+    "operation": {
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/resume",
+      "pathParams": [
+        "task_id"
+      ]
+    }
   }
 ]
