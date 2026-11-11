@@ -95,8 +95,20 @@ for (const ev of events.events ?? []) {
 const stateReq = spec.components?.schemas?.RobotState?.required ?? [];
 if (!stateReq.includes('event_seq')) semantic.push('RobotState.required 缺 event_seq（WS 游标无法建立）');
 const taskStates = spec.components?.schemas?.TaskState?.enum ?? [];
-for (const s of ['accepted', 'running', 'completed', 'failed', 'cancelled']) {
+for (const s of ['accepted', 'running', 'paused', 'completed', 'failed', 'cancelled']) {
   if (!taskStates.includes(s)) semantic.push(`TaskState.enum 缺 ${s}`);
+}
+// GH-48：暂停必须是任务状态，不是「取消 + 重建」的别名；也不能多留一条全局动词路由。
+{
+  const pauseOp = spec.paths?.['/v1/tasks/{task_id}/pause']?.post;
+  const resumeOp = spec.paths?.['/v1/tasks/{task_id}/resume']?.post;
+  if (!pauseOp || pauseOp.operationId !== 'task_pause') semantic.push('缺少 POST /v1/tasks/{task_id}/pause（task_pause）');
+  if (!resumeOp || resumeOp.operationId !== 'task_resume') semantic.push('缺少 POST /v1/tasks/{task_id}/resume（task_resume）');
+  for (const op of [pauseOp, resumeOp]) {
+    if (op && approvalOf(op) !== null) semantic.push(`${op.operationId} 不得要求审批：暂停/恢复没有改变已确认参数`);
+  }
+  const verbRoutes = Object.keys(spec.paths ?? {}).filter((route) => /\/(pause|resume)$/.test(route) && !route.startsWith('/v1/tasks/{task_id}/'));
+  if (verbRoutes.length) semantic.push(`出现并行的暂停/恢复动词路由（只允许任务资源子路径）：${verbRoutes.join(', ')}`);
 }
 
 // 2.4 servers 只绑回环
@@ -165,7 +177,7 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
 // 2.6 系统播报是审批链路的组成部分，不是 Agent 能力：
 //     - 必须在契约里（不能靠「谁知道内部方法」区分）；
 //     - 必须明确免审批；
-//     - 必须被排除出 MCP 工具面，且工具面总数保持 15（GH-6 新增 speech_abort）。
+//     - 必须被排除出 MCP 工具面；工具面总数 17（GH-6 新增 speech_abort，GH-48 新增 task_pause/task_resume）。
 {
   const announce = spec.paths?.['/v1/robot/announce']?.post;
   if (!announce) {
@@ -186,7 +198,7 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
     const mcpTools = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
     const names = mcpTools.map((t) => t.name);
     if (names.includes('robot_announce')) semantic.push('robot_announce 出现在 mcp-tools.json；系统路径不得成为 Agent 工具');
-    if (names.length !== 15) semantic.push(`MCP 工具面应为 15 项，实际 ${names.length}`);
+    if (names.length !== 17) semantic.push(`MCP 工具面应为 17 项，实际 ${names.length}`);
     for (const tool of mcpTools) {
       if ('requiresApproval' in tool) {
         semantic.push(`${tool.name} 的生成物仍带 requiresApproval 布尔；只允许 approvalParams`);

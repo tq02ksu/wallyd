@@ -227,9 +227,28 @@ def _h_task_cancel(ctx: RouteContext) -> dict[str, Any]:
         if task.exclusivity is Exclusivity.MOTION:
             # 运动任务取消必须联动 stop：只改任务表会让电机继续跑
             ctx.app.request_stop(reason="task_cancel")
+        ctx.app.clear_pause_timer(task_id)
         return ctx.app.kernel.finish(task_id, TaskState.CANCELLED, reason="requested").to_public()
 
     return _call_capability(ctx.app, "task.cancel", cancel)
+
+
+def _h_task_pause(ctx: RouteContext) -> dict[str, Any]:
+    """``task_pause``：速度归零、位置保持、任务不终结（GH-48）。
+
+    不要求审批：暂停只降低风险；``resume`` 也不需要重签，因为没有改变任何
+    被用户确认并绑定过的参数。审批门仍由 ``robot_follow`` 等动作端点承担。
+    """
+    task_id = ctx.params["task_id"]
+    _reject_unknown(ctx.body, set())
+    return _call_capability(ctx.app, "task.pause", lambda _cap: ctx.app.pause_task(task_id))
+
+
+def _h_task_resume(ctx: RouteContext) -> dict[str, Any]:
+    """``task_resume``：从 paused 回到 running；不新建任务、不重发动作能力。"""
+    task_id = ctx.params["task_id"]
+    _reject_unknown(ctx.body, set())
+    return _call_capability(ctx.app, "task.resume", lambda _cap: ctx.app.resume_task(task_id))
 
 
 def _h_tasks_list(ctx: RouteContext) -> dict[str, Any]:
@@ -534,6 +553,9 @@ def build_routes(*, debug: bool) -> list[Route]:
         Route("GET", "/v1/tasks", _h_tasks_list, operation_id="task_list"),
         Route("GET", "/v1/tasks/{task_id}", _h_task_get, operation_id="task_get"),
         Route("DELETE", "/v1/tasks/{task_id}", _h_task_cancel, operation_id="task_cancel"),
+        # GH-48：暂停/恢复挂在任务资源下；都不需要审批（没有改变已确认参数）。
+        Route("POST", "/v1/tasks/{task_id}/pause", _h_task_pause, operation_id="task_pause"),
+        Route("POST", "/v1/tasks/{task_id}/resume", _h_task_resume, operation_id="task_resume"),
         Route(
             "POST",
             "/v1/robot/follow",

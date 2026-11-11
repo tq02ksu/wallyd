@@ -71,6 +71,11 @@ export const NODE_EVENT_TYPES = [
   'speech.tts_finished',
   'speech.tts_cancelled',
   'task.started',
+  // GH-48：暂停/恢复是节点性事件——没有它们，run 时间线只能看到「取消」，
+  // 用户说的「等一下」会被误读成任务终结。
+  'task.paused',
+  'task.resumed',
+  'task.pause_expired',
   'task.completed',
   'task.failed',
   'task.cancelled',

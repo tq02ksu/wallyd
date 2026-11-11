@@ -281,6 +281,69 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tasks/{task_id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 暂停运动任务：速度归零、位置保持、任务不终结（幂等）
+         * @description 语义是「先别动了，等我一下」，**不是停止、不是取消、不是静音**：
+         *
+         *     - 先把有序停止下发板侧（速度归零），成功后才把任务转 `paused`；
+         *       板侧联系不上时**不进入 paused**——不允许「daemon 挂着、板子以为在跑」。
+         *     - `paused` 期间任务仍在任务表里，运动槽位仍被占用（新运动任务仍 `409/E_BUSY`）；
+         *       `GET /v1/tasks/{id}` 的 `state` 为 `paused`，`finished_at` 保持 null。
+         *     - 事件流发 `task.paused`（不是 `task.completed`/`task.cancelled`）。
+         *     - 暂停有上限（robotd 配置 `pause_max_seconds`，默认 120s）；到期仍在 paused
+         *       会发 `task.pause_expired` 并转 `cancelled`（`reason: pause_timeout`），
+         *       同时尽力播报固定提示。**不允许无限期悬着**。
+         *     - 只对运动任务有效；`soft` 任务（语音等）返回 `409/E_STATE`。
+         *     - 幂等：已 `paused` 时再调用返回当前任务，不重复发事件。
+         *     - **不需要审批**：暂停只降低风险；恢复也不需要重新签发凭据（见 resume）。
+         *     - `robot_stop` 仍能打断 paused（它仍是取消），语义不变。
+         */
+        post: operations["task_pause"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tasks/{task_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 从 paused 恢复原任务（幂等；不重新签发审批凭据）
+         * @description 从 `paused` 回到 `running`，**不新建任务、不重新调用任何动作能力**：
+         *
+         *     - 任务 id 不变，事件流只发 `task.resumed`，不会出现第二个 `task.started`、
+         *       也不会出现第二次审批（`approval.waiting`）。这是本条与「取消后重发 follow」
+         *       的本质区别：目标、距离、速度上限全都没有变。
+         *     - 恢复后由该能力自己的运动控制继续执行；`robot_follow` 等能力尚未实现时，
+         *       恢复仅改变任务状态，不宣称已经产生真实速度曲线（R15/R17 未完成）。
+         *     - 已 `running` 时幂等返回；终态任务返回 `409/E_STATE`，不复活。
+         *     - 只对运动任务有效；`soft` 任务返回 `409/E_STATE`。
+         *     - **不需要审批**：没有改变任何被用户确认并绑定过的参数（见 approval-digest 的
+         *       `risk_policy`：降低风险的变更不触发重签，提高风险的才触发）。
+         */
+        post: operations["task_resume"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/events": {
         parameters: {
             query?: never;
@@ -413,7 +476,8 @@ export interface components {
         };
         /**
          * @description 由 robotd 根据设备链路状态与任务状态**统一推导**（单一 derive_mode）：
-         *     链路不可用 → degraded；存在排他运动任务 → moving；否则 idle。
+         *     链路不可用 → degraded；存在**未暂停**的排他运动任务 → moving；否则 idle。
+         *     暂停中的运动任务不产生 `moving`：机器人确实没在动，任务状态由 `Task.state` 表达。
          *     调用方不得自行合成该字段。
          * @enum {string}
          */
@@ -594,7 +658,11 @@ export interface components {
             warnings?: string[];
         };
         /**
-         * @description 任务生命周期：`accepted → running → completed | failed | cancelled`。
+         * @description 任务生命周期：`accepted → running → completed | failed | cancelled`，
+         *     以及 `running → paused → running | cancelled | failed`。
+         *     `paused` **不是终态**：任务不终结、`finished_at` 仍为 null，只是运动速度归零；
+         *     `pause`/`resume` 只对运动任务有效，恢复时不需要重新签发审批凭据
+         *     （没有改变任何被确认过的参数）。
          *     终态不可再转移；任务仅在当前进程生命周期内可查询（不持久化）。
          */
         Task: {
@@ -606,8 +674,14 @@ export interface components {
             progress: number;
             /** @description Unix epoch 毫秒 */
             started_at: number;
-            /** @description 终态时间，Unix epoch 毫秒；未结束为 null */
+            /** @description 终态时间，Unix epoch 毫秒；未结束（含 paused）为 null */
             finished_at?: number | null;
+            /**
+             * @description 仅 `paused` 时出现：本次暂停的自动取消截止时间（Unix epoch 毫秒）。
+             *     到期仍在 paused 会转 `cancelled`（`reason: pause_timeout`），
+             *     **不允许无限期悬着**。其他状态为 null 或不出现。
+             */
+            pause_expires_at?: number | null;
             cancelable: boolean;
             /**
              * @description `motion` 为独占运动任务（同一时刻仅一个）；`soft` 为语音等非运动任务，
@@ -618,8 +692,12 @@ export interface components {
             /** @description 稳定错误码；未失败的任务该字段为 null（见 TaskError）。 */
             error?: components["schemas"]["TaskError"] | null;
         };
-        /** @enum {string} */
-        TaskState: "accepted" | "running" | "completed" | "failed" | "cancelled";
+        /**
+         * @description `paused` 是运动任务的中间态：速度归零、位置保持、任务不终结；
+         *     它既不是 `cancelled` 也不是 `completed`，也不是 `superseded`。
+         * @enum {string}
+         */
+        TaskState: "accepted" | "running" | "paused" | "completed" | "failed" | "cancelled";
         /** @description 稳定错误码，调用方按码分支，**不得解析 message 猜原因**。 */
         TaskError: {
             /** @description 见 `x-robotd-errors` */
@@ -1245,7 +1323,7 @@ export interface operations {
     task_list: {
         parameters: {
             query?: {
-                state?: "accepted" | "running" | "completed" | "failed" | "cancelled";
+                state?: "accepted" | "running" | "paused" | "completed" | "failed" | "cancelled";
             };
             header?: never;
             path?: never;
@@ -1319,6 +1397,95 @@ export interface operations {
             };
             /** @description 无此任务 */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    task_pause: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已受理（任务已转 paused；不代表板侧物理静止证明） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Task"];
+                };
+            };
+            /** @description 无此任务 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 任务状态不允许暂停（终态 / 非运动任务） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 无板侧适配或链路不可用，无法确认速度已归零 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    task_resume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已恢复运行 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Task"];
+                };
+            };
+            /** @description 无此任务 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 任务不在 paused（或已终结），不允许恢复 */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

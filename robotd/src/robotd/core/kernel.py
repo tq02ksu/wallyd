@@ -125,6 +125,15 @@ class EventKernel:
     def replay_window(self) -> int:
         return self._log_max
 
+    def _motion_active(self) -> bool:
+        """是否真有排他运动任务在驱动运动。
+
+        ``paused`` 仍占运动槽位（新运动任务照样 409），但它不产生 ``mode: moving``：
+        ``mode`` 表示身体在不在动，任务粒度由 ``Task.state`` 表达（GH-48 D3）。
+        """
+        task = self._motion_task
+        return task is not None and task.state is not TaskState.PAUSED
+
     def oldest_seq(self) -> int:
         """保留窗口内最早一条的序号；窗口为空时返回 ``last_seq + 1``。"""
         with self._lock:
@@ -189,6 +198,90 @@ class EventKernel:
                 task.state = TaskState.RUNNING
             return task
 
+    def pause_task(self, task_id: str, *, pause_expires_at: int) -> Task:
+        """``running → paused``（GH-48）。
+
+        只对运动任务有效，且只从 ``running`` 进入。幂等：已经 paused 时直接返回，
+        不重复发事件（用户可能连说两次「等一下」）。终态任务不允许暂停——
+        暂停不是复活手段。
+
+        ``pause_expires_at`` 由调用方（app 层）按配置上限算好：内核不持有定时器，
+        也不猜「多久算太久」；到期动作由 app 层显式调用 ``finish()``。
+        """
+        with self._lock:
+            task = self._require_task(task_id)
+            if task.terminal:
+                raise RobotdError(
+                    ErrorCode.STATE,
+                    f"任务 {task_id} 已终结（{task.state.value}），不能暂停",
+                    {"task_id": task_id, "state": task.state.value},
+                )
+            if task.exclusivity is not Exclusivity.MOTION:
+                raise RobotdError(
+                    ErrorCode.STATE,
+                    f"任务 {task_id} 不是运动任务，不能暂停",
+                    {"task_id": task_id, "exclusivity": task.exclusivity.value},
+                )
+            if task.state is TaskState.PAUSED:
+                return task
+            if task.state is not TaskState.RUNNING:
+                raise RobotdError(
+                    ErrorCode.STATE,
+                    f"任务 {task_id} 当前为 {task.state.value}，只有 running 可以暂停",
+                    {"task_id": task_id, "state": task.state.value},
+                )
+            task.state = TaskState.PAUSED
+            task.pause_expires_at = int(pause_expires_at)
+            task._paused_at_mono_ns = time.monotonic_ns()
+            self.state.recompute_mode(has_motion_task=False)
+            self._emit_locked(
+                "task.paused",
+                {
+                    "task_id": task.task_id,
+                    "capability": task.capability,
+                    "pause_expires_at": task.pause_expires_at,
+                },
+            )
+            return task
+
+    def resume_task(self, task_id: str) -> Task:
+        """``paused → running``。幂等：已经 running 时直接返回，不发事件。
+
+        **不新建任务、不重新签发审批凭据**：任务 id 与能力参数都没变，所以这里只改状态。
+        终态任务返回 ``E_STATE``，不允许借 resume 复活。
+        """
+        with self._lock:
+            task = self._require_task(task_id)
+            if task.terminal:
+                raise RobotdError(
+                    ErrorCode.STATE,
+                    f"任务 {task_id} 已终结（{task.state.value}），不能恢复",
+                    {"task_id": task_id, "state": task.state.value},
+                )
+            if task.state is TaskState.RUNNING:
+                return task
+            if task.state is not TaskState.PAUSED:
+                raise RobotdError(
+                    ErrorCode.STATE,
+                    f"任务 {task_id} 当前为 {task.state.value}，只有 paused 可以恢复",
+                    {"task_id": task_id, "state": task.state.value},
+                )
+            started = task._paused_at_mono_ns
+            paused_ms = 0 if started is None else max(0, (time.monotonic_ns() - started) // 1_000_000)
+            task.state = TaskState.RUNNING
+            task.pause_expires_at = None
+            task._paused_at_mono_ns = None
+            self.state.recompute_mode(has_motion_task=True)
+            self._emit_locked(
+                "task.resumed",
+                {
+                    "task_id": task.task_id,
+                    "capability": task.capability,
+                    "paused_ms": paused_ms,
+                },
+            )
+            return task
+
     def set_progress(self, task_id: str, progress: float, **extra: Any) -> None:
         with self._lock:
             task = self._require_task(task_id)
@@ -223,6 +316,10 @@ class EventKernel:
             task.finished_at = now_ms()
             task.error = error
             task.reason = reason
+            # paused 的截止时间属于「这次暂停」，任务终结后必须清掉：
+            # 否则调用方会以为一个 cancelled 任务还有自动取消时刻。
+            task.pause_expires_at = None
+            task._paused_at_mono_ns = None
             if state is TaskState.COMPLETED:
                 task.progress = 1.0
             if self._motion_task is task:
@@ -409,19 +506,19 @@ class EventKernel:
                 state._apply_link(DeviceStatus.READY, p.get("firmware"))
             else:
                 state._apply_device(str(device), "ready")
-            state.recompute_mode(has_motion_task=self._motion_task is not None)
+            state.recompute_mode(has_motion_task=self._motion_active())
             self._reduce_step("device.ready.apply")
 
         elif t == "device.lost":
             device = str(p.get("device"))
             state._apply_device(device, "lost")
-            state.recompute_mode(has_motion_task=self._motion_task is not None)
+            state.recompute_mode(has_motion_task=self._motion_active())
             self._reduce_step("device.lost.apply")
 
         elif t == "device.recovered":
             device = str(p.get("device"))
             state._apply_device(device, "ready")
-            state.recompute_mode(has_motion_task=self._motion_task is not None)
+            state.recompute_mode(has_motion_task=self._motion_active())
             self._reduce_step("device.recovered.apply")
 
         elif t == "device.reset":
