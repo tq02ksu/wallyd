@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape as _xml_escape  # noqa: F401 - 保留给将�
 
 from ..approval import CREDENTIAL_HEADER, enforce_approval
 from ..app import App, resolve_work_dir
-from ..core.announce import APPROVAL_REPEAT, render_announcement
+from ..core.announce import SUPPORTED_KINDS, render_announcement
 from ..core.errors import ErrorCode, RobotdError, wrap_unexpected
 from ..core.safety import StopCause, is_valid_cause
 from ..core.types import Exclusivity, TaskError, TaskState
@@ -352,10 +352,10 @@ def _h_announce(ctx: RouteContext) -> dict[str, Any]:
     if not _APPROVAL_ID.match(approval_id):
         raise RobotdError(ErrorCode.VALIDATION, "approval_id 含非法字符")
     kind = _require_str(body, "kind", max_len=40)
-    if kind != APPROVAL_REPEAT:
+    if kind not in SUPPORTED_KINDS:
         raise RobotdError(ErrorCode.VALIDATION, f"不支持的播报类型 kind={kind!r}")
     action_label = _require_str(body, "action_label", max_len=80)
-    args_summary = _require_str(body, "args_summary", max_len=200)
+    args_summary = _require_str(body, "args_summary", max_len=60)
     try:
         text = render_announcement(kind=kind, action_label=action_label, args_summary=args_summary)
     except ValueError as exc:

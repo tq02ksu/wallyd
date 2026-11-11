@@ -11,7 +11,7 @@
  *   这里只回答「这句话本身是什么意图」。
  */
 
-export type ApprovalIntent = 'approve' | 'deny' | 'none';
+export type ApprovalIntent = 'approve' | 'deny' | 'repeat' | 'none';
 
 export interface ApprovalIntentResult {
   intent: ApprovalIntent;
@@ -45,6 +45,14 @@ const APPROVE_PATTERN = /确认|执行/u;
  */
 const STOP_DENY_PATTERN = /^(停|停止|停下来|停一下|快停|立即停止|紧急停止)$/u;
 
+/**
+ * 「再说一遍 / 没听清 / 什么」是**显式的 repeat 意图**，不是 `none`。
+ *
+ * 归为 `none` 会让确认窗口静默等到过期——用户以为自己要求了重播，机器人却什么都没做。
+ * 它也不推进审批状态：重播不是同意，也不是拒绝。
+ */
+const REPEAT_PATTERN = /再说(?:一遍|一次|一下)|再念(?:一遍|一次|一下)|重复(?:一遍|一次|一下)?|没(?:有)?听清|听不清|你说什么|什么|啥/u;
+
 /** 疑问/不确定：不批准。 */
 const QUESTION_PATTERN = /吗|嘛|[\?？]/u;
 
@@ -69,10 +77,14 @@ export function classifyApprovalUtterance(raw: string): ApprovalIntentResult {
   if (/别(?:确认|执行|动)/u.test(text)) return { intent: 'deny', matched: '别…' };
   if (STOP_DENY_PATTERN.test(text)) return { intent: 'deny', matched: '停' };
 
-  // 2. 疑问句不批准（否定已在上面处理）。
+  // 2. 要求重播：不批准、不拒绝，也不消耗窗口有效期。
+  const repeat = REPEAT_PATTERN.exec(text);
+  if (repeat) return { intent: 'repeat', matched: repeat[0] };
+
+  // 3. 疑问句不批准（否定已在上面处理）。
   if (QUESTION_PATTERN.test(text)) return { intent: 'none' };
 
-  // 3. 明确肯定。
+  // 4. 明确肯定。
   const affirmative = APPROVE_PATTERN.exec(text);
   if (affirmative) return { intent: 'approve', matched: affirmative[0] };
 

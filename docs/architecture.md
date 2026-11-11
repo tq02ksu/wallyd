@@ -877,7 +877,10 @@ MCP 工具携带 `approvalParams: string[]`（字段存在即需审批，`[]` �
 （例如“确认，向前移动三十厘米”），泛化的“好 / 可以”或 ASR 歧义不能批准。ASR 结果作为语音事件送到 agentd，
 与当前待审批动作关联。该提示走 robotd 内部的系统播报路径，不调用需审批的 `robot_speak` 工具，避免审批递归。
 该路径在契约里是 `POST /v1/robot/announce`（`robot_announce`，免审批、标 `x-mcp-exclude`，
-只接受结构化审批字段并由 robotd 用固定模板渲染），详见 [GH-19 设计记录](design/GH-19.md)。
+只接受结构化审批字段并由 robotd 用固定模板渲染）。复述参数的数字、单位与禁用词由
+[`contracts/announce-lexicon.json`](../contracts/announce-lexicon.json) 唯一定义，robotd 与 agentd
+共读一份；确认窗口内用户说「再说一遍 / 没听清」只重播同一条复述，不推进审批状态、不重置窗口，
+且有次数上限。详见 [GH-19 设计记录](design/GH-19.md) 与 [GH-53 设计记录](design/GH-53.md)。
 浏览器调试页只观察审批状态与日志，不提供正常批准按钮，也不是审批流程的依赖。
 
 目标执行顺序：

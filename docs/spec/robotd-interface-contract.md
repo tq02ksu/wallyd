@@ -64,7 +64,9 @@ ADR-0006 仍标记为 proposed；ADR-0007 已于 2026-10-23 接受。
 `operationId` 是公开工具名，所有物理动作的审批属性必须由契约明确表达，不能依赖 Agent 自行判断。
 当前 `robot_speak`、`robot_follow` 和标定写操作标记为需审批；`robot_stop` 与只读操作不需审批。
 `robot_announce` 是审批链路自身的系统播报：**免审批**、只接受结构化审批字段、标 `x-mcp-exclude`
-不进入 Agent 工具面；不能用 `robot_speak` 做审批复述，否则会递归。
+不进入 Agent 工具面；不能用 `robot_speak` 做审批复述，否则会递归。`args_summary` 的数字读法与单位
+由 `contracts/announce-lexicon.json` 定义（中文读法、≤60 字、禁止含糊词/科学计数法），
+超限或含糊的请求在 robotd 返回 `400`，不交给 TTS。
 `motion.estop` **不在 v1 公开面**：硬件/固件急停路径尚未实现并验证前，不得以软件 stop 冒充急停。
 `motion.move`、`motion.rotate`、`robot.capabilities` 等未进入公开 OpenAPI 的能力也不因内部已有代码而被视为本契约已发布。
 
