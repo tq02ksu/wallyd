@@ -1563,6 +1563,24 @@ export class RunService {
     );
   }
 
+  /**
+   * 按 robotd 任务 ID 找回对应 run（安全停止归属用，GH-57）。
+   *
+   * 不按「当前活动 run」猜：语音「停」本身也会建一个 run，猜活动 run 会把
+   * 停止指令自己的 run 取消掉。只有 robotd 明确给出被停止的 task_id 时才能归属。
+   */
+  findRunByRobotTask(robotTaskId: string): { run_id: string; status: string } | null {
+    return this.store.one<{ run_id: string; status: string }>(
+      `SELECT r.run_id, r.status
+         FROM runs r
+         JOIN tool_calls c ON c.run_id = r.run_id
+        WHERE c.robot_task_id = ?
+        ORDER BY c.rowid DESC
+        LIMIT 1`,
+      robotTaskId,
+    );
+  }
+
   // ---------------------------------------------------------------- 语音分发
   /**
    * 一条 ASR final 该不该变成一次 run（#13 验收判据 7/8，口径见 #7）。
@@ -1931,6 +1949,7 @@ export class RunService {
       approvalParams?: string[];
       approvalId?: string | null;
       toolCallId?: string;
+      robotTaskId?: string | null;
     } = {},
   ): string {
     const cid = opts.toolCallId ?? newId('call');
@@ -1949,7 +1968,7 @@ export class RunService {
       state,
       gated ? 1 : 0,
       opts.approvalId ?? null,
-      null,
+      opts.robotTaskId ?? null,
       null,
       null,
       null,

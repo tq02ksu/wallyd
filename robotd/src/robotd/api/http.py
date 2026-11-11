@@ -33,6 +33,7 @@ from ..approval import CREDENTIAL_HEADER, enforce_approval
 from ..app import App, resolve_work_dir
 from ..core.announce import APPROVAL_REPEAT, render_announcement
 from ..core.errors import ErrorCode, RobotdError, wrap_unexpected
+from ..core.safety import StopCause, is_valid_cause
 from ..core.types import Exclusivity, TaskError, TaskState
 from . import events as events_api
 from .ws import WsProtocolError, parse_handshake
@@ -197,11 +198,37 @@ def _h_state(ctx: RouteContext) -> dict[str, Any]:
 def _h_stop(ctx: RouteContext) -> dict[str, Any]:
     # 停止不需要审批，也不等模型：这是安全旁路（契约 /v1/robot/stop）
     body = ctx.body
-    _reject_unknown(body, {"reason"})
+    _reject_unknown(body, {"reason", "cause", "detail"})
+    detail = body.get("detail")
+    if detail is not None and not isinstance(detail, str):
+        raise RobotdError(ErrorCode.VALIDATION, "字段 detail 必须是字符串")
+    cause = body.get("cause")
+    if cause is not None:
+        if not is_valid_cause(cause):
+            raise RobotdError(
+                ErrorCode.VALIDATION,
+                f"未知停止原因：{cause!r}",
+                {"allowed": sorted(c.value for c in StopCause)},
+            )
+        result = _call_capability(
+            ctx.app,
+            "robot.stop",
+            lambda _cap: ctx.app.request_stop(cause=StopCause(str(cause)), detail=detail),
+        )
+        return _stop_result_or_timeout(result)
+
     reason = body.get("reason") if isinstance(body.get("reason"), str) else "stop"
     if reason not in {"stop", "user", "api", "shutdown"}:
         reason = "stop"
-    result = _call_capability(ctx.app, "robot.stop", lambda _cap: ctx.app.request_stop(reason=reason))
+    result = _call_capability(
+        ctx.app,
+        "robot.stop",
+        lambda _cap: ctx.app.request_stop(reason=reason, detail=detail),
+    )
+    return _stop_result_or_timeout(result)
+
+
+def _stop_result_or_timeout(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("board_ack") is False:
         # 契约：未收到板侧应答报 504，不返回 200（调用方不得据此认为机器人仍在动）
         raise RobotdError(
@@ -227,9 +254,28 @@ def _h_task_cancel(ctx: RouteContext) -> dict[str, Any]:
         if task.exclusivity is Exclusivity.MOTION:
             # 运动任务取消必须联动 stop：只改任务表会让电机继续跑
             ctx.app.request_stop(reason="task_cancel")
+        ctx.app.clear_pause_timer(task_id)
         return ctx.app.kernel.finish(task_id, TaskState.CANCELLED, reason="requested").to_public()
 
     return _call_capability(ctx.app, "task.cancel", cancel)
+
+
+def _h_task_pause(ctx: RouteContext) -> dict[str, Any]:
+    """``task_pause``：速度归零、位置保持、任务不终结（GH-48）。
+
+    不要求审批：暂停只降低风险；``resume`` 也不需要重签，因为没有改变任何
+    被用户确认并绑定过的参数。审批门仍由 ``robot_follow`` 等动作端点承担。
+    """
+    task_id = ctx.params["task_id"]
+    _reject_unknown(ctx.body, set())
+    return _call_capability(ctx.app, "task.pause", lambda _cap: ctx.app.pause_task(task_id))
+
+
+def _h_task_resume(ctx: RouteContext) -> dict[str, Any]:
+    """``task_resume``：从 paused 回到 running；不新建任务、不重发动作能力。"""
+    task_id = ctx.params["task_id"]
+    _reject_unknown(ctx.body, set())
+    return _call_capability(ctx.app, "task.resume", lambda _cap: ctx.app.resume_task(task_id))
 
 
 def _h_tasks_list(ctx: RouteContext) -> dict[str, Any]:
@@ -534,6 +580,9 @@ def build_routes(*, debug: bool) -> list[Route]:
         Route("GET", "/v1/tasks", _h_tasks_list, operation_id="task_list"),
         Route("GET", "/v1/tasks/{task_id}", _h_task_get, operation_id="task_get"),
         Route("DELETE", "/v1/tasks/{task_id}", _h_task_cancel, operation_id="task_cancel"),
+        # GH-48：暂停/恢复挂在任务资源下；都不需要审批（没有改变已确认参数）。
+        Route("POST", "/v1/tasks/{task_id}/pause", _h_task_pause, operation_id="task_pause"),
+        Route("POST", "/v1/tasks/{task_id}/resume", _h_task_resume, operation_id="task_resume"),
         Route(
             "POST",
             "/v1/robot/follow",

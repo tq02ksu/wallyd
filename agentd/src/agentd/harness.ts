@@ -466,6 +466,8 @@ export class HarnessExecutor {
           {
             args: isRecord(item.arguments) ? item.arguments : {},
             toolCallId,
+            // 有 task_id 才记录：安全停止归属只认 robotd 给出的任务 id，不猜活动 run。
+            robotTaskId: robotTaskIdOf(item),
           },
         );
         this.updateStep(tx, stepId, ok ? 'done' : 'failed', evidence.slice(0, 500));
@@ -604,4 +606,16 @@ function summarizeToolResult(item: NonNullable<HarnessEvent['item']>): string {
   const structured = (item as { result?: { structured_content?: unknown } }).result?.structured_content;
   if (structured !== undefined && structured !== null) return compactJson(structured).slice(0, 500);
   return '工具调用完成';
+}
+
+/** 工具结果里可能的 robotd task_id（不同 MCP 包装层可能放在 result 或其 structured_content）。 */
+function robotTaskIdOf(item: NonNullable<HarnessEvent['item']>): string | null {
+  const result = (item as { result?: unknown }).result;
+  if (!isRecord(result)) return null;
+  if (typeof result.task_id === 'string' && result.task_id) return result.task_id;
+  const structured = result.structured_content;
+  if (isRecord(structured) && typeof structured.task_id === 'string' && structured.task_id) {
+    return structured.task_id;
+  }
+  return null;
 }

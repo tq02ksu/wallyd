@@ -94,6 +94,11 @@ class Config:
     #: 同样允许配置覆盖（真机复核后按 eval 数据调整，见 docs/design/GH-6.md §4）。
     barge_in_erle_floor_db: float = 20.0
 
+    # --- 任务暂停（GH-48）---
+    #: 暂停自动取消上限（秒）。暂停不是「无限期悬着」：到期仍在 paused 会转 cancelled
+    #: 并尽力播报固定提示。默认 120s 来自 issue；上限 600s 防止配置把失效保护写没。
+    pause_max_seconds: float = 120.0
+
     # --- 常听会话状态机（GH-9 / V06）---
     #: 两轮「听」之间的最小间隔（ms）。由 robotd 侧保证，避免把一口气切成两句；
     #: 与桥的 ``idle_timeout_ms``（桥自己的空闲超时）是两件事。0 = 关闭防抖。
@@ -137,6 +142,8 @@ class Config:
             raise ConfigError("barge_in_erle_margin_db", f"{self.barge_in_erle_margin_db} 超出 [0, 120] dB")
         if not (0.0 <= self.barge_in_erle_floor_db <= 120.0):
             raise ConfigError("barge_in_erle_floor_db", f"{self.barge_in_erle_floor_db} 超出 [0, 120] dB")
+        if not (1.0 <= self.pause_max_seconds <= 600.0):
+            raise ConfigError("pause_max_seconds", f"{self.pause_max_seconds} 超出 [1, 600] 秒")
         if not (0 <= self.inter_utterance_ms <= 5000):
             raise ConfigError("inter_utterance_ms", f"{self.inter_utterance_ms} 超出 [0, 5000]")
         if not self.modeld_url.startswith(("http://", "https://")):
@@ -171,6 +178,7 @@ _ENV_MAP = {
     "ROBOTD_BARGE_IN_ERLE_MARGIN_DB": ("barge_in_erle_margin_db", "float"),
     "ROBOTD_BARGE_IN_ERLE_FLOOR_DB": ("barge_in_erle_floor_db", "float"),
     "ROBOTD_INTER_UTTERANCE_MS": ("inter_utterance_ms", "int"),
+    "ROBOTD_PAUSE_MAX_SECONDS": ("pause_max_seconds", "float"),
 }
 
 _TRUE = {"1", "true", "yes", "on"}

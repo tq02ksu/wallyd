@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from . import SERVICE_NAME, __version__
 from .capabilities import Registry
@@ -37,10 +37,21 @@ from .core.audio_runtime import (
     DEFAULT_BARGE_IN_ERLE_MARGIN_DB,
     AudioRuntime,
 )
+from .core.announce import PAUSE_EXPIRED_TEXT
 from .core.errors import ErrorCode, RobotdError
 from .core.kernel import EventKernel
+from .core.safety import (
+    LEGACY_REASON_TO_CAUSE,
+    STOP_CAUSES,
+    StopCause,
+    StopState,
+    coerce_stop_cause,
+    default_detail,
+    is_valid_cause,
+    legacy_stop_reason,
+)
 from .core.state import RobotStateStore
-from .core.types import DeviceStatus, Exclusivity, TaskState, now_ms
+from .core.types import DeviceStatus, Exclusivity, Task, TaskError, TaskState, now_ms
 
 log = logging.getLogger("robotd.app")
 
@@ -86,6 +97,14 @@ class AppInfo:
     contract_version: int = 1
 
 
+def _timer_schedule(delay_ms: int, fn: Callable[[], None]) -> threading.Timer:
+    """一次性定时（不是轮询）。daemon 线程，进程退出不阻塞。"""
+    timer = threading.Timer(max(0, int(delay_ms)) / 1000.0, fn)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 class App:
     """一个 robotd 进程的全部可观测状态都在这里。"""
 
@@ -96,6 +115,7 @@ class App:
         clock: Clock | None = None,
         board: BoardPort | None = None,
         instance_id: str | None = None,
+        schedule: Callable[[int, Callable[[], None]], Any] | None = None,
     ) -> None:
         self.config = config.validate()
         self.clock: Clock = clock or SystemClock()
@@ -120,6 +140,12 @@ class App:
         self._started = False
         self._stopping = threading.Event()
         self._lock = threading.Lock()
+        #: 暂停到期调度器（可注入假调度器做虚拟时间测试）。
+        self._schedule_fn = schedule or _timer_schedule
+        self._pause_lock = threading.Lock()
+        #: task_id → (token, timer)。token 让旧定时器不会误伤重新暂停的任务。
+        self._pause_timers: dict[str, tuple[int, Any]] = {}
+        self._pause_token_seq = 0
         #: HTTP 传输层（R09）由调用方装配后挂上，便于健康/诊断读取连接数
         self.transport: Any | None = None
 
@@ -269,10 +295,55 @@ class App:
 
     def _board_event(self, event_type: str, payload: dict[str, Any]) -> None:
         """板侧上报的统一入口。"""
+        payload = dict(payload or {})
+        if event_type == "safety.stopped" and str(payload.get("source") or "") == "board":
+            # 板侧主动停机（看门狗/障碍物/越界等）。板侧已经停了，不能再发 stop；
+            # 是否 confirmed 取决于链路是否仍然可用——链路断了就只能诚实报 unknown。
+            reason = str(payload.get("reason") or "watchdog")
+            cause = coerce_stop_cause(reason)
+            if reason not in STOP_CAUSES and reason not in LEGACY_REASON_TO_CAUSE:
+                cause = StopCause.INTERNAL_ERROR
+            confirmed = self.state.link_ready
+            self.request_stop(
+                cause=cause,
+                notify_board=False,
+                state=StopState.CONFIRMED if confirmed else StopState.UNKNOWN,
+                detail=f"板侧主动停机（{reason}）",
+                source="board",
+            )
+            return
+
+        if event_type == "safety.stop_requested":
+            cause_value = payload.get("cause")
+            if is_valid_cause(cause_value):
+                state = payload.get("state")
+                if state not in {s.value for s in StopState}:
+                    state = StopState.CONFIRMED if self.state.link_ready else StopState.UNKNOWN
+                self.request_stop(
+                    cause=StopCause(str(cause_value)),
+                    notify_board=False,
+                    state=StopState(str(state)),
+                    detail=str(payload.get("detail") or default_detail(StopCause(str(cause_value)))),
+                    source="board",
+                )
+                return
+            log.warning("板侧 safety.stop_requested 缺合法 cause：%r", cause_value)
+            return
+
         try:
             self.kernel.emit(event_type, payload)
         except Exception:  # noqa: BLE001
             log.warning("板侧事件 %s 处理失败", event_type, exc_info=True)
+
+        if event_type == "device.lost" and str(payload.get("device")) == "esp32":
+            # 串口/链路掉线：主机侧已经无法确认板侧是否停稳。
+            # 这不是「已停稳」，也不是「失败」——按契约发 unknown/device_lost。
+            self.request_stop(
+                cause=StopCause.DEVICE_LOST,
+                notify_board=False,
+                state=StopState.UNKNOWN,
+                detail="板侧链路丢失，无法确认机器人已停稳",
+            )
 
     def _start_board_link(self) -> None:
         """建立板侧链路。
@@ -299,28 +370,238 @@ class App:
         self.state._apply_link(DeviceStatus.READY, firmware)
         self._register_component("board", self.board)
 
-    def request_stop(self, *, reason: str = "stop") -> dict[str, Any]:
+    # ------------------------------------------------------------ 暂停 / 恢复（GH-48）
+    def _pausable(self, task_id: str) -> Task:
+        """pause 前的状态校验。抛 ``E_STATE``/``E_NO_TASK``，不碰板侧。"""
+        task = self.kernel.get_task(task_id)
+        if task.terminal:
+            raise RobotdError(
+                ErrorCode.STATE,
+                f"任务 {task_id} 已终结（{task.state.value}），不能暂停",
+                {"task_id": task_id, "state": task.state.value},
+            )
+        if task.exclusivity is not Exclusivity.MOTION:
+            raise RobotdError(
+                ErrorCode.STATE,
+                f"任务 {task_id} 不是运动任务，不能暂停",
+                {"task_id": task_id, "exclusivity": task.exclusivity.value},
+            )
+        return task
+
+    def pause_task(self, task_id: str) -> dict[str, Any]:
+        """``POST /v1/tasks/{id}/pause``：速度归零、位置保持、任务不终结。
+
+        顺序是刻意的：**先下发板侧停止，成功后才改任务状态**。反过来的话，
+        板侧下发失败会留下「daemon 以为暂停了、板子还在跑」的中间态（ADR-0003）。
+        """
+        task = self._pausable(task_id)
+        if task.state is TaskState.PAUSED:
+            return task.to_public()  # 幂等：用户可能连说两次「等一下」
+        if task.state is not TaskState.RUNNING:
+            raise RobotdError(
+                ErrorCode.STATE,
+                f"任务 {task_id} 当前为 {task.state.value}，只有 running 可以暂停",
+                {"task_id": task_id, "state": task.state.value},
+            )
+        if self.board is None:
+            raise RobotdError(
+                ErrorCode.UNAVAILABLE,
+                "无板侧适配，无法确认速度已归零；不进入 paused",
+                {"task_id": task_id},
+            )
+        if not self.state.link_ready:
+            # 链路不通时不能假装暂停：任务必须提交明确终态，调用方才知道要重新处理。
+            self.kernel.finish(
+                task_id,
+                TaskState.FAILED,
+                error=TaskError("E_LINK", "板侧链路不可用，无法下发暂停停止"),
+                reason="lost_link",
+            )
+            raise RobotdError(
+                ErrorCode.LINK,
+                "板侧链路不可用，无法确认速度已归零；任务已按 failed 收尾",
+                {"task_id": task_id},
+            )
+        try:
+            self.board.notify("stop", {})
+        except Exception as exc:  # noqa: BLE001
+            self.kernel.finish(
+                task_id,
+                TaskState.FAILED,
+                error=TaskError("E_LINK", f"暂停前下发停止失败：{exc}"),
+                reason="lost_link",
+            )
+            raise RobotdError(
+                ErrorCode.LINK,
+                f"暂停前下发停止失败：{exc}",
+                {"task_id": task_id},
+            ) from exc
+
+        expires = self.clock.now_ms() + int(self.config.pause_max_seconds * 1000)
+        paused = self.kernel.pause_task(task_id, pause_expires_at=expires)
+        try:
+            self._arm_pause_timer(task_id)
+        except Exception as exc:  # noqa: BLE001
+            # 不变量：paused 一定有截止时间。定时器都排不上就不能留一个无限期暂停，
+            # 按 failed 收尾并如实报内部故障，调用方可以再试。
+            log.error("暂停定时器无法建立，任务按内部故障收尾：%s", task_id, exc_info=True)
+            self.kernel.finish(
+                task_id,
+                TaskState.FAILED,
+                error=TaskError("E_INTERNAL", "无法为暂停建立超时定时器"),
+                reason="internal",
+            )
+            raise RobotdError(
+                ErrorCode.INTERNAL,
+                "无法为暂停建立超时定时器，任务已按 failed 收尾",
+                {"task_id": task_id},
+            ) from exc
+        # safety.stopped 只表示停止动作已发生，不是物理静止证明（契约口径）。
+        self.kernel.emit("safety.stopped", reason="task_pause", source="host", task_id=task_id)
+        return paused.to_public()
+
+    def resume_task(self, task_id: str) -> dict[str, Any]:
+        """``POST /v1/tasks/{id}/resume``：从 paused 回到 running。
+
+        **不新建任务、不重发动作能力、不重签审批凭据**：任务 id 与参数都没变。
+
+        链路不通时拒绝恢复并**保持 paused**：恢复意味着「身体可以继续动」，
+        板侧联系不上就不能声称已经恢复。任务不因此变成无限期 running——
+        这次暂停的截止时间还在，到期会照常转 ``cancelled``。
+        """
+        task = self.kernel.get_task(task_id)
+        if task.state is TaskState.PAUSED and not self.state.link_ready:
+            raise RobotdError(
+                ErrorCode.LINK,
+                "板侧链路不可用，任务保持 paused（到暂停上限会自动取消）",
+                {"task_id": task_id},
+            )
+        resumed = self.kernel.resume_task(task_id)
+        self.clear_pause_timer(task_id)
+        return resumed.to_public()
+
+    def _arm_pause_timer(self, task_id: str) -> None:
+        with self._pause_lock:
+            self._pause_token_seq += 1
+            token = self._pause_token_seq
+            timer = self._schedule_fn(
+                int(self.config.pause_max_seconds * 1000),
+                lambda: self._on_pause_expired(task_id, token),
+            )
+            self._pause_timers[task_id] = (token, timer)
+
+    def clear_pause_timer(self, task_id: str) -> None:
+        """撤销某任务的暂停到期定时（resume / stop / cancel / 终结时调用）。幂等。"""
+        with self._pause_lock:
+            entry = self._pause_timers.pop(task_id, None)
+        if entry is None:
+            return
+        cancel = getattr(entry[1], "cancel", None)
+        if cancel is not None:
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 - 取消失败不影响状态；到期回调会自查状态
+                log.debug("撤销暂停定时失败 %s", task_id, exc_info=True)
+
+    def _on_pause_expired(self, task_id: str, token: int) -> None:
+        """暂停超过上限：转 cancelled 并尽力播报固定提示。
+
+        自查两个条件再动手：定时器仍是这一代（token 相同），且任务确实还在 paused。
+        这样 resume / stop / cancel 的竞态不会让过期回调取消一个已经恢复的任务。
+        终态转移本身由 ``kernel.expire_paused_task`` 在同一把锁里完成——上面这次读取只是
+        「值得播报吗」的预检，绝不用它来做状态决定。
+        """
+        with self._pause_lock:
+            entry = self._pause_timers.get(task_id)
+            if entry is None or entry[0] != token:
+                return
+            self._pause_timers.pop(task_id, None)
+        try:
+            task = self.kernel.get_task(task_id)
+        except RobotdError:
+            return
+        if task.state is not TaskState.PAUSED:
+            return
+        # 到期收尾前再下发一次停止：任务要转终态了，不能只改任务表。
+        # 板侧早已处于 stop 状态时这条是幂等的；链路不通由看门狗兜底。
+        if self.board is not None and self.state.link_ready:
+            try:
+                self.board.notify("stop", {})
+            except Exception:  # noqa: BLE001
+                log.warning("暂停超时前下发停止失败 %s", task_id, exc_info=True)
+        announced = self._announce_pause_expired()
+        try:
+            expired = self.kernel.expire_paused_task(task_id, announced=announced)
+        except RobotdError:
+            return
+        if not expired:
+            # resume（或 stop / cancel）正好在这个窗口里先到：任务的状态转移已经赢了，
+            # 这里什么都不改。代价只是那句固定提示可能已经播出去（比误取消任务轻）。
+            log.debug("暂停到期时任务已不在 paused，跳过收尾：%s", task_id)
+
+    def _announce_pause_expired(self) -> bool:
+        """尽力播报「等太久了，我先停下了」。
+
+        返回是否真的交给了 TTS：音频桥不可用时返回 False，由 ``task.pause_expired.announced``
+        如实记录——**不伪造已播报**。
+        """
+        try:
+            resp = self.audio.new_response(task_id=None, kind="pause_expired")
+            self.audio.speak(resp, text=PAUSE_EXPIRED_TEXT)
+            return True
+        except Exception:  # noqa: BLE001
+            log.warning("暂停超时提示未能播报（音频桥不可用）", exc_info=True)
+            return False
+
+    def request_stop(
+        self,
+        *,
+        reason: str = "stop",
+        cause: str | StopCause | None = None,
+        detail: str | None = None,
+        state: StopState | str | None = None,
+        notify_board: bool = True,
+        source: str = "host",
+    ) -> dict[str, Any]:
         """有序停止的**本地部分**。
 
         板侧下发在 R08；这里先把「停止」这件事在状态与任务表上落实，
         并明确报告是否真的联系到了板侧——**不把「本地已停」说成「物理已停」**。
 
+        每次停止都发两条事件：``safety.stopped``（动作发生）与
+        ``safety.stop_requested``（结构化原因 + 确认状态）。``cause`` 是唯一判据；
+        ``detail`` 只供人读。板侧已主动停机时用 ``notify_board=False``，避免反向再发 stop。
+
         系统播报（审批复述）免审批，但**必须能被 stop 打断**：用户说「停」要立刻停，
         不能等桥回应，也不能因为桥不可用就静默成功。``abort_response`` 会立刻发出
         ``speech.tts_cancelled``（带 approval_id），agentd 据此不会开启确认窗口。
         """
+        if cause is not None:
+            if isinstance(cause, StopCause):
+                stop_cause = cause
+            elif is_valid_cause(cause):
+                stop_cause = StopCause(str(cause))
+            else:
+                raise RobotdError(ErrorCode.VALIDATION, f"未知停止原因：{cause!r}")
+        else:
+            stop_cause = coerce_stop_cause(reason)
         self.audio.abort_response("stop")
         stopped_motion = 0
+        stopped_task_id: str | None = None
         for task in self.kernel.list_tasks():
             if task.exclusivity is Exclusivity.MOTION and not task.terminal:
-                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason="stop")
+                # stop 仍能打断 paused（它仍是取消，语义不变）；定时器一并撤销。
+                self.clear_pause_timer(task.task_id)
+                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason=stop_cause.value)
                 stopped_motion += 1
+                if stopped_task_id is None:
+                    stopped_task_id = task.task_id
             elif task.capability in {"robot.speak", "robot.announce"} and not task.terminal:
                 # 兜底：没有活跃 response 的播报任务（例如桥未接上）也必须收尾为 cancelled，
                 # 不能留在 running 让调用方以为还在念。
-                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason="stop")
+                self.kernel.finish(task.task_id, TaskState.CANCELLED, reason=stop_cause.value)
         board_ack: bool | None = None
-        if self.board is not None:
+        if notify_board and self.board is not None:
             if self.state.link_ready:
                 try:
                     self.board.notify("stop", {})
@@ -332,14 +613,70 @@ class App:
                 # None 只用于「没有板侧适配」这一种情况（仿真/骨架期），
                 # 否则调用方会把「没联系上」误读成「已停稳」。
                 board_ack = False
-        self.kernel.emit("safety.stopped", reason=reason, source="host")
+
+        if state is not None:
+            stop_state = StopState(state)
+        elif not notify_board:
+            # 没有向板侧发 stop 的路径（板侧已停 / 链路已断）：默认只能是 unknown，
+            # 除非调用方明确给出 confirmed。绝不默认 confirmed。
+            stop_state = StopState.UNKNOWN
+        elif board_ack is True:
+            stop_state = StopState.CONFIRMED
+        elif board_ack is False:
+            stop_state = StopState.UNKNOWN
+        else:
+            stop_state = StopState.REQUESTED
+
+        if stop_cause is StopCause.DEVICE_LOST:
+            # 设备掉线时没有可信的板侧确认通道：无论调用方怎么传，都只能是 unknown。
+            stop_state = StopState.UNKNOWN
+
+        if detail is None:
+            detail = default_detail(stop_cause)
+            if stopped_motion:
+                detail = f"{detail}（终止 {stopped_motion} 个运动任务）"
+
+        self.kernel.emit("safety.stopped", reason=legacy_stop_reason(stop_cause), source=source)
+        self._emit_stop_requested(stop_cause, stop_state, detail, stopped_task_id)
         return {
             "ok": True,
             "stopped": True,
             "at": self.clock.now_ms(),
             "board_ack": board_ack,
             "stopped_tasks": stopped_motion,
+            "cause": stop_cause.value,
+            "state": stop_state.value,
         }
+
+    def _emit_stop_requested(
+        self,
+        cause: StopCause,
+        state: StopState,
+        detail: str,
+        task_id: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "cause": cause.value,
+            "state": state.value,
+            "detail": detail,
+        }
+        if task_id:
+            payload["task_id"] = task_id
+        self.kernel.emit("safety.stop_requested", payload)
+
+    def report_safety_stop(self, *, cause: str | StopCause, detail: str | None = None) -> dict[str, Any]:
+        """安全判定模块（Nav/感知/参数校验）的**唯一**停机交入口。
+
+        判定仍发生在本进程内；agentd 不参与。当前尚无完整 Nav，测试用本方法或
+        假传输注入板侧事件来覆盖尚不能自然触发的 cause。
+        """
+        if isinstance(cause, StopCause):
+            stop_cause = cause
+        elif is_valid_cause(cause):
+            stop_cause = StopCause(str(cause))
+        else:
+            raise RobotdError(ErrorCode.VALIDATION, f"未知停止原因：{cause!r}")
+        return self.request_stop(cause=stop_cause, detail=detail)
 
     def attach_audio_bridge(self, app_path: Path, *, locale: str = "zh_CN", aec: bool = False) -> None:
         """装配常驻语音桥（R14 / ADR-0011）。
@@ -431,7 +768,11 @@ class App:
             return
         self._stopping.set()
         try:
-            self.request_stop(reason="startup" if not self._started else "stop")
+            # 有序关闭也是“桥/宿主退出”这一类停止；reason=startup 的旧语义不再需要。
+            self.request_stop(
+                cause=StopCause.BRIDGE_EXIT,
+                detail="robotd 正在关闭，停止运动",
+            )
         except Exception:  # noqa: BLE001
             log.warning("关机停止路径失败", exc_info=True)
         self._close_components()

@@ -36,6 +36,20 @@ info:
     可执行实现：`contracts/tools/approval-digest.mjs` 与
     `robotd/src/robotd/approval_digest.py`。
 
+    ### 什么时候需要重新签发凭据
+
+    摘要规则本身只描述「怎么算」，不描述「什么时候必须重算」。风险方向的判据是：
+
+    - **降低风险的参数变更不触发重签**：降速（`max_speed_mps` 调小）、缩短距离/时长
+      （`stop_width_ratio` 更接近停止距离、`max_seconds` 调小）。凭据里的
+      `args_digest` 只绑定 `params` 声明的字段，这些字段通常不在审批参数里；
+      即使调用方要求重算，也没有新的「用户确认内容」需要被听见。
+    - **提高风险的参数变更必须重签**：加速、延长距离/时长、换目标
+      （`target_track_id` / `target`）。它们改变了用户确认过的语义。
+
+    机器可读说明见 `contracts/approval-digest.json` 的 `risk_policy`；
+    这条策略不改变摘要算法，也不改变已有凭据的校验方式。
+
     ## 一次性授权凭据的传输
 
     需审批的端点要求请求头 `X-Wally-Approval`（见 `components.parameters.ApprovalCredential`）。
@@ -389,7 +403,36 @@ paths:
         不保证断开驱动使能。响应只表示访问已受理，**不表示物理静止**（板侧应答 ≠ 物理静止证明）。
         是否连带取消语音/音频任务见 `x-cancels`。超时未收到板侧应答时返回 504/E_TIMEOUT，
         调用方不得据此认为机器人仍在运动。
+        可选的 `cause` 是结构化停止来源（写入 `safety.stop_requested.cause`）；
+        缺省或旧客户端只传 `reason` 时由 robotd 归一成 `user_stop_api`。
+        `detail` 只作人读补充，调用方判据必须读 `cause`。
       x-cancels: [motion, speech]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                cause:
+                  type: string
+                  enum:
+                    - user_voice
+                    - user_stop_api
+                    - obstacle
+                    - watchdog_timeout
+                    - param_out_of_range
+                    - observation_stale
+                    - device_lost
+                    - bridge_exit
+                    - internal_error
+                reason:
+                  type: string
+                  description: 旧字段，向后兼容；已知值映射为 cause，未知值按 user_stop_api。
+                detail:
+                  type: string
+                  description: 人读补充，不参与任何判据。
       responses:
         "200":
           description: 已受理停止
@@ -411,6 +454,23 @@ paths:
                     type: boolean
                     nullable: true
                     description: 是否收到板侧 stop 应答；未收到为 false（此时应报 504，不返回 200）
+                  cause:
+                    type: string
+                    enum:
+                      - user_voice
+                      - user_stop_api
+                      - obstacle
+                      - watchdog_timeout
+                      - param_out_of_range
+                      - observation_stale
+                      - device_lost
+                      - bridge_exit
+                      - internal_error
+                    description: 结构化停止原因，与 safety.stop_requested.cause 一致
+                  state:
+                    type: string
+                    enum: [requested, confirmed, unknown]
+                    description: confirmed 仅表示板侧应答了停止；unknown 表示无法确认停稳
         "504":
           description: 板侧未在时限内应答（不表示未执行）
           content:
@@ -429,7 +489,7 @@ paths:
           required: false
           schema:
             type: string
-            enum: [accepted, running, completed, failed, cancelled]
+            enum: [accepted, running, paused, completed, failed, cancelled]
       responses:
         "200":
           description: OK
@@ -487,6 +547,108 @@ paths:
                 $ref: "#/components/schemas/Task"
         "404":
           description: 无此任务
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/tasks/{task_id}/pause:
+    post:
+      operationId: task_pause
+      tags: [tasks]
+      summary: 暂停运动任务：速度归零、位置保持、任务不终结（幂等）
+      description: |
+        语义是「先别动了，等我一下」，**不是停止、不是取消、不是静音**：
+
+        - 先把有序停止下发板侧（速度归零），成功后才把任务转 `paused`；
+          板侧联系不上时**不进入 paused**——不允许「daemon 挂着、板子以为在跑」。
+        - `paused` 期间任务仍在任务表里，运动槽位仍被占用（新运动任务仍 `409/E_BUSY`）；
+          `GET /v1/tasks/{id}` 的 `state` 为 `paused`，`finished_at` 保持 null。
+        - 事件流发 `task.paused`（不是 `task.completed`/`task.cancelled`）。
+        - 暂停有上限（robotd 配置 `pause_max_seconds`，默认 120s）；到期仍在 paused
+          会发 `task.pause_expired` 并转 `cancelled`（`reason: pause_timeout`），
+          同时尽力播报固定提示。**不允许无限期悬着**。
+        - 只对运动任务有效；`soft` 任务（语音等）返回 `409/E_STATE`。
+        - 幂等：已 `paused` 时再调用返回当前任务，不重复发事件。
+        - **不需要审批**：暂停只降低风险；恢复也不需要重新签发凭据（见 resume）。
+        - `robot_stop` 仍能打断 paused（它仍是取消），语义不变。
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 已受理（任务已转 paused；不代表板侧物理静止证明）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          description: 无此任务
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 任务状态不允许暂停（终态 / 非运动任务）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: 无板侧适配或链路不可用，无法确认速度已归零
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/tasks/{task_id}/resume:
+    post:
+      operationId: task_resume
+      tags: [tasks]
+      summary: 从 paused 恢复原任务（幂等；不重新签发审批凭据）
+      description: |
+        从 `paused` 回到 `running`，**不新建任务、不重新调用任何动作能力**：
+
+        - 任务 id 不变，事件流只发 `task.resumed`，不会出现第二个 `task.started`、
+          也不会出现第二次审批（`approval.waiting`）。这是本条与「取消后重发 follow」
+          的本质区别：目标、距离、速度上限全都没有变。
+        - 恢复后由该能力自己的运动控制继续执行；`robot_follow` 等能力尚未实现时，
+          恢复仅改变任务状态，不宣称已经产生真实速度曲线（R15/R17 未完成）。
+        - 已 `running` 时幂等返回；终态任务返回 `409/E_STATE`，不复活。
+        - 只对运动任务有效；`soft` 任务返回 `409/E_STATE`。
+        - 板侧链路不可用时返回 `503/E_LINK` 且**保持 `paused`**：恢复意味着「身体可以继续动」，
+          联系不上板侧就不能声称已恢复。任务不会因此变成无限期 running——暂停截止时间照旧，
+          到期仍会转 `cancelled`（`reason: pause_timeout`）。
+        - **不需要审批**：没有改变任何被用户确认并绑定过的参数（见 approval-digest 的
+          `risk_policy`：降低风险的变更不触发重签，提高风险的才触发）。
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 已恢复运行
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          description: 无此任务
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 任务不在 paused（或已终结），不允许恢复
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: 板侧链路不可用；任务保持 paused，由暂停上限负责收尾
           content:
             application/json:
               schema:
@@ -665,7 +827,8 @@ components:
       type: string
       description: |
         由 robotd 根据设备链路状态与任务状态**统一推导**（单一 derive_mode）：
-        链路不可用 → degraded；存在排他运动任务 → moving；否则 idle。
+        链路不可用 → degraded；存在**未暂停**的排他运动任务 → moving；否则 idle。
+        暂停中的运动任务不产生 `moving`：机器人确实没在动，任务状态由 `Task.state` 表达。
         调用方不得自行合成该字段。
       enum: [idle, moving, degraded]
     Pose:
@@ -943,7 +1106,11 @@ components:
     Task:
       type: object
       description: |
-        任务生命周期：`accepted → running → completed | failed | cancelled`。
+        任务生命周期：`accepted → running → completed | failed | cancelled`，
+        以及 `running → paused → running | cancelled | failed`。
+        `paused` **不是终态**：任务不终结、`finished_at` 仍为 null，只是运动速度归零；
+        `pause`/`resume` 只对运动任务有效，恢复时不需要重新签发审批凭据
+        （没有改变任何被确认过的参数）。
         终态不可再转移；任务仅在当前进程生命周期内可查询（不持久化）。
       required: [task_id, capability, state, progress, started_at, cancelable]
       properties:
@@ -965,7 +1132,14 @@ components:
         finished_at:
           type: integer
           nullable: true
-          description: 终态时间，Unix epoch 毫秒；未结束为 null
+          description: 终态时间，Unix epoch 毫秒；未结束（含 paused）为 null
+        pause_expires_at:
+          type: integer
+          nullable: true
+          description: |
+            仅 `paused` 时出现：本次暂停的自动取消截止时间（Unix epoch 毫秒）。
+            到期仍在 paused 会转 `cancelled`（`reason: pause_timeout`），
+            **不允许无限期悬着**。其他状态为 null 或不出现。
         cancelable:
           type: boolean
         exclusivity:
@@ -985,7 +1159,10 @@ components:
             - type: "null"
     TaskState:
       type: string
-      enum: [accepted, running, completed, failed, cancelled]
+      description: |
+        `paused` 是运动任务的中间态：速度归零、位置保持、任务不终结；
+        它既不是 `cancelled` 也不是 `completed`，也不是 `superseded`。
+      enum: [accepted, running, paused, completed, failed, cancelled]
     TaskError:
       type: object
       description: |
