@@ -9,6 +9,12 @@
 // `Sources/BridgeCore/Generated.swift` before `swift test`. That keeps the
 // production file as the only source of truth: a rename or a changed signature
 // makes the extraction fail, which turns the lane red.
+//
+// GH-55 adds a second copy of the same generated file in
+// `Sources/BridgeCoreHarness`, compiled with `-D WALLY_AUDIO_TEST_HARNESS`.
+// The two test targets therefore execute the real `classifyServeCommand` both
+// ways: the default build must not know the harness commands, the flagged build
+// must. No audio device is touched by either target.
 import PackageDescription
 
 let package = Package(
@@ -25,6 +31,16 @@ let package = Package(
             name: "BridgeCoreTests",
             dependencies: ["BridgeCore"],
             path: "Tests/BridgeCoreTests"
+        ),
+        .target(
+            name: "BridgeCoreHarness",
+            path: "Sources/BridgeCoreHarness",
+            swiftSettings: [.define("WALLY_AUDIO_TEST_HARNESS")]
+        ),
+        .testTarget(
+            name: "BridgeCoreHarnessTests",
+            dependencies: ["BridgeCoreHarness"],
+            path: "Tests/BridgeCoreHarnessTests"
         ),
     ]
 )

@@ -158,6 +158,28 @@ console.log('— 会话上下文只传给 Harness，不进 run.prompt 与事件'
   if (withCtx.run_id) svc.cancelRun(withCtx.run_id, '测试收尾');
 }
 
+console.log('— GH-12：上一轮是 robot_follow 时，「慢一点」走 fast(slow_down)');
+{
+  const before = executed.length;
+  const res = submitRunRequest(deps, {
+    prompt: '慢一点',
+    previous: { capability: 'robot_follow', args: { target_track_id: 'abc' } },
+  });
+  check('route=fast', res.route === 'fast', JSON.stringify(res));
+  check('fast_rule=slow_down@1', res.fast_rule === 'slow_down@1', String(res.fast_rule));
+  check(
+    '下发 robot_follow 并沿用上一轮目标',
+    executed.at(-1)?.capability === 'robot_follow' && executed.at(-1)?.args?.target_track_id === 'abc',
+    JSON.stringify(executed.at(-1)),
+  );
+  check('速度上限折半', executed.at(-1)?.args?.max_speed_mps === 0.075, JSON.stringify(executed.at(-1)?.args));
+  check('内部 fast_args 供装配层记回合上下文', res.fast_args?.target_track_id === 'abc', JSON.stringify(res.fast_args));
+  check('这一句没有额外交给 Harness', executed.length === before + 1, String(executed.length - before));
+  const row = store.one('SELECT prompt FROM runs WHERE run_id = ?', res.run_id);
+  check('run.prompt 仍是原句', row.prompt === '慢一点', row.prompt);
+  if (res.run_id) svc.cancelRun(res.run_id, '测试收尾');
+}
+
 store.close();
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

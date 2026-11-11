@@ -282,6 +282,8 @@ export async function createRuntime(
         idempotency_key: `asr:${utterance_id}`,
         // 上下文只给 Harness 消歧；`prompt` 字段保持原句，不落库、不进事件。
         context: conversation.promptBlock(),
+        // 同回合上一轮的结论只给规则的消歧判断（如「慢一点」沿用跟随目标与速度）。
+        previous: conversation.previousRun(Date.now()),
       });
       // 回合关联：run 建好之后才拿得到 route/fast_rule，记回上下文供下一句使用。
       if (turn_id && res.run_id) {
@@ -289,6 +291,7 @@ export async function createRuntime(
           capability: capabilityForResult(res),
           fast_rule: res.fast_rule ?? null,
           prompt: text,
+          args: res.fast_args ?? {},
         });
       }
       return res;
@@ -505,12 +508,14 @@ export async function createRuntime(
 
       // 「一句话 → run 还是澄清」的决策在 run-request.ts：
       // 澄清不建 run（否则会留下永不推进的活动任务），受保护的 STOP 不受忙限制。
-      return submitRunRequest(buildRunRequestDeps(), {
+      // `fast_args` 是装配层内部字段（记回合上下文用），不属于 `RunAccepted` 契约响应。
+      const { fast_args: _fastArgs, ...accepted } = submitRunRequest(buildRunRequestDeps(), {
         prompt,
         session_id: sessionId,
         source,
         idempotency_key: idem,
       });
+      return accepted;
     }),
   );
 

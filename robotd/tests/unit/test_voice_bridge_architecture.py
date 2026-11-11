@@ -33,7 +33,10 @@ def test_single_binary_compiles_both_sources():
     build = BUILD.read_text(encoding="utf-8")
     assert "mac_speech_pipeline.swift" in build
     assert 'cat "$SRC" "$PIPELINE" > "$TMP_BUILD/main.swift"' in build
-    assert 'swiftc -O -D VOICE_PIPELINE -o "$OUT/Contents/MacOS/AudioBridge"' in build
+    # GH-55: the test-only harness must be opt-in; the default build has no
+    # -D WALLY_AUDIO_TEST_HARNESS on the swiftc line.
+    assert 'swiftc -O -D VOICE_PIPELINE $HARNESS_DEFINE -o "$OUT/Contents/MacOS/AudioBridge"' in build
+    assert 'HARNESS_DEFINE=""' in build
 
 
 def test_engine_flags_accept_system_and_sherpa():
@@ -84,11 +87,14 @@ def test_aec_and_tap_timing_are_reported():
 
 def test_command_surface_is_four_plus_lifecycle_commands():
     text = source()
-    switch = text.split('switch (obj["cmd"] as? String) ?? "" {', 1)[1].split("}", 1)[0]
-    commands = set(re.findall(r'case "([a-z_]+)"', switch))
+    # The classifier lives in mac_speech.swift (shared pure core), not the pipeline.
+    entry = ENTRY.read_text(encoding="utf-8")
+    classifier = entry.split("func classifyServeCommand(", 1)[1].split("\n}\n", 1)[0]
+    default = re.sub(r"#if.*?#endif", "", classifier, flags=re.S)
+    commands = set(re.findall(r'case "([a-z_]+)"', default))
     assert commands == {"listen", "stop", "speak", "stop_speak", "mute", "unmute", "status", "quit"}
-    assert 'case "play"' not in switch
-    assert 'case "record"' not in switch
+    assert 'case "play"' not in text
+    assert 'case "record"' not in text
 
 
 def test_bridge_does_not_suppress_vad_during_playback():

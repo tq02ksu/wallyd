@@ -161,6 +161,39 @@ console.log('— 提示块措辞：capability 与规则可读');
   check('harness 回合写成「交给模型理解」', ctx2.promptBlock().includes('交给模型理解'), ctx2.promptBlock());
 }
 
+console.log('— previousRun：只给同回合上一轮的结论（GH-12 路由消歧用）');
+{
+  const ctx = new ConversationContext();
+  check('空上下文没有上一轮', ctx.previousRun(0) === null);
+  const a = ctx.advance(0);
+  ctx.note(a.turn_id, {
+    capability: 'robot_follow',
+    fast_rule: 'follow_me@1',
+    prompt: '跟着我走 target_track_id:abc',
+    args: { target_track_id: 'abc' },
+  });
+  const prev = ctx.previousRun(0);
+  check('返回上一轮能力', prev?.capability === 'robot_follow', JSON.stringify(prev));
+  check('返回上一轮参数', prev?.args?.target_track_id === 'abc', JSON.stringify(prev));
+  check('不返回用户原文', !JSON.stringify(prev).includes('跟着我走'), JSON.stringify(prev));
+  check('超过 30s 视为过期 → null', ctx.previousRun(30_001) === null);
+
+  // 参数净化：只留标量、字符串有界、键数有界。
+  const b = ctx.advance(31_000); // 过期后开新回合
+  check('新回合还没有上一轮', ctx.previousRun(31_000) === null);
+  const big = { target_track_id: 'y'.repeat(200), flag: true, n: 0.2, nested: { a: 1 }, list: [1, 2] };
+  for (let i = 0; i < 12; i += 1) big[`k${i}`] = i;
+  ctx.note(b.turn_id, { capability: 'robot_follow', fast_rule: null, prompt: 'x', args: big });
+  const sanitized = ctx.previousRun(31_000)?.args ?? {};
+  check('长字符串被截断', String(sanitized.target_track_id ?? '').length <= 64, JSON.stringify(sanitized));
+  check('对象/数组参数被丢弃', !('nested' in sanitized) && !('list' in sanitized), JSON.stringify(sanitized));
+  check('布尔与数字保留', sanitized.flag === true && sanitized.n === 0.2, JSON.stringify(sanitized));
+  check('参数个数有界', Object.keys(sanitized).length <= 8, String(Object.keys(sanitized).length));
+
+  ctx.end();
+  check('end 后没有上一轮', ctx.previousRun(31_000) === null);
+}
+
 console.log('— 可配置边界');
 {
   const ctx = new ConversationContext({ idleMs: 5_000, maxTurns: 2, promptTurns: 1 });

@@ -34,8 +34,8 @@ status: draft
 
 | 文件 | lane 里的动作 | 说明 |
 | --- | --- | --- |
-| `scripts/mac_speech.swift` | `swiftc -parse` + 抽纯逻辑跑 XCTest | `EnergyVAD` / `splitSentences` 与设备无关，被抽进测试包 |
-| `scripts/mac_speech_pipeline.swift` | `swiftc -parse` | 单文件脚本，依赖 `mac_speech.swift` 的顶层代码，不能单独编译；真编译仍走 `scripts/build_audio_bridge.sh` |
+| `scripts/mac_speech.swift` | `swiftc -parse` + 抽纯逻辑跑 XCTest | `EnergyVAD` / `splitSentences` / `ServeCommand` + `classifyServeCommand` 与设备无关，被抽进测试包（命令面按 GH-55 编两份） |
+| `scripts/mac_speech_pipeline.swift` | `swiftc -parse`（默认 + `-D WALLY_AUDIO_TEST_HARNESS`） | 单文件脚本，依赖 `mac_speech.swift` 的顶层代码，不能单独编译；真编译仍走 `scripts/build_audio_bridge.sh` |
 | `scripts/speech_fixture.swift` | `-parse` + `swiftc -O` 真编译 | 只用 AVFAudio 的合成 API；CI 只编译，不合成（不占喇叭） |
 | `scripts/uvc_capture.swift` | `swiftc -parse` | 相机抓帧，运行需要设备与 TCC 授权，CI 不运行 |
 | `src/tools/cam_list.swift` | `-parse` + `swiftc -O` 真编译 | 只枚举设备，编译不需要设备 |
@@ -49,7 +49,7 @@ status: draft
 | --- | --- | --- |
 | ✅ 可跑 | 全部 Swift 的语法/类型解析（`swiftc -parse`） | 进 `apple` lane |
 | ✅ 可跑 | 三个自包含目标 `swiftc -O` 真编译（`speech_fixture` / `cam_list` / `vision_bench`） | 进 `apple` lane |
-| ✅ 可跑 | 纯逻辑单测：能量 VAD 去抖/迟滞/端点、TTS 分句与限长（XCTest） | 进 `apple` lane |
+| ✅ 可跑 | 纯逻辑单测：能量 VAD 去抖/迟滞/端点、TTS 分句与限长，以及 GH-55 命令面（默认构建不认 harness 命令、`-D WALLY_AUDIO_TEST_HARNESS` 才认）——同一份抽取源码编译两次（XCTest） | 进 `apple` lane |
 | ✅ 可跑 | AEC3 离线链路的**编译**（`build_aec3.sh` + 链接 `aec3_eval`） | 进 `apple` lane；源码未入库时 `build_aec3.sh` fail-closed，lane 记为 SKIP（附 `vendor-aec3.sh` 提示） |
 | ✅ 可跑 | 契约检查、文档链接检查、源码 lint | 仍由 Linux `static` / `robotd` lane 跑，不在 mac 上重复 |
 | ⚠️ 可能可跑 | 虚拟音频设备（BlackHole 等）上的闭环：TTS 出到虚拟设备，再回灌给桥 | **本轮只调研，不改代码**；问题清单与验证方案见 §4 |
@@ -165,7 +165,8 @@ bash scripts/ci/check-apple.sh
 # 只跑 XCTest（先抽取纯逻辑）
 python3 scripts/apple/extract_bridge_core.py \
   --source scripts/mac_speech.swift \
-  --out scripts/apple/Sources/BridgeCore/Generated.swift
+  --out scripts/apple/Sources/BridgeCore/Generated.swift \
+  --out-harness scripts/apple/Sources/BridgeCoreHarness/Generated.swift
 swift test --package-path scripts/apple
 ```
 

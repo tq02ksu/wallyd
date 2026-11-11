@@ -42,6 +42,13 @@ export interface RunRequestInput {
    * prompt。拼进 `prompt` 字段会同时污染 run 记录与事件正文。
    */
   context?: string | null;
+  /**
+   * 同回合上一轮的 run 结论（GH-12 路由消歧）。
+   *
+   * 只给 `matchRoute` 的消歧性规则用（如「慢一点」需要知道上一轮在跟随）；
+   * **不落库、不进事件**，HTTP 入口不提供它（无状态请求没有「上一句」）。
+   */
+  previous?: { capability: string; args: Record<string, unknown> } | null;
 }
 
 export interface RunRequestDeps {
@@ -72,6 +79,11 @@ export interface RunRequestResult {
   duplicate?: boolean;
   ambiguous?: string[];
   clarify?: { question: string; missing: string[] };
+  /**
+   * **内部字段**：命中快速规则时实际下发的结构化参数，供装配层记回合上下文。
+   * 不属于 `RunAccepted` 契约响应，HTTP 路由必须剔除（见 `service.ts`）。
+   */
+  fast_args?: Record<string, unknown>;
 }
 
 export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): RunRequestResult {
@@ -83,6 +95,8 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
       // 传给规则的是真实状态，不是「反正前面会挡」的假设。
       busy: Boolean(busy),
       speaking: false,
+      // 没有上一轮时是 null：消歧性规则（slow_down）不会参与匹配。
+      previous: input.previous ?? null,
     },
     deps.rules ?? FAST_RULES,
   );
@@ -153,5 +167,6 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
     fast_rule: result.fast_rule,
     created_at: result.created_at,
     duplicate: result.duplicate,
+    ...(matched.kind === 'matched' ? { fast_args: matched.args } : {}),
   };
 }

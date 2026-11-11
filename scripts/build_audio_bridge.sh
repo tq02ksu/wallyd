@@ -5,6 +5,12 @@
 #   sh scripts/build_audio_bridge.sh            # 输出到 work/bin/AudioBridge.app
 #   OUT=/somewhere/AudioBridge.app sh scripts/build_audio_bridge.sh
 #
+# 测试专用 WAV 通道（GH-55，**默认不编译**）：
+#   WALLY_AUDIO_TEST_HARNESS=1 sh scripts/build_audio_bridge.sh
+#   开启后 serve 才认识 harness_play_wav / harness_record_pair，并在
+#   bridge_ready 里回报 "test_harness": true。默认构建下发这些命令回
+#   E_CMD_UNKNOWN（由 robotd 单测与 apple lane 的 XCTest 锁住）。
+#
 # 为什么要打成 .app 并用 open 启动：见 docs/decisions/0011-audio-bridge-app-bundle-tcc.md
 # 签名：优先用稳定自签身份（重编译不掉 TCC 授权）；没证书时回退 adhoc（每次要重新授权）。
 set -eu
@@ -33,7 +39,16 @@ echo "==> 编译 $SRC + $PIPELINE"
 TMP_BUILD=$(mktemp -d)
 trap 'rm -rf "$TMP_BUILD"' EXIT
 cat "$SRC" "$PIPELINE" > "$TMP_BUILD/main.swift"
-swiftc -O -D VOICE_PIPELINE -o "$OUT/Contents/MacOS/AudioBridge" "$TMP_BUILD/main.swift"
+# 独立编译开关：只有显式 WALLY_AUDIO_TEST_HARNESS=1 才把测试命令面编进来。
+HARNESS_DEFINE=""
+if [ "${WALLY_AUDIO_TEST_HARNESS:-0}" = "1" ]; then
+    HARNESS_DEFINE="-D WALLY_AUDIO_TEST_HARNESS"
+    echo "==> 测试专用 harness 已开启（bridge_ready 会回报 test_harness=true）"
+else
+    echo "==> 默认构建：不含 harness_play_wav / harness_record_pair"
+fi
+# shellcheck disable=SC2086  # HARNESS_DEFINE 是刻意分成两个参数的空/非空标志
+swiftc -O -D VOICE_PIPELINE $HARNESS_DEFINE -o "$OUT/Contents/MacOS/AudioBridge" "$TMP_BUILD/main.swift"
 
 echo "==> 写 Info.plist"
 cat > "$OUT/Contents/Info.plist" <<'PLIST'

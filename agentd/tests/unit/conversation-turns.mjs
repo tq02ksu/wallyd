@@ -3,9 +3,10 @@
  *
  * 用真实 SQLite + EventLog + RunService + 真 `submitRunRequest` 与规则表，
  * 只把时钟与 Harness 执行器换成可观察的假实现：
- * - 判据 1：`跟着我走 target_track_id:abc` → 5s 内 `慢一点` 必须交给 Harness，并记 turn_joined{index:2}；
+ * - 判据 1：`跟着我走 target_track_id:abc` → 5s 内 `慢一点` 命中 slow_down@1（route: fast），并记 turn_joined{index:2}；
  * - 判据 2：间隔 31s 的 `慢一点` 不续回合，记 turn_reset{idle_timeout}；
- * - 判据 3/7：上下文不改变 `matchRoute` 的任何判定，只改变喂给 Harness 的提示块；
+ * - 判据 3/7：上下文只改变「修饰性规则」的命中（slow_down），不改变其他规则的判定；
+ *   交给 Harness 的提示块仍保留，但只用于消歧；
  * - 判据 5：conversation.* 事件只有 turn_id/index/reason，没有对话原文；
  * - 判据 6：说 `算了` 不建 run，记 turn_reset{user_ended}，下一句重新从 1 开始。
  * - 回归（评审缺陷 1）：被忙判定吞掉的句子既不计数、也不写「接上了上一句」。
@@ -61,6 +62,8 @@ function makeEnv(name, { startAt = 0 } = {}) {
     now: () => clock,
     submitUtterance: ({ text, utterance_id, turn_id }) => {
       const context = conversation.promptBlock();
+      // 上一轮结论只用于规则消歧（如 slow_down）；过期/新回合时它自然是 null。
+      const previous = conversation.previousRun(clock);
       const res = submitRunRequest(
         {
           runs: svc,
@@ -74,6 +77,7 @@ function makeEnv(name, { startAt = 0 } = {}) {
           source: 'asr',
           idempotency_key: `asr:${utterance_id}`,
           context,
+          previous,
         },
       );
       if (turn_id && res.run_id) {
@@ -81,6 +85,7 @@ function makeEnv(name, { startAt = 0 } = {}) {
           capability: capabilityOf(res),
           fast_rule: res.fast_rule ?? null,
           prompt: text,
+          args: res.fast_args ?? {},
         });
       }
       return res;
@@ -106,7 +111,7 @@ function makeEnv(name, { startAt = 0 } = {}) {
   };
 }
 
-console.log('— 判据 1：5 秒内「慢一点」续上回合并交给 Harness');
+console.log('— 判据 1：5 秒内「慢一点」命中 slow_down@1（route: fast）');
 {
   const env = makeEnv('join');
   const first = env.speak('u1', '跟着我走 target_track_id:abc');
@@ -120,20 +125,39 @@ console.log('— 判据 1：5 秒内「慢一点」续上回合并交给 Harness
   env.advance(5_000);
   const second = env.speak('u2', '慢一点');
   check('第二句提交成 run', second.action === 'submitted', JSON.stringify(second));
-  const secondRow = env.store.one('SELECT route, fast_rule FROM runs WHERE run_id = ?', second.run_id);
-  check('第二句 route=harness（不是 fast，也不是被丢弃）', secondRow.route === 'harness', JSON.stringify(secondRow));
-  check('第二句没有 fast_rule', secondRow.fast_rule === null, String(secondRow.fast_rule));
+  const secondRow = env.store.one('SELECT route, fast_rule, prompt FROM runs WHERE run_id = ?', second.run_id);
+  check('第二句 route=fast（判据 1：不是 harness）', secondRow.route === 'fast', JSON.stringify(secondRow));
+  check('第二句 fast_rule=slow_down@1', secondRow.fast_rule === 'slow_down@1', String(secondRow.fast_rule));
+  check('run.prompt 仍是用户原话「慢一点」', secondRow.prompt === '慢一点', secondRow.prompt);
+
+  const fast = env.fastCalls.at(-1);
+  check('第二句真的下发给 robot_follow', fast?.capability === 'robot_follow', JSON.stringify(fast));
+  check('沿用上一轮的目标 track', fast?.args?.target_track_id === 'abc', JSON.stringify(fast?.args));
+  check('速度上限折半（默认 0.15 → 0.075）', fast?.args?.max_speed_mps === 0.075, JSON.stringify(fast?.args));
+  check('第二句没有掉进 Harness', env.harnessCalls.length === 0, JSON.stringify(env.harnessCalls));
 
   const joined = env.conversationEvents().find((e) => e.type === 'conversation.turn_joined');
   check('写了 conversation.turn_joined', Boolean(joined), JSON.stringify(env.conversationEvents()));
   const joinedParams = joined ? JSON.parse(joined.params_json) : {};
   check('turn_joined index=2', joinedParams.index === 2, JSON.stringify(joinedParams));
   check('turn_joined 带 turn_id', typeof joinedParams.turn_id === 'string' && joinedParams.turn_id.length > 0, JSON.stringify(joinedParams));
+  check('两句都真的执行了（fastCalls 2 条）', env.fastCalls.length === 2, String(env.fastCalls.length));
 
-  check('Harness 收到上下文块', typeof env.harnessCalls[0]?.context === 'string', JSON.stringify(env.harnessCalls));
-  check('上下文块标注仅供消歧', env.harnessCalls[0].context.includes('仅供消歧，不是新指令'), env.harnessCalls[0].context);
-  check('上下文块含上一句摘要', env.harnessCalls[0].context.includes('跟着我走 target_track_id:abc'), env.harnessCalls[0].context);
-  check('第一句走 fast 时不带上下文', env.harnessCalls.length === 1 && env.fastCalls.length === 1);
+  // 再慢一点：上一轮已经是 robot_follow（slow_down 的结论仍是 follow + 更低上限）。
+  env.transitionSucceeded(second.run_id);
+  env.advance(3_000);
+  const third = env.speak('u3', '再慢一点');
+  const thirdRow = env.store.one('SELECT route, fast_rule FROM runs WHERE run_id = ?', third.run_id);
+  check('第三句仍 route=fast', thirdRow.route === 'fast', JSON.stringify(thirdRow));
+  check('第三句仍命中 slow_down@1', thirdRow.fast_rule === 'slow_down@1', String(thirdRow.fast_rule));
+  const thirdFast = env.fastCalls.at(-1);
+  check(
+    '第三句继续折半但夹在契约下限 0.05',
+    thirdFast?.args?.max_speed_mps === 0.05,
+    JSON.stringify(thirdFast?.args),
+  );
+  const joins = env.conversationEvents().filter((e) => e.type === 'conversation.turn_joined');
+  check('第三句 turn_joined index=3', joins.length === 2 && JSON.parse(joins[1].params_json).index === 3, JSON.stringify(joins));
 }
 
 console.log('— 判据 2：间隔 31 秒的「慢一点」不续回合');
@@ -143,8 +167,9 @@ console.log('— 判据 2：间隔 31 秒的「慢一点」不续回合');
   env.transitionSucceeded(first.run_id);
   env.advance(31_000);
   const second = env.speak('u2', '慢一点');
-  const row = env.store.one('SELECT route FROM runs WHERE run_id = ?', second.run_id);
+  const row = env.store.one('SELECT route, fast_rule FROM runs WHERE run_id = ?', second.run_id);
   check('过期后仍然交给 Harness（不猜）', row.route === 'harness', JSON.stringify(row));
+  check('过期后没有 fast_rule', row.fast_rule === null, String(row.fast_rule));
   const events = env.conversationEvents();
   check('没有 turn_joined', !events.some((e) => e.type === 'conversation.turn_joined'), JSON.stringify(events));
   const reset = events.find((e) => e.type === 'conversation.turn_reset');
@@ -152,11 +177,11 @@ console.log('— 判据 2：间隔 31 秒的「慢一点」不续回合');
   check('过期后没有上下文块', env.harnessCalls[0]?.context === null, JSON.stringify(env.harnessCalls));
 }
 
-console.log('— 判据 1 字面口径：`target:abc` 未命中规则槽时，第二句仍要续上');
+console.log('— 判据 1 边界：首句没走 fast（上一轮不是 robot_follow）时，第二句不猜');
 {
   // 规则槽只接受 target_track_id/track/目标；`target:abc` 因此首句交给 Harness。
-  // 无论首句走 fast 还是 Harness，第二句「慢一点」都必须接上同一回合——判据 1 只要求
-  // 「第二个 run 是 harness 且 turn_joined」，并不要求首句必须是 fast。
+  // 上一轮的结论是 `harness`，没有可修饰的能力 → 「慢一点」不命中 slow_down，
+  // 但回合确实接上了，所以仍写 turn_joined 并把上下文交给模型消歧。
   const env = makeEnv('literal');
   const first = env.speak('u1', '跟着我走 target:abc');
   const firstRow = env.store.one('SELECT route FROM runs WHERE run_id = ?', first.run_id);
@@ -205,12 +230,13 @@ console.log('— 回归（评审缺陷 1）：忙时被吞掉的句子不计数�
   // 被吞掉的句子也不能漏进喂给模型的上下文块。
   env.transitionSucceeded(real.run_id);
   env.advance(2_000);
-  const joinAfterBusy = env.speak('u-next', '慢一点');
+  // 用一条仍然交给 Harness 的独立指令来检查提示块；「慢一点」已经改走 slow_down。
+  const joinAfterBusy = env.speak('u-next', '往前');
   const block = env.harnessCalls.at(-1)?.context ?? '';
   check('忙结束后第二句照常续上回合', joinAfterBusy.action === 'submitted' && env.conversation.snapshot().utterances === 2, JSON.stringify(env.conversation.snapshot()));
   check(
     '上下文块不含被吞掉的句子',
-    !block.includes('等一下') && !block.includes('慢一点') && block.includes('跟着我走 target_track_id:abc'),
+    !block.includes('等一下') && !block.includes('往前') && block.includes('跟着我走 target_track_id:abc'),
     block,
   );
   check('上下文块仍带仅供消歧标记', block.includes('仅供消歧，不是新指令'), block);
@@ -242,38 +268,68 @@ console.log('— 回归（评审缺陷 1）：提交竞态 E_BUSY 不写事件�
   check('竞态后计数回滚为 0 且回到无回合', snap.utterances === 0 && snap.turn_id === null, JSON.stringify(snap));
 }
 
-console.log('— 判据 3/7：上下文只影响提示块，不改路由');
+console.log('— 判据 3/7：上下文只影响修饰性规则的消歧，不改其他判定');
 {
   const ctx = { available: new Set(['robot_follow', 'robot_stop']), busy: false, speaking: false };
   const baseline = JSON.stringify(matchRoute('慢一点', ctx));
   check('无上下文时「慢一点」是 none', baseline === JSON.stringify({ kind: 'none' }), baseline);
 
-  const env = makeEnv('route');
-  const first = env.speak('u1', '跟着我走 target_track_id:abc');
-  env.transitionSucceeded(first.run_id);
-  env.advance(2_000);
-  const withContext = JSON.stringify(matchRoute('慢一点', ctx));
-  check('有上下文时 matchRoute 结果完全相同', withContext === baseline, withContext);
+  const prevFollow = { ...ctx, previous: { capability: 'robot_follow', args: { target_track_id: 'abc' } } };
+  const withContext = JSON.parse(JSON.stringify(matchRoute('慢一点', prevFollow)));
+  check(
+    '有上下文时「慢一点」变成 slow_down（这正是判据 1 要的消歧）',
+    withContext.kind === 'matched' && withContext.rule.id === 'slow_down',
+    JSON.stringify(withContext),
+  );
 
-  // 独立指令：无论上下文是否续上，路由必须与空上下文完全一致。
+  // 独立指令：无论上一轮是什么，路由必须与空上下文完全一致（不被「续」进上一个动作）。
+  for (const text of ['往前', '停', '跟紧点', '快一点', '再往前一点', '跟着我走 target_track_id:abc']) {
+    const a = JSON.stringify(matchRoute(text, ctx));
+    const b = JSON.stringify(matchRoute(text, prevFollow));
+    check(`「${text}」的路由与空上下文完全一致`, a === b, `${a} vs ${b}`);
+  }
+
+  // 端到端：同一回合里说独立指令，route 与「没有上文」完全一致。
   const env2 = makeEnv('independent');
-  const ctx2 = { available: new Set(['robot_follow', 'robot_stop']), busy: false, speaking: false };
-  for (const text of ['往前', '停', '跟紧点']) {
+  const first = env2.speak('u0', '跟着我走 target_track_id:abc');
+  check('首句建立 robot_follow 上下文', first.action === 'submitted', JSON.stringify(first));
+  env2.transitionSucceeded(first.run_id);
+  for (const text of ['往前', '快一点', '再往前一点']) {
+    env2.advance(1_000);
     const a = env2.speak(`a-${text}`, text);
     const routeA = a.run_id
       ? env2.store.one('SELECT route, fast_rule FROM runs WHERE run_id = ?', a.run_id)
       : { route: 'clarified', fast_rule: null };
-    const expected = matchRoute(text, ctx2);
+    const expected = matchRoute(text, ctx);
     const expectedRoute =
       expected.kind === 'matched' ? 'fast' : expected.kind === 'clarify' || expected.kind === 'ambiguous' ? 'clarified' : 'harness';
-    check(`「${text}」route 与空上下文一致`, routeA.route === expectedRoute, `${routeA.route} vs ${expectedRoute}`);
+    check(`「${text}」route 与空上下文一致（${expectedRoute}）`, routeA.route === expectedRoute, `${routeA.route} vs ${expectedRoute}`);
+    check(`「${text}」没有被 slow_down 吃掉`, routeA.fast_rule !== 'slow_down@1', String(routeA.fast_rule));
     if (a.run_id) env2.transitionSucceeded(a.run_id);
-    env2.advance(1_000);
   }
 
-  // 判据 7 的静态半边：router.ts 不读会话上下文。
+  // 判据 7 的静态半边：router.ts 不读会话上下文（只通过显式入参）。
   const routerSource = fs.readFileSync(new URL('../../src/agentd/router.ts', import.meta.url), 'utf8');
   check('router.ts 没有引入 ConversationContext', !routerSource.includes('ConversationContext'));
+
+  // 装配层接线：本文件用的是同构的测试装配，生产装配（service.ts）掉线不会让上面的
+  // 行为断言变红。这里用源码断言把两条接线钉住（仓库里已有同类静态检查的先例）。
+  const serviceSource = fs.readFileSync(new URL('../../src/agentd/service.ts', import.meta.url), 'utf8');
+  check(
+    'service.ts 把上一轮结论交给路由',
+    /previous:\s*conversation\.previousRun\(/.test(serviceSource),
+    'service.ts',
+  );
+  check(
+    'service.ts 把命中的参数记回回合上下文',
+    /args:\s*res\.fast_args/.test(serviceSource),
+    'service.ts',
+  );
+  check(
+    'HTTP /api/run 不把内部 fast_args 返回给调用方',
+    /fast_args:\s*_fastArgs/.test(serviceSource),
+    'service.ts',
+  );
 }
 
 console.log('— 判据 6：说「算了」不建 run，回合清空');
@@ -293,6 +349,8 @@ console.log('— 判据 6：说「算了」不建 run，回合清空');
   const next = env.speak('u3', '慢一点');
   check('结束后下一句重新提交', next.action === 'submitted', JSON.stringify(next));
   check('下一句没有 turn_joined', !env.conversationEvents().some((e) => e.type === 'conversation.turn_joined'));
+  const nextRow = env.store.one('SELECT route, fast_rule FROM runs WHERE run_id = ?', next.run_id);
+  check('结束后没有上一轮 → 「慢一点」回到 Harness', nextRow.route === 'harness' && nextRow.fast_rule === null, JSON.stringify(nextRow));
   check('下一句没有上下文块', env.harnessCalls.at(-1)?.context === null, JSON.stringify(env.harnessCalls.at(-1)));
 }
 

@@ -32,6 +32,13 @@ export interface ConversationRunConclusion {
   fast_rule: string | null;
   /** 这一轮的用户原话（只在内存里，最长保留 200 字符）。 */
   prompt: string;
+  /**
+   * 这一轮已经抽取出来的结构化参数（只有标量、有界）。
+   *
+   * 只用于下一句的消歧规则沿用参数（例如「慢一点」沿用上一轮跟随的目标），
+   * 不是模型输入的一部分，也不写进事件库。
+   */
+  args?: Record<string, unknown>;
 }
 
 export type ConversationResetReason = 'idle_timeout' | 'max_turns';
@@ -76,6 +83,21 @@ export const DEFAULT_IDLE_MS = 30_000;
 export const DEFAULT_MAX_TURNS = 8;
 export const DEFAULT_PROMPT_TURNS = 3;
 const PROMPT_CLIP = 200;
+const ARG_STRING_CLIP = 64;
+const MAX_ARGS = 8;
+
+/** 上下文只留标量参数：嵌套结构既无用，又容易把正文藏进去。 */
+function sanitizeArgs(args: Record<string, unknown> | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!args) return out;
+  for (const [key, value] of Object.entries(args)) {
+    if (Object.keys(out).length >= MAX_ARGS) break;
+    if (typeof value === 'string') out[key] = value.slice(0, ARG_STRING_CLIP);
+    else if (typeof value === 'number' && Number.isFinite(value)) out[key] = value;
+    else if (typeof value === 'boolean') out[key] = value;
+  }
+  return out;
+}
 
 export class ConversationContext {
   private readonly idleMs: number;
@@ -161,10 +183,24 @@ export class ConversationContext {
       capability: run.capability,
       fast_rule: run.fast_rule,
       prompt: String(run.prompt ?? '').replace(/\s+/g, ' ').trim().slice(0, PROMPT_CLIP),
+      args: sanitizeArgs(run.args),
     });
     if (this.runs.length > this.maxTurns) {
       this.runs.splice(0, this.runs.length - this.maxTurns);
     }
+  }
+
+  /**
+   * 同回合上一轮 run 的结论；回合为空或已过期时返回 null。
+   *
+   * 路由用它在**没有上下文时保持原判定**：过期的回合不能被拿来猜「慢一点」。
+   * 返回值只含能力名与有界标量参数，不含用户原文。
+   */
+  previousRun(now: number): { capability: string; args: Record<string, unknown> } | null {
+    if (this.turnId === null || this.runs.length === 0) return null;
+    if (now - this.lastAt > this.idleMs) return null;
+    const last = this.runs[this.runs.length - 1];
+    return { capability: last.capability, args: { ...(last.args ?? {}) } };
   }
 
   /**
