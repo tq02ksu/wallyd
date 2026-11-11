@@ -538,6 +538,12 @@ export interface components {
                 utterance_id?: string;
                 instance_id?: string;
                 seq?: number;
+                /**
+                 * @description 这句话的说话人标识（与 `speech.utterance_heard.speaker_id` 同源）。
+                 *     **可选**：上游未实现说话人分段时省略该字段，不填 null、不填占位串。
+                 *     编号规则与「说话人 ↔ track」的绑定语义属于 #50 后续段，本契约不定义。
+                 */
+                speaker_id?: string;
             };
         };
         RunAccepted: {

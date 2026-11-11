@@ -340,6 +340,34 @@ if (fs.existsSync(path.join(AGENTD_DIR, 'openapi.yaml'))) {
     }
   }
 
+  // 3.3b 人物事件是「观测事实」，且 person.moved 的频率上限必须写在契约里。
+  // 上限只写在实现注释里等于没有契约：换一个发布端就没人执行了。
+  {
+    for (const type of ['person.appeared', 'person.moved', 'person.lost']) {
+      if (!(aEvents.events ?? []).some((ev) => ev.type === type)) {
+        semantic.push(`agentd events.json 缺 ${type}：tag=target_track_id 没有生产者`);
+      }
+    }
+    const moved = (aEvents.events ?? []).find((ev) => ev.type === 'person.moved');
+    const rate = moved?.rate_limit;
+    if (!rate || typeof rate.max_hz !== 'number' || !(rate.max_hz > 0) || rate.max_hz > 5) {
+      semantic.push('person.moved 必须在契约里声明 rate_limit.max_hz ∈ (0, 5]（降频是契约，不是实现注释）');
+    } else if (typeof rate.key_field !== 'string' || !(rate.key_field in (moved.payload ?? {}))) {
+      semantic.push('person.moved.rate_limit.key_field 必须指向 payload 字段（按 track 分别限流）');
+    }
+    // 身份判断不属于本条：名字一旦是 identified/recognized，下游会把它当成「这是谁」。
+    for (const ev of aEvents.events ?? []) {
+      if (/^person\.(identified|recognized|bound)$/.test(ev.type)) {
+        semantic.push(`${ev.type} 是身份/绑定判断，不属于人物观测事实面`);
+      }
+    }
+    // 事件族不得进入模型工具面：模型不该有「读事件流」的工具。
+    const toolsText = fs.readFileSync(path.join(ROOT, 'generated', 'mcp-tools.json'), 'utf8');
+    for (const type of ['person.appeared', 'person.moved', 'person.lost']) {
+      if (toolsText.includes(type)) semantic.push(`${type} 出现在 mcp-tools.json；事件不是模型工具`);
+    }
+  }
+
   // 3.4 只绑回环
   for (const s of aSpec.servers ?? []) {
     if (!/127\.0\.0\.1|localhost|\[::1\]/.test(s.url ?? '')) {

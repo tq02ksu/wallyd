@@ -52,6 +52,9 @@
     "model.validation_failed",
     "observation.gap",
     "observation.speech_ignored",
+    "person.appeared",
+    "person.lost",
+    "person.moved",
     "route.clarify",
     "route.matched",
     "run.accepted",
@@ -87,7 +90,8 @@
     "safety",
     "speech",
     "store",
-    "tool"
+    "tool",
+    "vision"
   ],
   "templates": [
     {
@@ -108,7 +112,23 @@
         "pid",
         "contract_version",
         "recovered_runs"
-      ]
+      ],
+      "payload_spec": {
+        "pid": {
+          "type": "integer",
+          "required": true
+        },
+        "contract_version": {
+          "type": "string",
+          "required": true
+        },
+        "recovered_runs": {
+          "type": "integer",
+          "required": true,
+          "note": "重启时被标为 interrupted 的活动 run 数"
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "daemon.recovered",
@@ -126,7 +146,18 @@
       "required_fields": [
         "interrupted_runs",
         "cancelled_approvals"
-      ]
+      ],
+      "payload_spec": {
+        "interrupted_runs": {
+          "type": "integer",
+          "required": true
+        },
+        "cancelled_approvals": {
+          "type": "integer",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "store.unwritable",
@@ -144,7 +175,18 @@
       "required_fields": [
         "path",
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "path": {
+          "type": "string",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "store.recovered",
@@ -160,7 +202,14 @@
       ],
       "required_fields": [
         "path"
-      ]
+      ],
+      "payload_spec": {
+        "path": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "dependency.unavailable",
@@ -180,7 +229,32 @@
       "required_fields": [
         "dependency",
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "dependency": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "robotd",
+            "harness",
+            "model",
+            "audio"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "impact": {
+          "type": "string",
+          "required": false
+        },
+        "advice": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "dependency.recovered",
@@ -199,7 +273,23 @@
       "required_fields": [
         "dependency",
         "detail"
-      ]
+      ],
+      "payload_spec": {
+        "dependency": {
+          "type": "string",
+          "required": true
+        },
+        "detail": {
+          "type": "string",
+          "required": true
+        },
+        "gap_from": {
+          "type": "string",
+          "required": false,
+          "note": "断线起点；若上游无回放能力，此区间历史不完整"
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "observation.gap",
@@ -221,7 +311,32 @@
         "from",
         "to",
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "dependency": {
+          "type": "string",
+          "required": true
+        },
+        "from": {
+          "type": "string",
+          "required": true
+        },
+        "to": {
+          "type": "string",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "ws_disconnected",
+            "cursor_expired",
+            "instance_changed",
+            "upstream_no_replay"
+          ]
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "observation.speech_ignored",
@@ -238,7 +353,24 @@
       ],
       "required_fields": [
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "busy",
+            "echo",
+            "empty",
+            "speaking"
+          ]
+        },
+        "utterance_id": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "run.accepted",
@@ -259,7 +391,27 @@
         "prompt",
         "route",
         "source"
-      ]
+      ],
+      "payload_spec": {
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "note": "用户原始请求（已截断到 200 字符）；不含思维链"
+        },
+        "route": {
+          "type": "string",
+          "required": true
+        },
+        "source": {
+          "type": "string",
+          "required": true
+        },
+        "fast_rule": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "run.duplicate",
@@ -275,7 +427,14 @@
       ],
       "required_fields": [
         "idempotency_key"
-      ]
+      ],
+      "payload_spec": {
+        "idempotency_key": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "run.waiting_input",
@@ -291,7 +450,14 @@
       ],
       "required_fields": [
         "question"
-      ]
+      ],
+      "payload_spec": {
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "run.step_changed",
@@ -311,7 +477,22 @@
         "step_id",
         "step_title",
         "state"
-      ]
+      ],
+      "payload_spec": {
+        "step_id": {
+          "type": "string",
+          "required": true
+        },
+        "step_title": {
+          "type": "string",
+          "required": true
+        },
+        "state": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "run.waiting_confirmation",
@@ -331,7 +512,23 @@
         "approval_id",
         "action_label",
         "window_opened_at"
-      ]
+      ],
+      "payload_spec": {
+        "approval_id": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "window_opened_at": {
+          "type": "string",
+          "required": true,
+          "description": "确认窗口开启时刻（播报完成之后）。早于此刻的 utterance 不能用来确认这次动作。"
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "run.finished",
@@ -350,7 +547,22 @@
       "required_fields": [
         "outcome",
         "detail"
-      ]
+      ],
+      "payload_spec": {
+        "outcome": {
+          "type": "string",
+          "required": true
+        },
+        "detail": {
+          "type": "string",
+          "required": true
+        },
+        "duration_ms": {
+          "type": "integer",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "tool.requested",
@@ -374,7 +586,30 @@
         "action_label",
         "args_summary",
         "requires_approval"
-      ]
+      ],
+      "payload_spec": {
+        "tool_call_id": {
+          "type": "string",
+          "required": true
+        },
+        "capability": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "args_summary": {
+          "type": "string",
+          "required": true
+        },
+        "requires_approval": {
+          "type": "boolean",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "tool.succeeded",
@@ -396,7 +631,30 @@
         "tool_call_id",
         "capability",
         "action_label"
-      ]
+      ],
+      "payload_spec": {
+        "tool_call_id": {
+          "type": "string",
+          "required": true
+        },
+        "capability": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "robot_task_id": {
+          "type": "string",
+          "required": false
+        },
+        "detail": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "tool.failed",
@@ -420,7 +678,34 @@
         "capability",
         "action_label",
         "detail"
-      ]
+      ],
+      "payload_spec": {
+        "tool_call_id": {
+          "type": "string",
+          "required": true
+        },
+        "capability": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "code": {
+          "type": "string",
+          "required": false
+        },
+        "detail": {
+          "type": "string",
+          "required": true
+        },
+        "advice": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "tool.outcome_unknown",
@@ -443,7 +728,30 @@
         "capability",
         "action_label",
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "tool_call_id": {
+          "type": "string",
+          "required": true
+        },
+        "capability": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "robot_task_id": {
+          "type": "string",
+          "required": false
+        },
+        "reason": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "approval.waiting",
@@ -466,7 +774,30 @@
         "action_label",
         "args_summary",
         "window_opened_at"
-      ]
+      ],
+      "payload_spec": {
+        "approval_id": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "args_summary": {
+          "type": "string",
+          "required": true
+        },
+        "window_opened_at": {
+          "type": "string",
+          "required": true
+        },
+        "window_closes_at": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "approval.repeat_requested",
@@ -489,7 +820,30 @@
         "action_label",
         "repeat_count",
         "max_repeats"
-      ]
+      ],
+      "payload_spec": {
+        "approval_id": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "repeat_count": {
+          "type": "integer",
+          "required": true
+        },
+        "max_repeats": {
+          "type": "integer",
+          "required": true
+        },
+        "utterance_id": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "approval.resolved",
@@ -513,7 +867,36 @@
         "action_label",
         "status",
         "decided_by"
-      ]
+      ],
+      "payload_spec": {
+        "approval_id": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "status": {
+          "type": "string",
+          "required": true
+        },
+        "decided_by": {
+          "type": "string",
+          "required": true
+        },
+        "utterance_id": {
+          "type": "string",
+          "required": false,
+          "description": "采纳的那一轮 speech.final 的 utterance_id（审计用）"
+        },
+        "reason": {
+          "type": "string",
+          "required": false,
+          "description": "结束原因（如 denied / repeat_limit）；不改变 status 枚举，只解释这一次为什么这样收尾。"
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "approval.expired",
@@ -533,7 +916,22 @@
         "approval_id",
         "action_label",
         "expired_at"
-      ]
+      ],
+      "payload_spec": {
+        "approval_id": {
+          "type": "string",
+          "required": true
+        },
+        "action_label": {
+          "type": "string",
+          "required": true
+        },
+        "expired_at": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "approval.ignored",
@@ -552,7 +950,28 @@
       "required_fields": [
         "approval_id",
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "approval_id": {
+          "type": "string",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "expired",
+            "before_window",
+            "echo",
+            "unrecognized"
+          ]
+        },
+        "utterance_id": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "approval.unavailable",
@@ -572,7 +991,30 @@
         "approval_id",
         "reason",
         "kind"
-      ]
+      ],
+      "payload_spec": {
+        "approval_id": {
+          "type": "string",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "kind": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "no_audio",
+            "announce_timeout",
+            "audit_failed",
+            "robotd_no_check",
+            "repeat_failed",
+            "invalid_args_summary"
+          ]
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "safety.stop_requested",
@@ -593,7 +1035,42 @@
         "cause",
         "state",
         "detail"
-      ]
+      ],
+      "payload_spec": {
+        "cause": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "user_voice",
+            "user_stop_api",
+            "obstacle",
+            "watchdog_timeout",
+            "param_out_of_range",
+            "observation_stale",
+            "device_lost",
+            "bridge_exit",
+            "internal_error"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "requested",
+            "confirmed",
+            "unknown"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "required": true
+        },
+        "run_id": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "run.cancelled",
@@ -611,7 +1088,22 @@
       ],
       "required_fields": [
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "cancelled_approvals": {
+          "type": "integer",
+          "required": false
+        },
+        "body_stop": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "model.validation_failed",
@@ -632,7 +1124,26 @@
         "profile_id",
         "revision",
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "profile_id": {
+          "type": "string",
+          "required": true
+        },
+        "revision": {
+          "type": "integer",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "failed_checks": {
+          "type": "array",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "model.validated",
@@ -653,7 +1164,26 @@
         "profile_id",
         "profile_name",
         "revision"
-      ]
+      ],
+      "payload_spec": {
+        "profile_id": {
+          "type": "string",
+          "required": true
+        },
+        "profile_name": {
+          "type": "string",
+          "required": true
+        },
+        "revision": {
+          "type": "integer",
+          "required": true
+        },
+        "duration_ms": {
+          "type": "integer",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "model.activated",
@@ -674,7 +1204,26 @@
         "profile_id",
         "profile_name",
         "revision"
-      ]
+      ],
+      "payload_spec": {
+        "profile_id": {
+          "type": "string",
+          "required": true
+        },
+        "profile_name": {
+          "type": "string",
+          "required": true
+        },
+        "revision": {
+          "type": "integer",
+          "required": true
+        },
+        "previous_revision": {
+          "type": "integer",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "model.activation_failed",
@@ -694,7 +1243,22 @@
         "profile_id",
         "revision",
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "profile_id": {
+          "type": "string",
+          "required": true
+        },
+        "revision": {
+          "type": "integer",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "route.matched",
@@ -716,7 +1280,26 @@
         "rule_version",
         "rule_title",
         "capability"
-      ]
+      ],
+      "payload_spec": {
+        "rule_id": {
+          "type": "string",
+          "required": true
+        },
+        "rule_version": {
+          "type": "integer",
+          "required": true
+        },
+        "rule_title": {
+          "type": "string",
+          "required": true
+        },
+        "capability": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "route.clarify",
@@ -733,7 +1316,18 @@
       ],
       "required_fields": [
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "advice": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "speech.utterance_heard",
@@ -750,13 +1344,53 @@
         "chars",
         "duration_ms",
         "stop_reason",
-        "route_hint"
+        "route_hint",
+        "speaker_id"
       ],
       "required_fields": [
         "utterance_id",
         "excerpt",
         "chars"
-      ]
+      ],
+      "payload_spec": {
+        "utterance_id": {
+          "type": "string",
+          "required": true
+        },
+        "excerpt": {
+          "type": "string",
+          "required": true
+        },
+        "chars": {
+          "type": "integer",
+          "required": true
+        },
+        "duration_ms": {
+          "type": "integer",
+          "required": false
+        },
+        "stop_reason": {
+          "type": "string",
+          "required": false,
+          "enum": [
+            "silence",
+            "endpoint",
+            "max_seconds",
+            "cancelled"
+          ]
+        },
+        "route_hint": {
+          "type": "string",
+          "required": false,
+          "description": "由 robotd 传来的结构化提示；robotd 不解析自然语言"
+        },
+        "speaker_id": {
+          "type": "string",
+          "required": false,
+          "description": "这句话的说话人标识（来自上游说话人分段）。未实现时**省略该字段**，不填 null、不填占位串。编号如何分配属于 #50 第二段（绑定）的语义，本条不定义 speaker_1/speaker_2 规则。"
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "speech.no_speech",
@@ -775,7 +1409,28 @@
       "required_fields": [
         "utterance_id",
         "stop_reason"
-      ]
+      ],
+      "payload_spec": {
+        "utterance_id": {
+          "type": "string",
+          "required": true
+        },
+        "stop_reason": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "silence",
+            "empty",
+            "cancelled",
+            "bridge_exit"
+          ]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "speech.audio_unavailable",
@@ -792,7 +1447,18 @@
       ],
       "required_fields": [
         "detail"
-      ]
+      ],
+      "payload_spec": {
+        "detail": {
+          "type": "string",
+          "required": true
+        },
+        "bridge": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "speech.audio_recovered",
@@ -808,7 +1474,14 @@
       ],
       "required_fields": [
         "bridge"
-      ]
+      ],
+      "payload_spec": {
+        "bridge": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "speech.spoken",
@@ -831,7 +1504,36 @@
         "response_id",
         "chunks",
         "played"
-      ]
+      ],
+      "payload_spec": {
+        "response_id": {
+          "type": "string",
+          "required": true
+        },
+        "chunks": {
+          "type": "integer",
+          "required": true
+        },
+        "played": {
+          "type": "integer",
+          "required": true
+        },
+        "excerpt": {
+          "type": "string",
+          "required": false
+        },
+        "approval_id": {
+          "type": "string",
+          "required": false,
+          "description": "审批复述时关联的 approval_id；让「请说确认」的边界在事件里可观测。"
+        },
+        "kind": {
+          "type": "string",
+          "required": false,
+          "description": "系统播报种类（approval_repeat / approval_unheard）；普通播报没有。"
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "speech.speak_cancelled",
@@ -851,7 +1553,31 @@
         "response_id",
         "reason",
         "played"
-      ]
+      ],
+      "payload_spec": {
+        "response_id": {
+          "type": "string",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "barge_in",
+            "user_cancel",
+            "interrupted",
+            "bridge_exit",
+            "muted",
+            "requested",
+            "stop"
+          ]
+        },
+        "played": {
+          "type": "integer",
+          "required": true
+        }
+      },
+      "rate_limit": null
     },
     {
       "type": "speech.speak_failed",
@@ -868,7 +1594,158 @@
       ],
       "required_fields": [
         "reason"
-      ]
+      ],
+      "payload_spec": {
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "detail": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "rate_limit": null
+    },
+    {
+      "type": "person.appeared",
+      "category": "vision",
+      "severity": "info",
+      "title": "画面里出现了一个目标",
+      "summary": "目标 {track_id} 首次被看到。",
+      "impact": "这只是一次观测事实，不代表身份或意图；track_id 只在同一次跟踪生命周期内有效。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "track_id",
+        "bbox",
+        "first_seen_at"
+      ],
+      "required_fields": [
+        "track_id",
+        "bbox",
+        "first_seen_at"
+      ],
+      "payload_spec": {
+        "track_id": {
+          "type": "string",
+          "required": true,
+          "description": "跨帧跟踪标识。只标识「同一条 track」，不表示「同一个人」；不得用 person.identified 之类的名字把它升级成身份判断。"
+        },
+        "bbox": {
+          "type": "object",
+          "required": true,
+          "description": "目标框。坐标系与单位（归一化或像素）由发布端实现在后续 issue 中确定；本条只约定四个数值字段。",
+          "properties": {
+            "x": {
+              "type": "number",
+              "required": true
+            },
+            "y": {
+              "type": "number",
+              "required": true
+            },
+            "width": {
+              "type": "number",
+              "required": true
+            },
+            "height": {
+              "type": "number",
+              "required": true
+            }
+          }
+        },
+        "first_seen_at": {
+          "type": "string",
+          "required": true,
+          "description": "首次看到该目标的时刻（UTC ISO 8601，发布端时钟）。"
+        }
+      },
+      "rate_limit": null
+    },
+    {
+      "type": "person.moved",
+      "category": "vision",
+      "severity": "info",
+      "title": "画面里的目标移动了",
+      "summary": "目标 {track_id} 的位置已更新。",
+      "impact": "位置观测是降频后的结果，不是每一帧；不要把相邻两条 person.moved 当成连续轨迹。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "track_id",
+        "bbox"
+      ],
+      "required_fields": [
+        "track_id",
+        "bbox"
+      ],
+      "payload_spec": {
+        "track_id": {
+          "type": "string",
+          "required": true
+        },
+        "bbox": {
+          "type": "object",
+          "required": true,
+          "description": "目标框；字段与坐标系约定同 person.appeared。",
+          "properties": {
+            "x": {
+              "type": "number",
+              "required": true
+            },
+            "y": {
+              "type": "number",
+              "required": true
+            },
+            "width": {
+              "type": "number",
+              "required": true
+            },
+            "height": {
+              "type": "number",
+              "required": true
+            }
+          }
+        }
+      },
+      "rate_limit": {
+        "max_hz": 5,
+        "window_ms": 1000,
+        "key_field": "track_id",
+        "excess": "drop",
+        "note": "同一 track 在任意 1000ms 滑窗内最多 5 条。超出的观测直接丢弃，不排队、不补发——位置流要的是最新值，补发旧位置只会撑大事件库。发布端还应在位移小于阈值时不发（跟踪实现的语义，不在本条范围）。"
+      }
+    },
+    {
+      "type": "person.lost",
+      "category": "vision",
+      "severity": "info",
+      "title": "画面里的目标消失了",
+      "summary": "目标 {track_id} 已离开画面。",
+      "impact": "track_id 随这次丢失失效；任何引用它的绑定都必须作废，不得继续指向一条不存在的 track。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "track_id",
+        "last_seen_at"
+      ],
+      "required_fields": [
+        "track_id",
+        "last_seen_at"
+      ],
+      "payload_spec": {
+        "track_id": {
+          "type": "string",
+          "required": true
+        },
+        "last_seen_at": {
+          "type": "string",
+          "required": true,
+          "description": "最后一次看到该目标的时刻（UTC ISO 8601，发布端时钟）。"
+        }
+      },
+      "rate_limit": null
     }
   ],
   "reserved_unimplemented": [
