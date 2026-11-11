@@ -12,6 +12,19 @@
   "number_format": "json_minimal_no_exponent",
   "string_normalization": "none",
   "string_escaping": "json_minimal",
+  "risk_policy": {
+    "summary": "降低风险的参数变更不触发重新签发审批凭据；提高风险的变更才触发。",
+    "no_resign": [
+      "降速：max_speed_mps 调小",
+      "缩短距离或时长：max_seconds 调小、stop_width_ratio 更接近停止距离"
+    ],
+    "must_resign": [
+      "加速：max_speed_mps 调大",
+      "延长距离或时长：max_seconds 调大、stop_width_ratio 更远",
+      "换目标：target_track_id / target 变化"
+    ],
+    "note": "本策略不改变 args_digest 的算法与校验：它只说明什么时候必须重新征得用户确认并重签。pause/resume 不改变任何已确认参数，因此不需要新凭据。"
+  },
   "implementations": {
     "typescript": "contracts/tools/approval-digest.mjs",
     "python": "robotd/src/robotd/approval_digest.py"

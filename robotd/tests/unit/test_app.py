@@ -139,6 +139,8 @@ def test_every_public_operation_has_a_capability_entry():
         "task_get",
         "task_list",
         "task_cancel",
+        "task_pause",
+        "task_resume",
         "events_subscribe",
     }
     assert expected == public

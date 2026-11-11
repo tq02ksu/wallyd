@@ -71,6 +71,12 @@ export const NODE_EVENT_TYPES = [
   'speech.tts_finished',
   'speech.tts_cancelled',
   'task.started',
+  // GH-48：暂停/恢复/到期是节点性事件。**目前只订阅、还没有 run 侧消费者**——
+  // agentd 尚无「robotd 任务 → run」的状态映射（#12 接线）。提前订阅是为了接线时
+  // 不静默丢掉这段历史，而不是假装这里已经产生了 run.paused。
+  'task.paused',
+  'task.resumed',
+  'task.pause_expired',
   'task.completed',
   'task.failed',
   'task.cancelled',

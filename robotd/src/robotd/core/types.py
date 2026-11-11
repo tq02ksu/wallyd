@@ -33,6 +33,9 @@ class RobotMode(str, Enum):
 class TaskState(str, Enum):
     ACCEPTED = "accepted"
     RUNNING = "running"
+    #: 运动任务的中间态：速度归零、位置保持、任务不终结。
+    #: 既不是 ``cancelled``/``completed``，也不是 ``superseded``（GH-48）。
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -110,8 +113,12 @@ class Task:
     cancelable: bool = True
     error: TaskError | None = None
     reason: str | None = None
+    #: 仅 ``paused`` 时有值：本次暂停的自动取消截止时间（Unix epoch 毫秒）。
+    pause_expires_at: int | None = None
     #: 内部：单调时钟起点，仅用于进程内测时长，不进公开 DTO
     _t0_mono_ns: int = field(default_factory=time.monotonic_ns, repr=False)
+    #: 内部：本次暂停开始的单调时钟；用于 ``task.resumed.paused_ms``，不进公开 DTO
+    _paused_at_mono_ns: int | None = field(default=None, repr=False)
 
     @property
     def terminal(self) -> bool:
@@ -131,6 +138,9 @@ class Task:
             out["finished_at"] = self.finished_at
         if self.error is not None:
             out["error"] = self.error.to_public()
+        # 只有 paused 才暴露截止时间：其它状态下这个字段没有意义，不留在响应里当噪声。
+        if self.state is TaskState.PAUSED:
+            out["pause_expires_at"] = self.pause_expires_at
         return out
 
 
