@@ -397,19 +397,73 @@ def test_pause_expiry_still_cancels_when_the_event_cannot_be_emitted(monkeypatch
     task_id = make_motion_task(app.kernel)
     app.pause_task(task_id)
 
-    real_emit = app.kernel.emit
+    # 到期收尾是内核里的一次原子转移（检查 paused 与转终态同锁），
+    # 所以注入点在 ``_emit_locked``，不是 ``emit``。
+    real_emit = app.kernel._emit_locked
 
-    def flaky_emit(type_: str, **payload: Any):
+    def flaky_emit(type_: str, payload: Any):
         if type_ == "task.pause_expired":
             raise RuntimeError("event log unavailable")
-        return real_emit(type_, **payload)
+        return real_emit(type_, payload)
 
-    monkeypatch.setattr(app.kernel, "emit", flaky_emit)
+    monkeypatch.setattr(app.kernel, "_emit_locked", flaky_emit)
 
     scheduler.fire_all()
 
     assert app.kernel.get_task(task_id).state is TaskState.CANCELLED
     assert app.kernel.get_task(task_id).reason == "pause_timeout"
+    app.shutdown()
+
+
+def test_resume_reaching_the_expiry_window_first_is_not_cancelled():
+    """到期与 resume 撞车：状态转移是原子的，刚恢复的任务不许被过期回调取消。
+
+    复现点是「预检之后、收尾之前」——回调刚读到 paused、还没转终态时用户说了「继续」。
+    旧实现会在读状态之后无条件 ``finish(cancelled)``，把刚恢复的任务杀掉；
+    现在终态转移由 ``expire_paused_task`` 在同一把锁里重新确认状态，resume 赢了就不收尾。
+    """
+    scheduler = FakeScheduler()
+    audio = FakeAudio()
+    app = make_app(audio=audio, scheduler=scheduler)
+    events = collect(app.kernel)
+    task_id = make_motion_task(app.kernel)
+    app.pause_task(task_id)
+
+    real_announce = app._announce_pause_expired
+
+    def resume_during_announce() -> bool:
+        announced = real_announce()
+        app.resume_task(task_id)
+        return announced
+
+    app._announce_pause_expired = resume_during_announce  # type: ignore[method-assign]
+
+    scheduler.fire_all()
+
+    assert app.kernel.get_task(task_id).state is TaskState.RUNNING
+    types = [ev.type for ev in events]
+    assert "task.cancelled" not in types
+    assert "task.pause_expired" not in types
+    app.shutdown()
+
+
+def test_expiry_winner_rejects_a_later_resume_with_state_error():
+    """反向：到期先到就把任务收成 cancelled，之后的 resume 只能是 409，不许复活。"""
+    scheduler = FakeScheduler()
+    app = make_app(scheduler=scheduler)
+    events = collect(app.kernel)
+    task_id = make_motion_task(app.kernel)
+    app.pause_task(task_id)
+
+    scheduler.fire_all()
+
+    assert app.kernel.get_task(task_id).state is TaskState.CANCELLED
+    with pytest.raises(RobotdError) as err:
+        app.resume_task(task_id)
+    assert err.value.code is ErrorCode.STATE
+    # 收尾幂等：再调一次原子转移不得重复发事件，也不得改写已终结的任务。
+    assert app.kernel.expire_paused_task(task_id, announced=True) is False
+    assert [ev.type for ev in events].count("task.cancelled") == 1
     app.shutdown()
 
 

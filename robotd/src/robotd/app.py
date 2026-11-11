@@ -453,6 +453,8 @@ class App:
 
         自查两个条件再动手：定时器仍是这一代（token 相同），且任务确实还在 paused。
         这样 resume / stop / cancel 的竞态不会让过期回调取消一个已经恢复的任务。
+        终态转移本身由 ``kernel.expire_paused_task`` 在同一把锁里完成——上面这次读取只是
+        「值得播报吗」的预检，绝不用它来做状态决定。
         """
         with self._pause_lock:
             entry = self._pause_timers.get(task_id)
@@ -473,16 +475,14 @@ class App:
             except Exception:  # noqa: BLE001
                 log.warning("暂停超时前下发停止失败 %s", task_id, exc_info=True)
         announced = self._announce_pause_expired()
-        # 事件与终态分开兜底：事件发不出去只是时间线缺一条记录，
-        # 任务留在 paused 才是真故障（那条暂停已经没有任何定时器兜着了）。
         try:
-            self.kernel.emit("task.pause_expired", task_id=task_id, announced=announced)
-        except Exception:  # noqa: BLE001
-            log.warning("暂停超时事件未能发出 %s（仍按 cancelled 收尾）", task_id, exc_info=True)
-        try:
-            self.kernel.finish(task_id, TaskState.CANCELLED, reason="pause_timeout")
-        except Exception:  # noqa: BLE001
-            log.warning("暂停超时收尾失败 %s", task_id, exc_info=True)
+            expired = self.kernel.expire_paused_task(task_id, announced=announced)
+        except RobotdError:
+            return
+        if not expired:
+            # resume（或 stop / cancel）正好在这个窗口里先到：任务的状态转移已经赢了，
+            # 这里什么都不改。代价只是那句固定提示可能已经播出去（比误取消任务轻）。
+            log.debug("暂停到期时任务已不在 paused，跳过收尾：%s", task_id)
 
     def _announce_pause_expired(self) -> bool:
         """尽力播报「等太久了，我先停下了」。

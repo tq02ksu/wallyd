@@ -320,37 +320,74 @@ class EventKernel:
             task = self._require_task(task_id)
             if task.terminal:
                 return task
-            task.state = state
-            task.finished_at = now_ms()
-            task.error = error
-            task.reason = reason
-            # paused 的截止时间属于「这次暂停」，任务终结后必须清掉：
-            # 否则调用方会以为一个 cancelled 任务还有自动取消时刻。
-            task.pause_expires_at = None
-            task._paused_at_mono_ns = None
-            if state is TaskState.COMPLETED:
-                task.progress = 1.0
-            if self._motion_task is task:
-                self._motion_task = None
-                self.state._apply_task_id(None)
-                self.state.recompute_mode(has_motion_task=False)
-
-            event_map = {
-                TaskState.COMPLETED: "task.completed",
-                TaskState.FAILED: "task.failed",
-                TaskState.CANCELLED: "task.cancelled",
-            }
-            payload: dict[str, Any] = {
-                "task_id": task.task_id,
-                "capability": task.capability,
-            }
-            if state is TaskState.FAILED:
-                payload["error"] = (error or TaskError("E_INTERNAL", "未提供错误")).to_public()
-                payload["reason"] = reason or "unspecified"
-            elif state is TaskState.CANCELLED:
-                payload["reason"] = reason or "requested"
-            self._emit_locked(event_map[state], payload)
+            self._finish_locked(task, state, error=error, reason=reason)
             return task
+
+    def _finish_locked(
+        self,
+        task: Task,
+        state: TaskState,
+        *,
+        error: TaskError | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """``finish()`` 的锁内实现：调用方必须已持有 ``self._lock``。"""
+        task.state = state
+        task.finished_at = now_ms()
+        task.error = error
+        task.reason = reason
+        # paused 的截止时间属于「这次暂停」，任务终结后必须清掉：
+        # 否则调用方会以为一个 cancelled 任务还有自动取消时刻。
+        task.pause_expires_at = None
+        task._paused_at_mono_ns = None
+        if state is TaskState.COMPLETED:
+            task.progress = 1.0
+        if self._motion_task is task:
+            self._motion_task = None
+            self.state._apply_task_id(None)
+            self.state.recompute_mode(has_motion_task=False)
+
+        event_map = {
+            TaskState.COMPLETED: "task.completed",
+            TaskState.FAILED: "task.failed",
+            TaskState.CANCELLED: "task.cancelled",
+        }
+        payload: dict[str, Any] = {
+            "task_id": task.task_id,
+            "capability": task.capability,
+        }
+        if state is TaskState.FAILED:
+            payload["error"] = (error or TaskError("E_INTERNAL", "未提供错误")).to_public()
+            payload["reason"] = reason or "unspecified"
+        elif state is TaskState.CANCELLED:
+            payload["reason"] = reason or "requested"
+        self._emit_locked(event_map[state], payload)
+
+    def expire_paused_task(self, task_id: str, *, announced: bool) -> bool:
+        """``paused → cancelled(reason=pause_timeout)`` 的**原子**收尾（GH-48）。
+
+        「还是 paused 吗」与「转终态」在**同一把锁**里完成，所以 ``resume`` 与暂停到期
+        不会交错出「刚恢复又被过期回调取消」的结果：
+
+        - ``resume`` 先到 → 这里返回 ``False``，任务保持 ``running``、不发任何事件；
+        - 到期先到 → 任务先变 ``cancelled``，``resume`` 只能拿到 ``409/E_STATE``。
+
+        事件发不出去只是时间线缺一条，**不能**因此把任务留在没有定时器的 ``paused``，
+        所以这里吞掉发射异常、照常收尾。
+        """
+        with self._lock:
+            task = self._require_task(task_id)
+            if task.state is not TaskState.PAUSED:
+                return False
+            try:
+                self._emit_locked(
+                    "task.pause_expired",
+                    {"task_id": task.task_id, "announced": announced},
+                )
+            except Exception:  # noqa: BLE001 - 时间线缺一条也不许留下无上限的 paused
+                log.warning("暂停超时事件未能发出 %s（仍按 cancelled 收尾）", task_id, exc_info=True)
+            self._finish_locked(task, TaskState.CANCELLED, reason="pause_timeout")
+            return True
 
     def get_task(self, task_id: str) -> Task:
         with self._lock:
