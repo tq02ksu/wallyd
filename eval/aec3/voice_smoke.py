@@ -15,8 +15,14 @@
 - B6：stderr 无 `Terminating app`
 - B7：播报窗口内 `speech_state` / 采集电平（`aec_echo_probe`）持续更新
 
-另有 C0（生产构建）：`bridge_ready` 不得回报 `test_harness: true`。测试 harness
-构建不是正式播报证据，不能让它冒充生产命令面的 PASS。
+另有 C0（构建身份）：`bridge_ready` 默认不得回报 `test_harness: true`（生产构建）；
+AEC 对照实验（`aec_ab2.sh` / `collect_pair.sh`）反过来要求它**是** JSON `true`
+（`require_harness=True`）。C0b（AEC 模式）在指定 `expected_aec_mode` 时要求
+`bridge_ready.aec_mode` 精确相等——`--aec3` 被桥静默忽略时必须变红。
+
+所有判据都读**解析后的 JSON 字段**，不做文本匹配：桥输出的是紧凑 JSON
+（`"test_harness":true`），用带空格的 grep 字面量匹配会把成功的实验误判成作废
+（GH-65）。
 
 退出码：0 = PASS；1 = FAIL；2 = 参数或输入错误（不是判定结果）。
 """
@@ -92,9 +98,79 @@ def _wire(events: list[dict], response_id: str | None) -> list[dict]:
     return [event for event in events if event.get("response_id") == response_id]
 
 
-def analyze(events: list[dict], stderr_text: str, response_id: str | None = None) -> Report:
-    """对事件与 stderr 做 B1–B7 + C0 判定。纯函数，不读文件。"""
-    bridge = [event for event in events if event.get("ev") == "bridge_ready"]
+def bridge_ready(events: list[dict]) -> dict | None:
+    """第一条 `bridge_ready`；没有就返回 None。
+
+    调用方据此判断「桥到底是不是测试构建、进的是不是请求的 AEC 模式」，
+    **一律读解析后的字段**，不做文本匹配。
+    """
+    for event in events:
+        if event.get("ev") == "bridge_ready":
+            return event
+    return None
+
+
+def carries_flag(value: object) -> bool:
+    """JSON 布尔 `true` 才算；字符串 `"true"` 不算（防手写 fixture 写成字符串）。"""
+    return value is True
+
+
+def check_harness_or_production(bridge: dict | None, require_harness: bool) -> Check:
+    """C0（要求 harness）与 C0p（要求生产构建）是同一个开关的两面。"""
+    value = bridge.get("test_harness") if bridge else None
+    if require_harness:
+        ok = carries_flag(value)
+        return Check(
+            "C0",
+            ok,
+            (
+                "bridge_ready 回报 test_harness=true（测试构建）"
+                if ok
+                else f"bridge_ready.test_harness={value!r}，不是 JSON true；"
+                "AudioBridge 未用 WALLY_AUDIO_TEST_HARNESS=1 构建，实验作废"
+            ),
+        )
+    ok = not carries_flag(value)
+    return Check(
+        "C0",
+        ok,
+        "bridge_ready 未回报 test_harness（默认生产构建）"
+        if ok
+        else "bridge_ready 回报了 test_harness=true，测试构建不能冒充生产指标",
+    )
+
+
+def check_aec_mode(bridge: dict | None, expected: str | None) -> Check:
+    """ABAB / collect_pair 的证伪锚点：桥必须真的进了请求的 AEC 模式。
+
+    `expected is None` 表示调用方没有要求（`smoke_voice.sh` 就是这种），判为跳过。
+    """
+    if expected is None:
+        return Check("C0b", True, "未指定 aec_mode，跳过")
+    actual = bridge.get("aec_mode") if bridge else None
+    return Check(
+        "C0b",
+        actual == expected,
+        f"aec_mode={expected}"
+        if actual == expected
+        else f"bridge_ready.aec_mode={actual!r}，要求 {expected!r}（--aec3 被忽略会让 VPIO 数据冒充 AEC3）",
+    )
+
+
+def analyze(
+    events: list[dict],
+    stderr_text: str,
+    response_id: str | None = None,
+    *,
+    require_harness: bool = False,
+    expected_aec_mode: str | None = None,
+) -> Report:
+    """对事件与 stderr 做 B1–B7 + C0/C0b 判定。纯函数，不读文件。
+
+    两个新参数只在显式传入时才改变判据，默认值保持 `smoke_voice.sh` 的原有语义。
+    """
+    bridge_events = [event for event in events if event.get("ev") == "bridge_ready"]
+    bridge = bridge_ready(events)
     tts_started = _wire([event for event in events if event.get("ev") == "tts_started"], response_id)
     chunk_finished = _wire(
         [event for event in events if event.get("ev") == "tts_chunk_finished"], response_id
@@ -102,8 +178,6 @@ def analyze(events: list[dict], stderr_text: str, response_id: str | None = None
     tts_played = _wire([event for event in events if event.get("ev") == "tts_played"], response_id)
     tts_finished = _wire([event for event in events if event.get("ev") == "tts_finished"], response_id)
     tts_cancelled = _wire([event for event in events if event.get("ev") == "tts_cancelled"], response_id)
-    harness = [event for event in bridge if event.get("test_harness") is True]
-
     played_values = [
         event["played"]
         for event in tts_played
@@ -156,20 +230,15 @@ def analyze(events: list[dict], stderr_text: str, response_id: str | None = None
     stop_reason = finished.get("stop_reason") if finished else None
 
     checks = [
-        Check(
-            "C0",
-            not harness,
-            (
-                "bridge_ready 未回报 test_harness（默认生产构建）"
-                if not harness
-                else "检测到 test_harness=true：这是测试 harness 构建，不是正式播报证据"
-            ),
-        ),
+        check_harness_or_production(bridge, require_harness),
+        # 只断言调用方明确要求的东西：smoke_voice.sh 不传 expected_aec_mode，
+        # 于是它的 B1–B7 输出与退出码语义一字不变。
+        *([check_aec_mode(bridge, expected_aec_mode)] if expected_aec_mode is not None else []),
         Check(
             "B1",
-            bool(bridge),
-            f"bridge_ready 次数 = {len(bridge)}"
-            + (f"，engine_started = {bridge[0].get('engine_started')}" if bridge else ""),
+            bool(bridge_events),
+            f"bridge_ready 次数 = {len(bridge_events)}"
+            + (f"，engine_started = {bridge.get('engine_started')}" if bridge else ""),
         ),
         Check(
             "B2",
@@ -211,7 +280,7 @@ def analyze(events: list[dict], stderr_text: str, response_id: str | None = None
     ]
 
     counts: dict[str, object] = {
-        "bridge_ready": len(bridge),
+        "bridge_ready": len(bridge_events),
         "tts_started": len(tts_started),
         "tts_chunk_finished": len(chunk_finished),
         "tts_played": len(tts_played),

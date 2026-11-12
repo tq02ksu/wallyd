@@ -60,7 +60,10 @@ def test_ab_experiment_has_a_fail_closed_aec3_branch():
     text = AB.read_text(encoding="utf-8")
     assert "--aec3" in text
     # 未知 flag 被忽略时不能把 VPIO 数据伪装成 AEC3：桥必须确认模式。
-    assert '"aec_mode": "aec3"' in text
+    # GH-65：模式判据在 aec_assert.sh 里读 JSON 字段（`aec_mode` 精确相等），
+    # 不用带空格的 grep 字面量——桥输出的是紧凑 JSON。
+    assert "--expect-aec-mode aec3" in text
+    assert '"aec_mode": "aec3"' not in text
     assert "aec3" in text and "vpio" in text
 
 

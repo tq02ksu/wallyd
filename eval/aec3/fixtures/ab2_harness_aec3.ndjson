@@ -1,0 +1,8 @@
+{"aec":true,"aec_mode":"aec3","engine_started":true,"ev":"bridge_ready","pid":2728,"preroll":5,"t_ms":329,"test_harness":true,"tts_engine":"system","tts_queue_capacity":8}
+{"ambient_db":-41,"ev":"vad_calibrated","fed_frames":47822,"silence_db":-38,"speech_db":-33,"t_ms":3340}
+{"db":-40.2,"ev":"aec_echo_probe","t_ms":4000}
+{"db":-41.8,"ev":"aec_echo_probe","t_ms":5100}
+{"db":-42.5,"ev":"aec_echo_probe","t_ms":6200}
+{"cmd":"harness_play_wav","ev":"harness_command","path":"work/verify/aec_probe.wav","t_ms":7000}
+{"dur_ms":5000,"ev":"play_finished","path":"work/verify/aec_probe.wav","t_ms":12100}
+{"ev":"quit_ack","t_ms":14100}
