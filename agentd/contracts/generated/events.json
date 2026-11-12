@@ -42,6 +42,8 @@
     "approval.resolved",
     "approval.unavailable",
     "approval.waiting",
+    "conversation.turn_joined",
+    "conversation.turn_reset",
     "daemon.recovered",
     "daemon.started",
     "dependency.recovered",
@@ -78,6 +80,7 @@
   ],
   "categories": [
     "approval",
+    "conversation",
     "daemon",
     "dependency",
     "model",
@@ -865,6 +868,40 @@
       "payload_fields": [
         "reason",
         "detail"
+      ],
+      "required_fields": [
+        "reason"
+      ]
+    },
+    {
+      "type": "conversation.turn_joined",
+      "category": "conversation",
+      "severity": "info",
+      "title": "接上了上一句",
+      "summary": "本回合第 {index} 句，接在第 {turn_id} 回合上。",
+      "impact": "上下文只用于消歧，不会替用户执行新动作。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "turn_id",
+        "index"
+      ],
+      "required_fields": [
+        "turn_id",
+        "index"
+      ]
+    },
+    {
+      "type": "conversation.turn_reset",
+      "category": "conversation",
+      "severity": "info",
+      "title": "对话回合已结束",
+      "summary": "回合结束，原因是 {reason}。",
+      "impact": "下一句话从新回合计起，不再依赖之前的句子。",
+      "advice": null,
+      "is_recovery": false,
+      "payload_fields": [
+        "reason"
       ],
       "required_fields": [
         "reason"

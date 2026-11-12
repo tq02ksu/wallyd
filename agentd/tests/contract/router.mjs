@@ -13,7 +13,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { FAST_RULES, ruleTag } from '../../src/agentd/router.ts';
+import {
+  FAST_RULES,
+  MAX_FOLLOW_SPEED_MPS,
+  MIN_FOLLOW_SPEED_MPS,
+  DEFAULT_FOLLOW_SPEED_MPS,
+  ruleTag,
+} from '../../src/agentd/router.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOOLS = path.resolve(HERE, '..', '..', '..', 'contracts', 'generated', 'mcp-tools.json');
@@ -87,6 +93,35 @@ console.log('— 参数槽必须是目标能力真实接受的参数');
     }
   }
   check('槽名都在能力的 inputSchema.properties 里', problems.length === 0, problems.join('; '));
+}
+
+console.log('— GH-12：slow_down 只映射已发布能力与真实参数');
+{
+  const slow = FAST_RULES.find((r) => r.id === 'slow_down');
+  check('存在 slow_down', Boolean(slow));
+  check('slow_down 映射 robot_follow', slow?.capability === 'robot_follow', slow?.capability);
+  check(
+    'slow_down 只在上一轮是 robot_follow 时参与匹配',
+    slow?.requiresPreviousCapability === 'robot_follow',
+    String(slow?.requiresPreviousCapability),
+  );
+  check('slow_down 从上下文派生参数', typeof slow?.contextArgs === 'function');
+  const follow = byName.get('robot_follow');
+  const props = new Set(Object.keys(follow?.inputSchema?.properties ?? {}));
+  const derived = slow?.contextArgs?.({
+    available: null,
+    previous: { capability: 'robot_follow', args: { target_track_id: 'abc' } },
+  });
+  check(
+    '派生参数都在 robot_follow 的 inputSchema 里',
+    Object.keys(derived ?? {}).length > 0 && Object.keys(derived ?? {}).every((k) => props.has(k)),
+    JSON.stringify(derived),
+  );
+  // 路由里的速度常量必须与契约默认值/边界一致，避免第二份真值悄悄漂移。
+  const speed = follow?.inputSchema?.properties?.max_speed_mps ?? {};
+  check('默认跟随速度与契约一致', DEFAULT_FOLLOW_SPEED_MPS === speed.default, `${DEFAULT_FOLLOW_SPEED_MPS} vs ${speed.default}`);
+  check('速度下限与契约一致', MIN_FOLLOW_SPEED_MPS === speed.minimum, `${MIN_FOLLOW_SPEED_MPS} vs ${speed.minimum}`);
+  check('速度上限与契约一致', MAX_FOLLOW_SPEED_MPS === speed.maximum, `${MAX_FOLLOW_SPEED_MPS} vs ${speed.maximum}`);
 }
 
 console.log('— 安全底线：受保护的停止规则仍在，且映射无审批的 robot_stop');

@@ -35,6 +35,20 @@ export interface RunRequestInput {
   session_id?: string;
   source?: 'text' | 'asr';
   idempotency_key?: string;
+  /**
+   * 仅供 Harness 消歧的会话上下文块（GH-12）。
+   *
+   * **不落库、不进事件**：直接给 `executeHarness`，由 harness 格式化进发给模型的
+   * prompt。拼进 `prompt` 字段会同时污染 run 记录与事件正文。
+   */
+  context?: string | null;
+  /**
+   * 同回合上一轮的 run 结论（GH-12 路由消歧）。
+   *
+   * 只给 `matchRoute` 的消歧性规则用（如「慢一点」需要知道上一轮在跟随）；
+   * **不落库、不进事件**，HTTP 入口不提供它（无状态请求没有「上一句」）。
+   */
+  previous?: { capability: string; args: Record<string, unknown> } | null;
 }
 
 export interface RunRequestDeps {
@@ -44,7 +58,7 @@ export interface RunRequestDeps {
   /** 命中可执行规则后启动执行。装配层注入，**不阻塞响应**。 */
   executeFast: (runId: string, capability: string, args: Record<string, unknown>) => void;
   /** `route: harness` 的 run 交给 Harness 执行器。装配层注入，**不阻塞响应**。 */
-  executeHarness: (runId: string) => void;
+  executeHarness: (runId: string, context?: string | null) => void;
   /** 测试可注入的规则表；生产使用 `FAST_RULES`。 */
   rules?: readonly FastRule[];
   /**
@@ -65,6 +79,11 @@ export interface RunRequestResult {
   duplicate?: boolean;
   ambiguous?: string[];
   clarify?: { question: string; missing: string[] };
+  /**
+   * **内部字段**：命中快速规则时实际下发的结构化参数，供装配层记回合上下文。
+   * 不属于 `RunAccepted` 契约响应，HTTP 路由必须剔除（见 `service.ts`）。
+   */
+  fast_args?: Record<string, unknown>;
 }
 
 export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): RunRequestResult {
@@ -76,6 +95,8 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
       // 传给规则的是真实状态，不是「反正前面会挡」的假设。
       busy: Boolean(busy),
       speaking: false,
+      // 没有上一轮时是 null：消歧性规则（slow_down）不会参与匹配。
+      previous: input.previous ?? null,
     },
     deps.rules ?? FAST_RULES,
   );
@@ -135,7 +156,7 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
   }
   // Harness 同理：建了 run 就要推进，否则它会永远停在 accepted。
   if (route === 'harness' && !result.duplicate) {
-    deps.executeHarness(result.run_id);
+    deps.executeHarness(result.run_id, input.context ?? null);
   }
 
   return {
@@ -146,5 +167,6 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
     fast_rule: result.fast_rule,
     created_at: result.created_at,
     duplicate: result.duplicate,
+    ...(matched.kind === 'matched' ? { fast_args: matched.args } : {}),
   };
 }
