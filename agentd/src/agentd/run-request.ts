@@ -292,19 +292,29 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
   }
 
   // ---- GH-68：track 引用必须仍然有效；失效时明确拒绝，不按 `target` 静默兜底。
+  //
   // 这条对显式 `target_track_id`、绑定解析出的目标、以及上一轮沿用的目标都生效。
+  // 但「失效」必须是**有证据的失效**：只有 `person.lost` 明确报告过的 track 才拒绝。
+  // 从未观测过的 `track_id` 是 `unknown`，不是 `dead`——把「没数据」当成「数据说它死了」
+  // 会让直接 POST 的旧客户端/夹具被这条校验误伤（GH-68 第二轮接缝约定）。
+  // `deps.followTargets` 省略时整段跳过，保持 `matchRoute` 的纯路由语义。
   if (matched.kind === 'matched' && matched.rule.capability === 'robot_follow' && deps.followTargets) {
     const trackId = matched.args.target_track_id;
     if (typeof trackId === 'string' && trackId.length > 0) {
-      if (!deps.followTargets.isTrackLive(trackId)) {
+      if (deps.followTargets.isTrackKnownLost(trackId)) {
         throw new ApiError('E_VALIDATION', `目标已离开画面（track ${trackId} 已失效），未执行跟随`, {
           details: { field: 'target_track_id', track_id: trackId, reason: 'target_gone' },
           hint: '重新说「跟着我」让我绑定当前画面里的目标',
         });
       }
-      // 用户明确点名了一条活 track：这条证据来源要如实记成 explicit。
-      // 自动绑定已在 resolveFollowTarget 里落库，不重复覆盖。
-      if (!targetFromBinding && (matched.rule.id === 'follow_me' || matched.rule.id === 'come_here')) {
+      // 用户明确点名了一条**观测过的活 track**：证据来源如实记成 explicit。
+      // 自动绑定已在 resolveFollowTarget 里落库，不重复覆盖；unknown 的 track
+      // 没有任何观测证据，不写绑定（写了也只会被读取路径当成悬空条目删掉）。
+      if (
+        !targetFromBinding &&
+        deps.followTargets.isTrackLive(trackId) &&
+        (matched.rule.id === 'follow_me' || matched.rule.id === 'come_here')
+      ) {
         deps.followTargets.bindExplicit(input.speaker_id, trackId);
       }
     }

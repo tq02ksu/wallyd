@@ -6,6 +6,8 @@
  *
  * 反向判据（每条都实测过「删掉判断就红」）：
  *   - 判据 2：不处理 person.lost / 不校验 track 存活 → 失效 track 会被当成 200；
+ *   - 判据 2 接缝：把「known-lost」写成「!isTrackLive」（把 unknown 当成已死）
+ *     或把校验扩展到 `followTargets` 省略的路径 → 接缝 a/b 会红；
  *   - 判据 3：把门限设成 0（等价于删掉判断）→ 低置信度绑定会直接下发 robot_follow；
  *   - 判据 4：没有「≥2 条活 track 必须澄清」的分支 → 会按唯一候选自动绑定。
  */
@@ -172,6 +174,66 @@ check('反向：不处理 lost 时同一请求会 fast（证明失效判断生�
 check('反向：不处理 lost 时真的下发 robot_follow', reverseLostExec.at(-1)?.capability === 'robot_follow', JSON.stringify(reverseLostExec.at(-1)));
 if (reverseLost.run_id) svc.cancelRun(reverseLost.run_id, '测试收尾');
 
+// ---------------------------------------------------------------- 判据 2 接缝：unknown ≠ lost
+console.log('— 判据 2 接缝：只有「观测过再 lost」才拒绝；unknown 与未注入 followTargets 保持旧行为');
+// (a) followTargets 未注入：与 GH-68 之前逐字一致，不查存活、不报 target_gone。
+//     这是纯路由单测/夹具的接缝——没有绑定表就没有「track 还活着」这个前提。
+const legacyExec = [];
+let legacy = null;
+const legacyError = apiError(() => {
+  legacy = submitRunRequest(
+    {
+      runs: svc,
+      availableCapabilities: () => new Set(['robot_stop', 'robot_follow']),
+      executeFast: (runId, capability, args) => legacyExec.push({ runId, capability, args }),
+      executeHarness: () => {},
+    },
+    { prompt: '跟着我 track:abc' },
+  );
+});
+check(
+  '接缝 a：followTargets 未注入 + track:abc → fast/200（不看存活）',
+  !legacyError && legacy?.route === 'fast' && typeof legacy?.run_id === 'string',
+  JSON.stringify(legacyError ?? legacy),
+);
+check('接缝 a：真的下发 robot_follow', legacyExec.at(-1)?.capability === 'robot_follow', JSON.stringify(legacyExec.at(-1)));
+check('接缝 a：目标就是显式 track:abc', legacyExec.at(-1)?.args?.target_track_id === 'abc', JSON.stringify(legacyExec.at(-1)?.args));
+if (legacy?.run_id) svc.cancelRun(legacy.run_id, '测试收尾');
+
+// (b) 绑定层已注入，但这条 track 从未观测过 = unknown，不是 dead。
+//     直接 POST /api/run 的旧客户端/夹具不能因为「没数据」被拒绝。
+const unknownExec = [];
+let unknown = null;
+const unknownError = apiError(() => {
+  unknown = submitRunRequest(
+    deps({ executeFast: (runId, capability, args) => unknownExec.push({ runId, capability, args }) }),
+    { prompt: '跟着我 track:never-seen-abc' },
+  );
+});
+check(
+  '接缝 b：注入 followTargets + 从未见过的 track → fast（unknown 不拒绝）',
+  !unknownError && unknown?.route === 'fast' && typeof unknown?.run_id === 'string',
+  JSON.stringify(unknownError ?? unknown),
+);
+check('接缝 b：真的下发 robot_follow', unknownExec.at(-1)?.capability === 'robot_follow', JSON.stringify(unknownExec.at(-1)));
+check(
+  '接缝 b：不为 unknown 的 track 写悬空绑定',
+  !bindingRows().some((r) => r.track_id === 'never-seen-abc'),
+  JSON.stringify(bindingRows()),
+);
+if (unknown?.run_id) svc.cancelRun(unknown.run_id, '测试收尾');
+
+// (c) 同一条 track 先 appeared 再 lost → known-lost → 400/E_VALIDATION（判据 2 的强度不变）。
+appeared('track_seam');
+const seamRunsBefore = runCount();
+const seamLost = apiError(() => {
+  lost('track_seam');
+  return submitRunRequest(deps(), { prompt: '跟着我 track:track_seam', speaker_id: 'spk-seam' });
+});
+check('接缝 c：观测过再 lost 的 track → E_VALIDATION', seamLost?.code === 'E_VALIDATION', JSON.stringify(seamLost));
+check('接缝 c：HTTP 状态 400', seamLost?.status === 400, String(seamLost?.status));
+check('接缝 c：不建 run', runCount() === seamRunsBefore, `${seamRunsBefore} → ${runCount()}`);
+
 // ---------------------------------------------------------------- 判据 3：低置信度必须澄清
 console.log('— 判据 3：低置信度绑定 → route.clarify，且没有 robot_follow');
 appeared('track_9b');
@@ -244,6 +306,7 @@ const permissiveLookup = {
     auto_bound: true,
   }),
   isTrackLive: () => true,
+  isTrackKnownLost: () => false,
   bindExplicit: (speakerId, trackId) => ({
     speaker_id: speakerId ?? UNIDENTIFIED_SPEAKER,
     track_id: trackId,

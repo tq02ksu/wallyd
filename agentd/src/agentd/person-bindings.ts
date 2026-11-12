@@ -25,6 +25,11 @@
  * 4. 表有界：超过 `maxBindings` 时淘汰最早建立的条目；活 track 也有上限。
  * 5. 说话人键：上游省略 `speaker_id` 时使用固定的匿名键，**不得**把匿名绑定
  *    沿用给之后出现的有名说话人（旧上下文不跨人）。
+ * 6. **「没有数据」不等于「数据说它死了」**：track 的存活是三种状态
+ *    `live` / `lost` / `unknown`。只有**观测过随后 `person.lost`** 的 track 才算
+ *    `known-lost`，`follow` 才拒绝；从未观测过的 `track_id` 一律是 `unknown`，
+ *    沿用 GH-68 之前的行为放行（直接 POST 的旧客户端/夹具不该被这条校验咬住）。
+ *    拒绝路径必须由 `isTrackKnownLost` 明确回答，而不是 `!isTrackLive`。
  */
 import type { Store, Tx } from './store.ts';
 import { nowIso } from './store.ts';
@@ -70,6 +75,8 @@ export const DEFAULT_SINGLE_TRACK_CONFIDENCE = 0.6;
 
 const MAX_BINDINGS = 32;
 const MAX_LIVE_TRACKS = 64;
+/** 已 lost 的 track 需要记住多久才能区分「死过」与「没见过」；有界，防无界增长。 */
+const MAX_LOST_TRACKS = 256;
 
 interface BindingRow {
   speaker_id: string;
@@ -94,6 +101,13 @@ export type FollowTargetResolution =
 export interface FollowBindingLookup {
   resolveFollowTarget(speaker_id?: string | null): FollowTargetResolution;
   isTrackLive(track_id: string): boolean;
+  /**
+   * 这条 track 是否**观测过、随后 lost**。
+   *
+   * `follow` 的拒绝路径只认这个明确事实；`isTrackLive === false` 也可能是
+   * 「从没见过」，那不代表目标已经离开画面。
+   */
+  isTrackKnownLost(track_id: string): boolean;
   bindExplicit(speaker_id: string | null | undefined, track_id: string): PersonBinding;
 }
 
@@ -133,6 +147,8 @@ export class FollowTargetRegistry implements FollowBindingLookup {
   private readonly singleTrackConfidence: number;
   /** track_id → 最近一次观测。插入顺序就是首次出现顺序，用于有界淘汰。 */
   private readonly live = new Map<string, LiveTrack>();
+  /** 观测过、随后 `person.lost` 的 track。插入顺序用于有界淘汰。 */
+  private readonly lost = new Set<string>();
 
   constructor(opts: PersonBindingOptions) {
     this.store = opts.store;
@@ -147,6 +163,8 @@ export class FollowTargetRegistry implements FollowBindingLookup {
   trackAppeared(trackId: string, firstSeenAt?: string | null): void {
     if (!trackId) return;
     const existing = this.live.get(trackId);
+    // 重新出现即不再是 known-lost；track_id 复用不能背着一条陈旧的「已死」结论。
+    this.lost.delete(trackId);
     this.live.delete(trackId);
     this.live.set(trackId, {
       track_id: trackId,
@@ -174,6 +192,8 @@ export class FollowTargetRegistry implements FollowBindingLookup {
   trackLost(trackId: string): void {
     if (!trackId) return;
     this.live.delete(trackId);
+    this.lost.add(trackId);
+    this.trimLostTracks();
     this.store.transaction((tx) => {
       tx.run('DELETE FROM person_bindings WHERE track_id = ?', trackId);
     });
@@ -181,6 +201,15 @@ export class FollowTargetRegistry implements FollowBindingLookup {
 
   isTrackLive(trackId: string): boolean {
     return this.live.has(trackId);
+  }
+
+  /**
+   * 只有**确实观测到 `person.lost`** 的 track 才算被证明「离开画面」。
+   *
+   * 未出现过的 track 返回 false：那是 `unknown`，不是 `lost`。
+   */
+  isTrackKnownLost(trackId: string): boolean {
+    return this.lost.has(trackId);
   }
 
   liveTrackIds(): string[] {
@@ -327,6 +356,14 @@ export class FollowTargetRegistry implements FollowBindingLookup {
        )`,
       count - MAX_BINDINGS,
     );
+  }
+
+  private trimLostTracks(): void {
+    while (this.lost.size > MAX_LOST_TRACKS) {
+      const oldest = this.lost.values().next().value;
+      if (oldest === undefined) break;
+      this.lost.delete(oldest);
+    }
   }
 
   private trimLiveTracks(): void {
