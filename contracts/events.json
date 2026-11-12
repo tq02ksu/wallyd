@@ -486,7 +486,11 @@
       "category": "speech",
       "no_state": true,
       "payload": {
-        "approval_id": {"type": "string", "required": true},
+        "approval_id": {
+          "type": "string",
+          "required": false,
+          "notes": "审批复述才有；澄清追问没有审批 ID"
+        },
         "kind": {"type": "string", "required": true},
         "task_id": {"type": "string", "required": true},
         "reason": {"type": "string", "required": true}

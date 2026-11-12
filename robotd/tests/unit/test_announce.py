@@ -72,6 +72,17 @@ def valid_body(**overrides) -> dict:
     return body
 
 
+def clarification_body(**overrides) -> dict:
+    body = {
+        "kind": "clarification",
+        "reason": "missing_arguments",
+        "action_label": "走到我这儿来",
+        "missing": ["target_track_id"],
+    }
+    body.update(overrides)
+    return body
+
+
 def test_announce_accepts_structured_request_and_returns_rendered_text():
     app, bridge = make_app()
     assert bridge is not None
@@ -195,4 +206,88 @@ def test_announce_completion_event_only_after_bridge_finishes():
     assert len(finished) == 1
     assert finished[0].payload["approval_id"] == "appr-1"
     assert finished[0].payload["kind"] == "approval_repeat"
+    assert finished[0].payload["task_id"] == result["task_id"]
+
+
+def test_announce_clarification_renders_structured_question_and_speaks():
+    """GH-49 判据 1：追问必须真的进入播报链路，且正文来自结构化字段。"""
+    app, bridge = make_app()
+    assert bridge is not None
+    result = _h_announce(ctx(app, clarification_body()))
+
+    assert result["status"] == "accepted"
+    assert result["kind"] == "clarification"
+    assert "approval_id" not in result, "澄清没有审批记录"
+    assert "走到我这儿来" in result["text"]
+    assert "目标" in result["text"], "missing 里的字段名要渲染成可念的追问"
+    speak = [c for c in bridge.sent if c.get("cmd") == "speak"]
+    assert len(speak) == 1
+    assert speak[0]["text"] == result["text"]
+
+
+def test_announce_clarification_renders_candidates_and_more():
+    """GH-49 判据 4：歧义要念出候选；超过 3 条只念前两条 +「还是别的」。"""
+    app, bridge = make_app()
+    assert bridge is not None
+    result = _h_announce(
+        ctx(
+            app,
+            clarification_body(
+                reason="ambiguous",
+                action_label=None,
+                missing=None,
+                candidates=["走到我这儿来", "跟随我"],
+                more=True,
+            ),
+        )
+    )
+    assert "走到我这儿来" in result["text"]
+    assert "跟随我" in result["text"]
+    assert "还是别的" in result["text"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        clarification_body(text="任意自由文本"),
+        clarification_body(reason="free_speech"),
+        clarification_body(approval_id="appr-1"),
+        clarification_body(args_summary="审批字段不能混进澄清"),
+        clarification_body(missing=["用户 原话"]),
+        clarification_body(missing=["a"] * 9),
+        clarification_body(reason="ambiguous", candidates=["a", "b", "c", "d"]),
+        clarification_body(reason="ambiguous", candidates=["a" * 81]),
+    ],
+)
+def test_announce_clarification_rejects_free_text_and_wrong_shapes(body):
+    app, _ = make_app()
+    with pytest.raises(RobotdError) as exc:
+        _h_announce(ctx(app, body))
+    assert exc.value.code is ErrorCode.VALIDATION
+
+
+def test_announce_clarification_without_bridge_fails_without_approval_id():
+    app, _ = make_app(with_bridge=False)
+    with pytest.raises(RobotdError) as exc:
+        _h_announce(ctx(app, clarification_body()))
+    assert exc.value.code is ErrorCode.UNAVAILABLE
+    failed = [e for e in app.kernel.recent_events(20) if e.type == "speech.announce_failed"]
+    assert len(failed) == 1
+    assert failed[0].payload["kind"] == "clarification"
+    assert "approval_id" not in failed[0].payload
+
+
+def test_announce_clarification_completion_has_no_approval_id():
+    app, bridge = make_app()
+    assert bridge is not None
+    result = _h_announce(ctx(app, clarification_body()))
+    speak = [c for c in bridge.sent if c.get("cmd") == "speak"][-1]
+
+    app.audio.handle_bridge_event(
+        {"ev": "tts_finished", "response_id": speak["response_id"], "chunks": 1, "played": 1}
+    )
+    finished = [e for e in app.kernel.recent_events(30) if e.type == "speech.tts_finished"]
+    assert len(finished) == 1
+    assert finished[0].payload["kind"] == "clarification"
+    assert "approval_id" not in finished[0].payload
     assert finished[0].payload["task_id"] == result["task_id"]

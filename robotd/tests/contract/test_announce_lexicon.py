@@ -55,12 +55,34 @@ def test_lexicon_is_the_contract_owned_single_source():
 
 def test_openapi_length_and_kinds_match_the_lexicon():
     spec = json.loads((REPO / "contracts" / "generated" / "openapi.json").read_text(encoding="utf-8"))
-    schema = spec["components"]["schemas"]["AnnounceRequest"]
+    schemas = spec["components"]["schemas"]
+    schema = schemas["AnnounceRequest"]
+    # GH-49 把 AnnounceRequest 改成按 kind 区分的 oneOf：每种请求的必填字段不同，
+    # 所以审批播报的 x-announce-lexicon / maxLength 要落在审批变体上。
+    # 扁平形态（只有一个 schema）仍然按同一组不变量检查，两种形态都不放过。
+    variants = (
+        [schemas[ref["$ref"].rsplit("/", 1)[-1]] for ref in schema["oneOf"]]
+        if "oneOf" in schema
+        else [schema]
+    )
+    kinds = {
+        value
+        for variant in variants
+        for value in variant.get("properties", {}).get("kind", {}).get("enum", [])
+    }
+    approval = [
+        variant
+        for variant in variants
+        if {"approval_repeat", "approval_unheard"}
+        & set(variant.get("properties", {}).get("kind", {}).get("enum", []))
+    ]
+    assert approval, "AnnounceRequest 里找不到审批播报变体"
     lex = load_lexicon()
-    assert schema["x-announce-lexicon"] == "announce-lexicon.json"
-    assert schema["properties"]["args_summary"]["maxLength"] == lex["args_summary"]["max_chars"]
-    assert "approval_repeat" in schema["properties"]["kind"]["enum"]
-    assert "approval_unheard" in schema["properties"]["kind"]["enum"]
+    for variant in approval:
+        assert variant["x-announce-lexicon"] == "announce-lexicon.json"
+        assert variant["properties"]["args_summary"]["maxLength"] == lex["args_summary"]["max_chars"]
+    assert "approval_repeat" in kinds
+    assert "approval_unheard" in kinds
 
 
 def test_every_approval_param_has_a_lexicon_reading():

@@ -130,14 +130,28 @@ export interface StopResult {
   state?: 'requested' | 'confirmed' | 'unknown';
 }
 
-export interface AnnounceInput {
+export interface ApprovalRepeatAnnounceInput {
   approval_id: string;
   kind: 'approval_repeat' | 'approval_unheard';
   action_label: string;
   args_summary: string;
 }
 
-export interface AnnounceAccepted {
+/** GH-49：澄清追问只传结构化字段，正文由 robotd 固定模板渲染。 */
+export interface ClarificationAnnounceInput {
+  kind: 'clarification';
+  reason: 'missing_arguments' | 'capability_unavailable' | 'precondition' | 'ambiguous';
+  action_label?: string;
+  /** 缺失参数字段名（不是用户原文）。 */
+  missing?: string[];
+  /** 歧义候选的规则摘要（agentd 已按上限截断）。 */
+  candidates?: string[];
+  more?: boolean;
+}
+
+export type AnnounceInput = ApprovalRepeatAnnounceInput | ClarificationAnnounceInput;
+
+export interface ApprovalRepeatAnnounceAccepted {
   task_id: string;
   status: 'accepted';
   approval_id: string;
@@ -145,6 +159,16 @@ export interface AnnounceAccepted {
   /** robotd 实际交给 TTS 的固定模板句子，供审计与界面展示。 */
   text: string;
 }
+
+export interface ClarificationAnnounceAccepted {
+  task_id: string;
+  status: 'accepted';
+  kind: 'clarification';
+  /** robotd 实际交给 TTS 的固定模板句子，供审计与界面展示。 */
+  text: string;
+}
+
+export type AnnounceAccepted = ApprovalRepeatAnnounceAccepted | ClarificationAnnounceAccepted;
 
 export interface SpeakInput {
   text: string;

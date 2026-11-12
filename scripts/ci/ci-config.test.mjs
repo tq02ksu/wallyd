@@ -458,5 +458,40 @@ check(
   String(rootPackage.scripts?.gates),
 );
 
+// `agentd/package.json` 的 `test:unit` 是一条超长单行命令，合并冲突时最容易被
+// 「整行取我方 / 取对方」静默吞掉一个测试文件——CI 仍会绿，但那个文件再也没跑过。
+// 这里把必须存在的用例钉住（GH-49 与 main 取并集后的 19 项），删掉任何一项都会红。
+const agentdPackage = JSON.parse(readFileSync(path.join(root, 'agentd', 'package.json'), 'utf8'));
+const unitCommand = String(agentdPackage.scripts?.['test:unit'] ?? '');
+const requiredUnitFiles = [
+  'store.mjs',
+  'runs.mjs',
+  'run-request.mjs',
+  'harness.mjs',
+  'approval-digest.mjs',
+  'approval-key.mjs',
+  'approval-core.mjs',
+  'approval-executor.mjs',
+  'approval-settle.mjs',
+  'announce-lexicon.mjs',
+  'utterance-dispatch.mjs',
+  'speech-ignored-chain.mjs',
+  'conversation.mjs',
+  'conversation-turns.mjs',
+  'narration.mjs',
+  'safety-bridge.mjs',
+  'robotd-speak.mjs',
+  'router.test.ts',
+  'http.mjs',
+];
+const missingUnitSuites = requiredUnitFiles.filter(
+  (file) => !unitCommand.includes(`tests/unit/${file}`),
+);
+check(
+  'agentd test:unit 覆盖全部必需的用例（含会话上下文与澄清）',
+  missingUnitSuites.length === 0,
+  `缺少：${missingUnitSuites.join(', ')}`,
+);
+
 console.log(failed === 0 ? '\nCI configuration tests passed' : `\n${failed} CI configuration test(s) failed`);
 process.exit(failed === 0 ? 0 : 1);

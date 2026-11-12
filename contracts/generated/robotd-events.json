@@ -580,7 +580,6 @@
         "reason"
       ],
       "required_fields": [
-        "approval_id",
         "kind",
         "task_id",
         "reason"
