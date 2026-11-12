@@ -122,6 +122,31 @@ for (const ev of events.events ?? []) {
     }
   }
 
+  // 频率上限必须是机器可读且完整的声明：max_hz 管住条数，key_field 指明按什么分组，
+  // note 说明为什么降频。只写一句注释不算契约——运行时读的是生成物里的 rate_limit。
+  if (ev.rate_limit !== undefined) {
+    const rl = ev.rate_limit;
+    if (!rl || typeof rl !== 'object' || Array.isArray(rl)) {
+      problems.push(`events.json: ${ev.type}.rate_limit 必须是对象`);
+    } else {
+      if (!Number.isFinite(rl.max_hz) || rl.max_hz <= 0) {
+        problems.push(`events.json: ${ev.type}.rate_limit.max_hz 必须是正数`);
+      }
+      if (!Number.isInteger(rl.window_ms) || rl.window_ms <= 0) {
+        problems.push(`events.json: ${ev.type}.rate_limit.window_ms 必须是正整数`);
+      }
+      if (typeof rl.key_field !== 'string' || !rl.key_field || !(rl.key_field in ev.payload)) {
+        problems.push(`events.json: ${ev.type}.rate_limit.key_field 必须指向 payload 里的字段`);
+      }
+      if (rl.excess !== 'drop') {
+        problems.push(`events.json: ${ev.type}.rate_limit.excess 目前只允许 drop`);
+      }
+      if (typeof rl.note !== 'string' || !rl.note.trim()) {
+        problems.push(`events.json: ${ev.type}.rate_limit.note 必须说明为什么降频`);
+      }
+    }
+  }
+
   // 模板占位符必须能在 payload 里找到来源（或属于公认的上下文键）
   const contextKeys = new Set([
     'run_id', 'session_id', 'approval_id', 'event_id', 'cursor',
@@ -164,6 +189,9 @@ const eventIndex = {
     required_fields: Object.entries(e.payload ?? {})
       .filter(([, d]) => d?.required)
       .map(([k]) => k),
+    // 字段级契约与频率上限一并进生成物：运行时只读生成物，不回头解析契约源。
+    payload_spec: e.payload ?? null,
+    rate_limit: e.rate_limit ?? null,
   })),
   reserved_unimplemented: events.reserved_unimplemented ?? [],
 };

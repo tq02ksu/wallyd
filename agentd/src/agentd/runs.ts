@@ -992,6 +992,7 @@ export class RunService {
           approval_id: a.approval_id,
           session_id: run.session_id,
           params: {
+            approval_id: a.approval_id,
             action_label: a.capability,
             status: 'cancelled',
             decided_by: 'cancel',
@@ -1682,6 +1683,7 @@ export class RunService {
             approval_id: approvalId,
             session_id: run?.session_id ?? null,
             params: {
+              approval_id: approvalId,
               action_label: a.action_label,
               status: 'cancelled',
               decided_by: 'stop',
@@ -1695,7 +1697,7 @@ export class RunService {
             run_id: a.run_id,
             approval_id: approvalId,
             session_id: run?.session_id ?? null,
-            params: { reason, kind: opts.kind ?? 'no_audio' },
+            params: { approval_id: approvalId, reason, kind: opts.kind ?? 'no_audio' },
           }).seq,
         );
       }

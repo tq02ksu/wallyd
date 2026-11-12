@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 import type { Store, Tx } from './store.ts';
 import { compactJson, nowIso } from './store.ts';
 import type { components } from '../../contracts/generated/agentd-types.ts';
+import { validateEventPayload, type PayloadFieldSpec } from './event-payload.ts';
+import { EventRateLimiter, type RateLimitSpec } from './event-rate-limit.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,6 +47,10 @@ export interface EventTemplate {
   is_recovery?: boolean;
   payload_fields: string[];
   required_fields: string[];
+  /** 字段级契约声明（type/required/enum/...）；运行时的 payload 校验直接用生成物。 */
+  payload_spec?: Record<string, PayloadFieldSpec> | null;
+  /** 频率上限（只有声明了的事件才降频，例如 person.moved）。 */
+  rate_limit?: RateLimitSpec | null;
 }
 
 interface EventRegistry {
@@ -71,6 +77,15 @@ export interface EmitInput {
   recovery_of?: string | null;
   source_instance_id?: string | null;
   occurred_at?: string;
+}
+
+export interface EmitResult {
+  /** 落库后的 seq；被频率上限压掉时为 0。 */
+  seq: number;
+  /** 落库后的 event_id；被频率上限压掉时为空串。 */
+  event_id: string;
+  /** true = 这条观测因契约频率上限被丢弃，没有写入事件库。 */
+  throttled: boolean;
 }
 
 export interface EventRow {
@@ -247,12 +262,15 @@ export class EventLog {
   private registry: EventRegistry;
   private templates: Map<string, EventTemplate>;
   private bootId: string;
+  private limiter = new EventRateLimiter();
+  private now: () => number;
 
-  constructor(store: Store, registry: EventRegistry, bootId: string) {
+  constructor(store: Store, registry: EventRegistry, bootId: string, opts: { now?: () => number } = {}) {
     this.store = store;
     this.registry = registry;
     this.bootId = bootId;
     this.templates = new Map(registry.templates.map((t) => [t.type, t]));
+    this.now = opts.now ?? (() => Date.now());
   }
 
   isRegistered(type: string): boolean {
@@ -272,7 +290,7 @@ export class EventLog {
    *
    * 未登记的类型抛错——不是静默跳过。这样开发期就能发现「忘了登记事件」。
    */
-  emit(tx: Tx, input: EmitInput): { seq: number; event_id: string } {
+  emit(tx: Tx, input: EmitInput): EmitResult {
     const tpl = this.templates.get(input.type);
     if (!tpl) {
       throw new EventRegistryError(
@@ -285,6 +303,18 @@ export class EventLog {
       if (forbidden.has(key)) {
         throw new EventRegistryError(`事件 ${input.type} 的参数含禁列字段 ${key}（思维链/凭证不得入库）`);
       }
+    }
+    // 字段级契约：必填、类型、枚举。「可选字段省略」与「可选字段填 null」是两回事，
+    // 后者在这里被拒——否则下游分不清「没有这个事实」和「事实为空」。
+    const payloadProblems = validateEventPayload(tpl.payload_spec, params);
+    if (payloadProblems.length) {
+      throw new EventRegistryError(
+        `事件 ${input.type} 的 payload 不符合契约：${payloadProblems.join('；')}`,
+      );
+    }
+    // 频率上限（契约声明）：超出即丢弃，不落库、不补发。
+    if (tpl.rate_limit && !this.limiter.allow(input.type, tpl.rate_limit, params, this.now())) {
+      return { seq: 0, event_id: '', throttled: true };
     }
     const received = nowIso();
     eventCounter = (eventCounter + 1) % 0xffff;
@@ -314,11 +344,11 @@ export class EventLog {
       input.caused_by ?? null,
       input.recovery_of ?? null,
     );
-    return { seq: res.lastInsertRowid, event_id: eventId };
+    return { seq: res.lastInsertRowid, event_id: eventId, throttled: false };
   }
 
   /** 便捷写法：自己开事务写一条事件（用于与业务状态无关的独立事件）。 */
-  emitStandalone(input: EmitInput): { seq: number; event_id: string } {
+  emitStandalone(input: EmitInput): EmitResult {
     return this.store.transaction((tx) => this.emit(tx, input));
   }
 

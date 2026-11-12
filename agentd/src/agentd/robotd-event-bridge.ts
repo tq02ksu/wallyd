@@ -412,6 +412,9 @@ export class RobotdEventBridge {
       duration_ms: intOrUndef(p.audio_ms),
       stop_reason: normHeardReason(stopReason),
       route_hint: typeof p.route_hint === 'string' ? p.route_hint : undefined,
+      // 可选：上游有说话人分段时才带。空串/非字符串一律省略——契约要求「未实现时省略」，
+      // 这里不做编号分配，只把已有事实原样带过去。
+      speaker_id: typeof p.speaker_id === 'string' && p.speaker_id ? p.speaker_id : undefined,
     });
 
     const info = this.utteranceStarts.get(utteranceId);

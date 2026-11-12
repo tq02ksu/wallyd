@@ -372,6 +372,23 @@ def test_vision_events_are_marked_unimplemented(events):
     assert any(t.startswith("people") for t in reserved)
 
 
+def test_speech_final_speaker_id_is_an_optional_string(events):
+    """GH-63：说话人标识只保证「字段存在且类型明确」。
+
+    未实现说话人分段时必须**省略**该字段（不填 null、不填占位串），
+    所以它不能进 required_fields；编号规则属于 #50 第二段，这里不做约束。
+    """
+    generated = next(ev for ev in events["events"] if ev["type"] == "speech.final")
+    assert "speaker_id" in generated["payload_fields"]
+    assert "speaker_id" not in generated["required_fields"]
+
+    source = json.loads((CONTRACTS / "events.json").read_text(encoding="utf-8"))
+    final = next(ev for ev in source["events"] if ev["type"] == "speech.final")
+    field = final["payload"]["speaker_id"]
+    assert field["type"] == "string"
+    assert field.get("required") is not True
+
+
 def test_unimplemented_capabilities_state_a_reason():
     for cap in Registry().all():
         if cap.implementation is Implementation.UNIMPLEMENTED:

@@ -273,7 +273,7 @@ speech.tts_started / speech.tts_chunk / speech.tts_finished 事件
 | `speech.started` / `speech.speech_ended` | `utterance_id, trigger, rms_db, audio_ms` | VAD 判「开始说 / 说完了」 | ✅ 已落地（能量 VAD） |
 | `speech.gate` | `utterance_id, decision, reason, db, aec_erle_db, threshold_db` | 播报期间 VAD 上升是否放行打断（robotd 的 AudioRuntime 单点判定；pass 与 suppressed 都发） | ✅ 已落地（GH-5 / V02） |
 | `speech.partial` | `task_id, utterance_id, revision, text, audio_start_ms/end_ms` | 增量文本（可修订） | ✅ 已落地 |
-| `speech.final` | `task_id, utterance_id, text, stop_reason` | 最终文本（默认冻结） | ✅ 已落地 |
+| `speech.final` | `task_id, utterance_id, text, stop_reason, speaker_id?` | 最终文本（默认冻结）；`speaker_id` 可选，未实现分段时省略（GH-63 已进契约） | ✅ 已落地（`speaker_id` 字段已登记，产出待实现） |
 | `speech.ignored` | `utterance_id, reason, run_id?` | 这一轮被丢弃（`busy` / `echo` / `empty` / `speaking`），让时间线有分母 | ✅ 已落地（GH-7；`speaking` 由 GH-9 真正产生） |
 | `speech.speaker_segment` / `speech.speaker_resolved` | `segment_id, utterance_id, speaker_id, start_ms, end_ms, confidence` | 说话人分段 / 身份后置解析 | 待新增（或走 `people.*`） |
 | `speech.tts_started` / `speech.tts_chunk_started` / `speech.tts_chunk_finished` / `speech.tts_finished` / `speech.tts_cancelled` | `response_id, index, reason` | 播放进度与控制 | ✅ 已落地（`speak-stream`） |
@@ -655,7 +655,7 @@ WebRTC 官方集成文档的表述与此一致：
 | 2 | 常驻 `audio-bridge`（采集/播放同图 + AEC），barge-in 的前提 | 仍是每次调用 spawn `mac_speech.swift`；communication-protocol 明确「原生桥 = spawn + stdio，一次性命令」 | ⚠️ **最大结构性差异**：方案要改常驻，重构未改 |
 | 3 | 独立 VAD 端点检测（Silero），说完自动收尾 | `auto_endpoint` 仍走系统 `SpeechDetector`、默认关（已实测与 Transcriber 冲突不可用） | **仍缺 → §13 已补**（改用自带能量 VAD，默认开） |
 | 4 | 流式 ASR partial/final 契约化 + 事件推送 | ✅ `/v1/speech/listen` + `speech.partial` / `speech.final`，`/v1/events` 带 `seq` / 订阅 / 补发 | 一致（投递侧比方案写得更强） |
-| 5 | ASR 与说话人分析并行 → speaker-aware transcript | 未实现；仅 `V1_SUPPORTED_TYPES` 预留 `people.*` / `person.*` | **仍缺** |
+| 5 | ASR 与说话人分析并行 → speaker-aware transcript | 未实现；`person.*` 与 `speech.final/utterance_heard.speaker_id` 已由 GH-63 登记契约，检测/分段仍未实现 | **仍缺**（契约面已就位） |
 | 6 | 分句流式 TTS + 有界队列 + barge-in | 未实现；`SpeakRequest.interruptible` 已进契约但**代码未消费** | 部分 → **§13 已补**（`speak-stream` + 队列 + 取消 + 打断，`interruptible` 已生效） |
 | 7 | 统一单调时间轴（`ts_mono_ns`） | 现状 = `seq` + 墙钟 ISO `timestamp`，无单调时间 | **仍缺 → §13 已补** |
 | 8 | 打断仲裁单点（Audio Runtime） | 有 `robot_stop`（幂等抢占）/ `task_cancel`（abort），但缺 VAD 触发那一端 | 部分 → **§13 已补**（听/说软任务分槽 + 单点仲裁） |

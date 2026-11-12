@@ -446,7 +446,8 @@
         "utterance_id",
         "text",
         "stop_reason",
-        "no_speech"
+        "no_speech",
+        "speaker_id"
       ],
       "required_fields": [
         "utterance_id",

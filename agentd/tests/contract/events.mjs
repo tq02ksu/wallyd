@@ -125,7 +125,17 @@ try {
   // templates 是数组（每条带 type 字段），不是以 type 为键的对象。
   const tpl = new Map(events.templates.map((t) => [t.type, t]));
   const types = events.templates.map((t) => t.type);
-  check('登记的事件类型有 41 种', types.length === 41, `实际 ${types.length}`);
+  // 与契约源逐个对齐，而不是硬编码总数：别的 PR 新增事件不应让本文件变红，
+  // 漏登记（契约有、生成物没有）或多登记（生成物有、契约没有）必须变红。
+  const aEventsSource = JSON.parse(
+    fs.readFileSync(path.resolve(HERE, '..', '..', 'contracts', 'events.json'), 'utf8'),
+  );
+  const sourceTypes = aEventsSource.events.map((e) => e.type).sort();
+  check(
+    '登记的事件类型与契约源逐个对齐',
+    JSON.stringify([...types].sort()) === JSON.stringify(sourceTypes),
+    `契约 ${sourceTypes.length} / 生成物 ${types.length}`,
+  );
   // R14 的语音事件必须登记：缺任何一条，robotd 的语音事件到了 agentd 会被
   // `isRegistered` 拒写（实测踩过——事件被静默丢掉，页面上什么都没有）。
   const speechRequired = [
@@ -157,6 +167,14 @@ try {
   check('每条模板都有 title', events.templates.every((t) => t.title));
   check('每条模板都有 summary', events.templates.every((t) => t.summary));
 
+  // GH-63：人物的观测事实面。没有这三条，robot_follow.target_track_id 就没有生产者，
+  // 下游只能猜；但它们是事实（track 生命周期），不是身份判断。
+  for (const type of ['person.appeared', 'person.moved', 'person.lost']) {
+    check(`${type} 已登记`, tpl.has(type));
+  }
+  const identityEvents = types.filter((t) => /^person\.(identified|recognized|bound)$/.test(t));
+  check('没有 person.identified / recognized / bound', identityEvents.length === 0, identityEvents.join(', '));
+
   // 恢复标志必须显式声明。`daemon.recovered` 名字里有 recovered，
   // 语义却是「上次没跑完」的告警——按名字猜会把它错标成「已恢复」。
   check('daemon.recovered 不是恢复事件', tpl.get('daemon.recovered')?.is_recovery === false);
@@ -179,9 +197,6 @@ try {
   const stopReq = tpl.get('safety.stop_requested');
   check('safety.stop_requested 已登记', Boolean(stopReq));
   check('safety.stop_requested 必填 cause', stopReq?.required_fields.includes('cause') === true);
-  const aEventsSource = JSON.parse(
-    fs.readFileSync(path.resolve(HERE, '..', '..', 'contracts', 'events.json'), 'utf8'),
-  );
   const stopSource = aEventsSource.events.find((e) => e.type === 'safety.stop_requested');
   const requiredCauses = [
     'user_voice',

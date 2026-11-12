@@ -353,7 +353,12 @@
         "utterance_id": {"type": "string", "required": true},
         "text": {"type": "string", "required": true},
         "stop_reason": {"type": "string", "required": false},
-        "no_speech": {"type": "boolean", "required": false}
+        "no_speech": {"type": "boolean", "required": false},
+        "speaker_id": {
+          "type": "string",
+          "required": false,
+          "notes": "这句话的说话人标识（上游说话人分段的产物）。未实现时省略该字段，不填 null、不填占位串。它与视觉的 track_id 不是同一个空间，禁止默认相等；编号规则与绑定语义属于 #50 第二段。"
+        }
       }
     },
     {

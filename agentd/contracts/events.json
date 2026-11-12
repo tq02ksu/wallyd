@@ -879,6 +879,11 @@
           "type": "string",
           "required": false,
           "description": "由 robotd 传来的结构化提示；robotd 不解析自然语言"
+        },
+        "speaker_id": {
+          "type": "string",
+          "required": false,
+          "description": "这句话的说话人标识（来自上游说话人分段）。未实现时**省略该字段**，不填 null、不填占位串。编号如何分配属于 #50 第二段（绑定）的语义，本条不定义 speaker_1/speaker_2 规则。"
         }
       }
     },
@@ -1024,6 +1029,112 @@
         "detail": {
           "type": "string",
           "required": false
+        }
+      }
+    },
+    {
+      "type": "person.appeared",
+      "category": "vision",
+      "severity": "info",
+      "title": "画面里出现了一个目标",
+      "summary": "目标 {track_id} 首次被看到。",
+      "impact": "这只是一次观测事实，不代表身份或意图；track_id 只在同一次跟踪生命周期内有效。",
+      "payload": {
+        "track_id": {
+          "type": "string",
+          "required": true,
+          "description": "跨帧跟踪标识。只标识「同一条 track」，不表示「同一个人」；不得用 person.identified 之类的名字把它升级成身份判断。"
+        },
+        "bbox": {
+          "type": "object",
+          "required": true,
+          "description": "目标框。坐标系与单位（归一化或像素）由发布端实现在后续 issue 中确定；本条只约定四个数值字段。",
+          "properties": {
+            "x": {
+              "type": "number",
+              "required": true
+            },
+            "y": {
+              "type": "number",
+              "required": true
+            },
+            "width": {
+              "type": "number",
+              "required": true
+            },
+            "height": {
+              "type": "number",
+              "required": true
+            }
+          }
+        },
+        "first_seen_at": {
+          "type": "string",
+          "required": true,
+          "description": "首次看到该目标的时刻（UTC ISO 8601，发布端时钟）。"
+        }
+      }
+    },
+    {
+      "type": "person.moved",
+      "category": "vision",
+      "severity": "info",
+      "title": "画面里的目标移动了",
+      "summary": "目标 {track_id} 的位置已更新。",
+      "impact": "位置观测是降频后的结果，不是每一帧；不要把相邻两条 person.moved 当成连续轨迹。",
+      "rate_limit": {
+        "max_hz": 5,
+        "window_ms": 1000,
+        "key_field": "track_id",
+        "excess": "drop",
+        "note": "同一 track 在任意 1000ms 滑窗内最多 5 条。超出的观测直接丢弃，不排队、不补发——位置流要的是最新值，补发旧位置只会撑大事件库。发布端还应在位移小于阈值时不发（跟踪实现的语义，不在本条范围）。"
+      },
+      "payload": {
+        "track_id": {
+          "type": "string",
+          "required": true
+        },
+        "bbox": {
+          "type": "object",
+          "required": true,
+          "description": "目标框；字段与坐标系约定同 person.appeared。",
+          "properties": {
+            "x": {
+              "type": "number",
+              "required": true
+            },
+            "y": {
+              "type": "number",
+              "required": true
+            },
+            "width": {
+              "type": "number",
+              "required": true
+            },
+            "height": {
+              "type": "number",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "person.lost",
+      "category": "vision",
+      "severity": "info",
+      "title": "画面里的目标消失了",
+      "summary": "目标 {track_id} 已离开画面。",
+      "impact": "track_id 随这次丢失失效；任何引用它的绑定都必须作废，不得继续指向一条不存在的 track。",
+      "payload": {
+        "track_id": {
+          "type": "string",
+          "required": true
+        },
+        "last_seen_at": {
+          "type": "string",
+          "required": true,
+          "description": "最后一次看到该目标的时刻（UTC ISO 8601，发布端时钟）。"
         }
       }
     },

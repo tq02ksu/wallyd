@@ -221,8 +221,8 @@ accepted → running → completed | failed | cancelled
 | 运动/安全 | `motion.plan`, `safety.stopped`, `safety.stop_requested`, `safety.slowdown` | 计划摘要、停止动作、结构化停止原因与确认状态；`slowdown` 仅在减速状态变化时发；不宣称实际到位 |
 | 设备 | `device.ready`, `device.lost`, `device.recovered`, `device.reset`, `device.changed` | 设备名、变化/原因、可确认的固件信息 |
 | 状态 | `state.rejected` | 被拒事件的 `type`、`payload_keys` 与 `reason`；不含 payload 原文 |
-| 视觉 | `vision.*`, `camera.*`, `people.*`, `person.*` | 观测、有效性与时间信息；不得把模型原始格式直接作为稳定能力契约 |
-| 语音 | `speech.*`, `audio.state` | utterance/task 关联、partial revision 或 final 文本、音频状态 |
+| 视觉 | `vision.*`, `camera.*`, `people.*`, `person.*` | 观测、有效性与时间信息；人物观测面是 `person.appeared/moved/lost`（`track_id` 只标识 track，不是身份；`person.moved` ≤5Hz/track，上限写在 agentd 事件契约里）；不得把模型原始格式直接作为稳定能力契约 |
+| 语音 | `speech.*`, `audio.state` | utterance/task 关联、partial revision 或 final 文本、音频状态；`speech.final.speaker_id` 可选，未实现说话人分段时省略 |
 
 事件只表达已发生的增量；当前状态以快照为准。部分识别文本须带修订号并标明 `partial`，
 不得与 `final` 混淆。模型输出必须有 `grounded` 等来源有效性标记；`grounded=false` 时不得当作视觉观测。
