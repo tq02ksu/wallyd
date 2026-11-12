@@ -21,7 +21,8 @@ import { RobotdEventSubscriber } from './robotd-events.ts';
 import { RobotdEventBridge } from './robotd-event-bridge.ts';
 import { RobotdClient } from './robotd-client.ts';
 import { RunService, RUN_STATUSES, approvalView } from './runs.ts';
-import { submitRunRequest, type RunRequestDeps } from './run-request.ts';
+import { closeClarificationIfCancelled, submitRunRequest, type RunRequestDeps, type RunRequestResult } from './run-request.ts';
+import { ConversationContext } from './conversation.ts';
 import { ClarificationWindow } from './clarification-window.ts';
 import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
@@ -38,6 +39,7 @@ import { formatArgsSummary, LexiconError } from '../../../contracts/tools/announ
 import { executeApprovedCapability } from './approval-executor.ts';
 import { RunNarrator } from './run-narrator.ts';
 import { FAST_RULES } from './router.ts';
+
 import {
   ApiError,
   Router,
@@ -61,6 +63,18 @@ import {
   MAX_BODY_BYTES,
 } from './http.ts';
 import { LiveHub, WS_PATHS, validateUpgrade, writeUpgradeResponse } from './ws.ts';
+
+/**
+ * 把一次 run 的结论压成上下文里的一轮（GH-12）。
+ *
+ * 上下文只关心「上一句要做什么」，所以 Harness 回合统一记成 `harness`；
+ * 快速规则命中则还原成能力名，便于提示块写出「执行 robot_follow（规则 follow_me@1）」。
+ */
+function capabilityForResult(result: RunRequestResult): string {
+  if (result.route !== 'fast' || !result.fast_rule) return 'harness';
+  const id = result.fast_rule.split('@')[0];
+  return FAST_RULES.find((r) => r.id === id)?.capability ?? 'harness';
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // src/agentd/ → agentd/（agentd 自己的根，UI 与契约都在它下面）
@@ -239,6 +253,10 @@ export async function createRuntime(
   // 执行器在 runs 之后创建；onCancel 钩子通过 ref 取到它。
   let harnessExecutorRef: HarnessExecutor | null = null;
   const harnessDataDir = path.join(config.dataDir, 'harness');
+  // 有界对话上下文（GH-12）：只活在内存里，重启即空；不写事件正文。
+  const conversation = new ConversationContext();
+  // 澄清窗口（GH-49）：只存最近一次追问，30s 后失效；不是 run，不占活动名额。
+  const clarificationWindow = new ClarificationWindow();
 
   // 事件提交后 → 广播给 WS 订阅者
   let hubRef: LiveHub | null = null;
@@ -252,13 +270,12 @@ export async function createRuntime(
     if (view) hubRef.broadcast(view);
   };
 
-  // 澄清窗口（GH-49）：只存最近一次追问，30s 后失效；不是 run，不占活动名额。
-  const clarificationWindow = new ClarificationWindow();
-
   const runs: RunService = new RunService({
     store,
     events,
     log,
+    // 同一个 ConversationContext 同时被回合记账（runs）与 Harness 提示（submitUtterance）使用。
+    conversation,
     onEvent: broadcastByseq,
     // run 进入终态（cancelled 除外）→ 结论播报。异步执行，不阻塞状态推进。
     onTerminal: (runId) => {
@@ -276,12 +293,27 @@ export async function createRuntime(
     },
     // 语音 final 走与 POST /api/run 同一条路径；幂等键用 utterance_id，
     // 断线重连补发同一条 final 不会产生第二个 run。
-    submitUtterance: ({ text, utterance_id }): { run_id?: string } =>
-      submitRunRequest(buildRunRequestDeps(), {
+    submitUtterance: ({ text, utterance_id, turn_id }): { run_id?: string } => {
+      const res = submitRunRequest(buildRunRequestDeps(), {
         prompt: text,
         source: 'asr',
         idempotency_key: `asr:${utterance_id}`,
-      }),
+        // 上下文只给 Harness 消歧；`prompt` 字段保持原句，不落库、不进事件。
+        context: conversation.promptBlock(),
+        // 同回合上一轮的结论只给规则的消歧判断（如「慢一点」沿用跟随目标与速度）。
+        previous: conversation.previousRun(Date.now()),
+      });
+      // 回合关联：run 建好之后才拿得到 route/fast_rule，记回上下文供下一句使用。
+      if (turn_id && res.run_id) {
+        conversation.note(turn_id, {
+          capability: capabilityForResult(res),
+          fast_rule: res.fast_rule ?? null,
+          prompt: text,
+          args: res.fast_args ?? {},
+        });
+      }
+      return res;
+    },
   });
   runsRef = runs;
   const harnessExecutor = new HarnessExecutor({
@@ -320,6 +352,16 @@ export async function createRuntime(
   // 语音分发：顺序在 runs.dispatchUtterance 里钉死，这里只消费结果。
   // 审批通过后的执行仍由 approval-executor 负责（携带 #11 签发的一次性凭据）。
   utteranceDispatchRef = (input) => {
+    // GH-49 判据 4：澄清窗口内的「算了」会被 RunService 当作对话结束（GH-12），
+    // 不再进入路由；先在分发前收尾窗口，留下 route.clarify 的 user_cancelled 原因。
+    // 收尾失败不能挡住分发本身——尤其「停」是安全旁路，宁可少一条收尾事件。
+    try {
+      closeClarificationIfCancelled({ runs, clarificationWindow }, input.text);
+    } catch (e: unknown) {
+      log('澄清窗口收尾失败', {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
     const dispatched = runs.dispatchUtterance({
       utterance_id: input.utterance_id,
       text: input.text,
@@ -363,10 +405,10 @@ export async function createRuntime(
         void executeFastRun(runId, capability, args);
       },
       // 复杂指令交给 Harness：不阻塞响应，失败/取消都写在 run 上。
-      executeHarness: (runId: string) => {
+      executeHarness: (runId: string, context?: string | null) => {
         // 执行器内部已经把业务失败写成 run.failed；这里只兜住「连状态都没写成」的
         // 意外异常，绝不让它变成进程级 unhandledRejection。
-        void harnessExecutor.run(runId).catch((e: unknown) => {
+        void harnessExecutor.run(runId, context).catch((e: unknown) => {
           log('harness executor crashed', {
             run_id: runId,
             error: e instanceof Error ? e.message : String(e),
@@ -520,12 +562,14 @@ export async function createRuntime(
 
       // 「一句话 → run 还是澄清」的决策在 run-request.ts：
       // 澄清不建 run（否则会留下永不推进的活动任务），受保护的 STOP 不受忙限制。
-      return submitRunRequest(buildRunRequestDeps(), {
+      // `fast_args` 是装配层内部字段（记回合上下文用），不属于 `RunAccepted` 契约响应。
+      const { fast_args: _fastArgs, ...accepted } = submitRunRequest(buildRunRequestDeps(), {
         prompt,
         session_id: sessionId,
         source,
         idempotency_key: idem,
       });
+      return accepted;
     }),
   );
 

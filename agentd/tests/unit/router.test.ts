@@ -380,6 +380,80 @@ console.log('— 前提不满足 → 澄清');
   check('澄清给出原因', no.kind === 'clarify' && no.question.includes('任务'), show(no));
 }
 
+// ---------------------------------------------------------------- GH-12：上下文只做消歧
+console.log('— GH-12：上一轮是 robot_follow 时，「慢一点」命中 slow_down');
+{
+  const followPrevious = { capability: 'robot_follow', args: { target_track_id: 'abc' } };
+  const withPrev = matchRoute('慢一点', { ...ctx, previous: followPrevious });
+  check('有上下文 → matched slow_down', matched(withPrev, 'slow_down'), show(withPrev));
+  check(
+    '命中版本是 slow_down@1',
+    withPrev.kind === 'matched' && ruleTag(withPrev.rule) === 'slow_down@1',
+    show(withPrev),
+  );
+  check(
+    '目标是上一轮的目标（上下文只补参数，不另起目标）',
+    withPrev.kind === 'matched' && withPrev.args.target_track_id === 'abc',
+    show(withPrev),
+  );
+  check(
+    '速度上限折半（默认 0.15 → 0.075）',
+    withPrev.kind === 'matched' && withPrev.args.max_speed_mps === 0.075,
+    show(withPrev),
+  );
+
+  const noPrev = matchRoute('慢一点', ctx);
+  check('没有上一轮 → none（交给 Harness，不猜）', noPrev.kind === 'none', show(noPrev));
+  const prevHarness = matchRoute('慢一点', { ...ctx, previous: { capability: 'harness', args: {} } });
+  check('上一轮交给模型 → none', prevHarness.kind === 'none', show(prevHarness));
+  const prevStop = matchRoute('慢一点', { ...ctx, previous: { capability: 'robot_stop', args: {} } });
+  check('上一轮不是跟随 → none', prevStop.kind === 'none', show(prevStop));
+  // 前置判断必须落在「上一轮能力」上，而不是「参数里恰好有目标」：去掉
+  // requiresPreviousCapability 后本例会错误命中 slow_down（拿非跟随轮的目标去调速）。
+  const prevOtherWithTarget = matchRoute('慢一点', {
+    ...ctx,
+    previous: { capability: 'move_forward', args: { target_track_id: 'abc' } },
+  });
+  check(
+    '上一轮不是跟随（即使参数里有目标）→ none',
+    prevOtherWithTarget.kind === 'none',
+    show(prevOtherWithTarget),
+  );
+  const noTarget = matchRoute('慢一点', { ...ctx, previous: { capability: 'robot_follow', args: {} } });
+  check('上一轮没有目标 → none（不拿空参数执行）', noTarget.kind === 'none', show(noTarget));
+
+  const fromExplicit = matchRoute('慢一点', {
+    ...ctx,
+    previous: { capability: 'robot_follow', args: { target_track_id: 't9', max_speed_mps: 0.2 } },
+  });
+  check(
+    '显式速度按比例折半',
+    fromExplicit.kind === 'matched' && fromExplicit.args.max_speed_mps === 0.1,
+    show(fromExplicit),
+  );
+  const atFloor = matchRoute('慢一点', {
+    ...ctx,
+    previous: { capability: 'robot_follow', args: { target_track_id: 't9', max_speed_mps: 0.05 } },
+  });
+  check(
+    '不会低于契约下限 0.05',
+    atFloor.kind === 'matched' && atFloor.args.max_speed_mps === 0.05,
+    show(atFloor),
+  );
+
+  for (const s of ['慢点', '慢点儿', '再慢一点', '慢一些', '走慢一点', '放慢一点', '减速', '别太快']) {
+    const r = matchRoute(s, { ...ctx, previous: followPrevious });
+    check(`「${s}」→ slow_down`, matched(r, 'slow_down'), show(r));
+  }
+  for (const s of ['再往前一点', '往前', '快一点', '跟着我走', '停']) {
+    const r = matchRoute(s, { ...ctx, previous: followPrevious });
+    check(`「${s}」不被 slow_down 吃掉`, !(r.kind === 'matched' && r.rule.id === 'slow_down'), show(r));
+  }
+
+  const unavailable = matchRoute('慢一点', { available: new Set(['robot_stop']), previous: followPrevious });
+  check('能力未发布 → 澄清，不硬执行', unavailable.kind === 'clarify', show(unavailable));
+}
+
 // ---------------------------------------------------------------- 版本与历史
 console.log('— 可追溯标识：新增规则不改写历史');
 {
@@ -387,8 +461,8 @@ console.log('— 可追溯标识：新增规则不改写历史');
   check('stop_robot 仍是 stop_robot@1', ruleTag(stop) === 'stop_robot@1', ruleTag(stop));
   check('stop_robot 仍受保护且映射 robot_stop', stop.protected === true && stop.capability === 'robot_stop');
   check(
-    '本版规则表就是 stop_robot / follow_me / come_here 三条',
-    FAST_RULES.map((r) => r.id).join(',') === 'stop_robot,follow_me,come_here',
+    '本版规则表就是 stop_robot / follow_me / come_here / slow_down 四条',
+    FAST_RULES.map((r) => r.id).join(',') === 'stop_robot,follow_me,come_here,slow_down',
     FAST_RULES.map((r) => ruleTag(r)).join(','),
   );
   check('规则 id 唯一', new Set(FAST_RULES.map((r) => r.id)).size === FAST_RULES.length);

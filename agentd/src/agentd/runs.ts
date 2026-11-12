@@ -26,6 +26,11 @@ import { ApiError } from './http.ts';
 import { classifyApprovalUtterance } from './approval-intent.ts';
 import { isProtectedUtterance } from './router.ts';
 import { announceLimits } from '../../../contracts/tools/announce-lexicon.mjs';
+import type {
+  ConversationAttribution,
+  ConversationContext,
+  ConversationPeek,
+} from './conversation.ts';
 
 export type RunStatus =
   | 'accepted'
@@ -279,7 +284,12 @@ export interface RunServiceOptions {
    * 分发器本身只判定「这句话该不该变成一次 run」；路由、审批、幂等仍由
    * `submitRunRequest` 负责。未注入时 dispatcher 只做忽略判定（单测用）。
    */
-  submitUtterance?: (input: { text: string; utterance_id: string }) => { run_id?: string } | void;
+  submitUtterance?: (input: {
+    text: string;
+    utterance_id: string;
+    /** 本句所属的对话回合；装配层用它把 run 结论记回上下文。 */
+    turn_id?: string;
+  }) => { run_id?: string } | void;
   /**
    * 用户在确认窗口内说「再说一遍」：装配层据此重播**同一条**复述。
    *
@@ -289,6 +299,14 @@ export interface RunServiceOptions {
   onApprovalRepeat?: (approvalId: string, repeatCount: number, maxRepeats: number) => void;
   /** 复述次数用尽：装配层播报「我没有听清，这次没有执行」。 */
   onApprovalUnheard?: (approvalId: string) => void;
+  /**
+   * 有界对话上下文（GH-12）。用于回合记账与消歧：装配层把上一轮结论作为
+   * `RouteContext.previous` 传给 `matchRoute`，并把最近几轮格式化成 Harness 提示块。
+   * `matchRoute` 本身仍是纯函数，只读显式传入的 `previous`，不读这个对象。
+   */
+  conversation?: ConversationContext;
+  /** 当前时间；测试可注入假时钟。默认 `() => Date.now()`。 */
+  now?: () => number;
 }
 
 export interface SubmitRunInput {
@@ -372,6 +390,7 @@ export type UtteranceDispatchAction =
   | 'ignored_empty'
   | 'ignored_echo'
   | 'ignored_busy'
+  | 'conversation_ended'
   | 'approval'
   | 'submitted'
   | 'submit_failed';
@@ -383,7 +402,20 @@ export interface UtteranceDispatchResult {
   approval?: ApprovalSettleResult;
   /** 活动 run（busy）或新建 run（submitted）的 id。 */
   run_id?: string;
+  /** 本句所属的对话回合（仅当装配层注入了 ConversationContext）。 */
+  turn_id?: string;
 }
+
+/**
+ * 显式结束语：**只认整句完全匹配**，不做子串匹配。
+ * 「算了」不建 run——把它送进 Harness 只会让模型去猜。
+ */
+export const CONVERSATION_END_UTTERANCES: ReadonlySet<string> = new Set([
+  '算了',
+  '不聊了',
+  '结束',
+  '不用了',
+]);
 
 export class RunService {
   private store: Store;
@@ -398,8 +430,14 @@ export class RunService {
   private onApprovalUnheard: ((approvalId: string) => void) | undefined;
   private maxRepeats: number;
   private submitUtterance:
-    | ((input: { text: string; utterance_id: string }) => { run_id?: string } | void)
+    | ((input: {
+        text: string;
+        utterance_id: string;
+        turn_id?: string;
+      }) => { run_id?: string } | void)
     | undefined;
+  private conversation: ConversationContext | undefined;
+  private clock: () => number;
   /** 确认窗口的过期定时器；unref 过，不拖住进程退出。 */
   private windowTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -414,6 +452,8 @@ export class RunService {
     this.onApprovalUnheard = opts.onApprovalUnheard;
     this.maxRepeats = announceLimits().max_repeats;
     this.submitUtterance = opts.submitUtterance;
+    this.conversation = opts.conversation;
+    this.clock = opts.now ?? (() => Date.now());
   }
 
   /** 释放定时器（进程关闭 / 测试结束）。 */
@@ -1756,30 +1796,93 @@ export class RunService {
       return { action: 'approval', approval: settled, run_id: settled.run_id ?? undefined };
     }
 
+    // 1.5 对话回合（GH-12）：审批之后。显式结束先处理；其余**只做只读探测**——
+    //     被「忙/空」吞掉的句子没有变成 run，就不能计数，更不能写「接上了上一句」。
+    //     真正的记账挪到忙判定通过、确定要提交之后（见下面的 advance()）。
+    //     上下文只影响消歧性规则的命中与 Harness 提示块；matchRoute 仍是纯函数，
+    //     只读装配层显式传入的 previous。
+    let probe: ConversationPeek | null = null;
+    if (this.conversation) {
+      if (CONVERSATION_END_UTTERANCES.has(text)) {
+        // 显式结束：清空并开新回合。这句本身不建 run。
+        this.conversation.reset(this.clock());
+        this.emitConversationEvent('conversation.turn_reset', { reason: 'user_ended' });
+        return { action: 'conversation_ended', reason: 'user_ended' };
+      }
+      probe = this.conversation.peek(this.clock());
+    }
+
     // 2. 忙：语音侧不排队，也不静默丢弃。
     //    例外是受保护规则（停止）：停止是安全旁路，语音不能比 POST /api/run 更弱。
     const busy = this.activeRun();
     if (busy && !isProtectedUtterance(text)) {
       this.recordSpeechIgnored('busy', input.utterance_id, busy.run_id);
-      return { action: 'ignored_busy', reason: 'busy', run_id: busy.run_id };
+      // 这句没有建 run：不记账、不写 conversation.* 事件；turn_id 只是只读探测的归属线索。
+      return { action: 'ignored_busy', reason: 'busy', run_id: busy.run_id, turn_id: probe?.turn_id ?? undefined };
     }
 
     // 3. 兜底：真正的路由在 submitRunRequest；这里只负责「该提交了」。
     if (!this.submitUtterance) {
       return { action: 'submit_failed', reason: 'no_submitter' };
     }
+    // 到这里才确定这句话要变成一次 run，开始回合记账。
+    const turn = this.conversation ? this.conversation.advance(this.clock()) : undefined;
+    const turnId = turn?.turn_id;
     try {
-      const res = this.submitUtterance({ text, utterance_id: input.utterance_id });
-      return { action: 'submitted', run_id: res?.run_id };
+      const res = this.submitUtterance({ text, utterance_id: input.utterance_id, turn_id: turnId });
+      if (turn && !res?.run_id) {
+        // 提交入口没给出 run_id（没建成 run）：退回这一句的计数，别在时间线上留下影子。
+        this.conversation?.release(turn);
+      } else if (turn) {
+        this.recordTurn(turn);
+      }
+      return { action: 'submitted', run_id: res?.run_id, turn_id: turnId };
     } catch (e: any) {
       // 竞态：判定空闲之后、提交之前刚好有 run 变活动。按忙处理，不把异常丢给事件桥。
       if (e?.code === 'E_BUSY') {
+        if (turn) this.conversation?.release(turn);
         const active = this.activeRun();
         this.recordSpeechIgnored('busy', input.utterance_id, active?.run_id);
-        return { action: 'ignored_busy', reason: 'busy', run_id: active?.run_id };
+        return { action: 'ignored_busy', reason: 'busy', run_id: active?.run_id, turn_id: probe?.turn_id ?? undefined };
       }
+      if (turn) this.conversation?.release(turn);
       this.log('语音提交失败', { utterance_id: input.utterance_id, error: e?.message ?? String(e) });
       return { action: 'submit_failed', reason: 'submit_error' };
+    }
+  }
+
+  /**
+   * 一句真的变成 run 之后才写回合事件。
+   *
+   * `turn_joined` 只在**真的接上了上一句**（`index ≥ 2`）时写——事件名说的就是
+   * 「接上了」，第一句没有可接的东西。`index` 是本回合第几句（1 起），只有计数、没有文本。
+   */
+  private recordTurn(turn: ConversationAttribution): void {
+    // 过期/满员时 advance 已经开了新回合；单独记一条原因，惰性判定不设定时器。
+    if (turn.reset) {
+      this.emitConversationEvent('conversation.turn_reset', { reason: turn.reset });
+    }
+    if (turn.joined) {
+      this.emitConversationEvent('conversation.turn_joined', {
+        turn_id: turn.turn_id,
+        index: turn.index,
+      });
+    }
+  }
+
+  /**
+   * 记一条 conversation.* 事件。参数只有 turn_id / index / reason；
+   * 用户原文不进事件库（隐私红线见 events.json 的 forbidden_payload_keys）。
+   */
+  private emitConversationEvent(
+    type: 'conversation.turn_joined' | 'conversation.turn_reset',
+    params: Record<string, unknown>,
+  ): void {
+    try {
+      const res = this.events.emitStandalone({ type, params });
+      this.notify(res.seq);
+    } catch (e: any) {
+      this.log('写会话回合事件失败', { type, error: e?.message ?? String(e) });
     }
   }
 

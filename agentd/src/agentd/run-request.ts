@@ -18,6 +18,11 @@
  * 3. `source: 'asr'` 的下一句在 30s 窗口内与上一句拼接后重新路由；窗口外、说「算了」、
  *    被完整新指令顶掉或被 STOP 关闭时，写一条带收尾原因的 `route.clarify`。
  *
+ * ## 会话上下文（GH-12）
+ *
+ * `context` 只给 Harness 消歧，`previous` 只给规则的消歧判断；两者都不落库、不进事件，
+ * 拼进 `prompt` 会同时污染 run 记录与事件正文。
+ *
  * ## 停止是安全旁路
  *
  * `stop_robot` 标了 `protected`：即使已有活动 run，也允许提交并执行；澄清窗口也不能
@@ -27,7 +32,7 @@
  * 修改生产规则；装配层永远使用默认值。
  */
 import { FAST_RULES, matchRoute, ruleTag } from './router.ts';
-import type { FastRule, MatchResult } from './router.ts';
+import type { FastRule, MatchResult, RouteContext } from './router.ts';
 import type { Route } from './runs.ts';
 import type { RunService } from './runs.ts';
 import type {
@@ -50,6 +55,20 @@ export interface RunRequestInput {
   session_id?: string;
   source?: 'text' | 'asr';
   idempotency_key?: string;
+  /**
+   * 仅供 Harness 消歧的会话上下文块（GH-12）。
+   *
+   * **不落库、不进事件**：直接给 `executeHarness`，由 harness 格式化进发给模型的
+   * prompt。拼进 `prompt` 字段会同时污染 run 记录与事件正文。
+   */
+  context?: string | null;
+  /**
+   * 同回合上一轮的 run 结论（GH-12 路由消歧）。
+   *
+   * 只给 `matchRoute` 的消歧性规则用（如「慢一点」需要知道上一轮在跟随）；
+   * **不落库、不进事件**，HTTP 入口不提供它（无状态请求没有「上一句」）。
+   */
+  previous?: { capability: string; args: Record<string, unknown> } | null;
 }
 
 /** 系统播报的结构化请求；正文由 robotd 固定模板渲染。 */
@@ -71,7 +90,7 @@ export interface RunRequestDeps {
   /** 命中可执行规则后启动执行。装配层注入，**不阻塞响应**。 */
   executeFast: (runId: string, capability: string, args: Record<string, unknown>) => void;
   /** `route: harness` 的 run 交给 Harness 执行器。装配层注入，**不阻塞响应**。 */
-  executeHarness: (runId: string) => void;
+  executeHarness: (runId: string, context?: string | null) => void;
   /** 澄清追问的系统播报；装配层注入，**不阻塞响应**。 */
   announceClarification?: (announcement: ClarificationAnnouncement) => void;
   /** 有界「等待补充」窗口；省略时不拼接语音补充（单测可只测路由）。 */
@@ -98,6 +117,11 @@ export interface RunRequestResult {
   duplicate?: boolean;
   ambiguous?: string[];
   clarify?: { question: string; missing: string[] };
+  /**
+   * **内部字段**：命中快速规则时实际下发的结构化参数，供装配层记回合上下文。
+   * 不属于 `RunAccepted` 契约响应，HTTP 路由必须剔除（见 `service.ts`）。
+   */
+  fast_args?: Record<string, unknown>;
 }
 
 /** 一次澄清的完整描述：事件、窗口、播报共用。 */
@@ -119,11 +143,13 @@ interface ClarificationSpec {
 export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): RunRequestResult {
   const rules = deps.rules ?? FAST_RULES;
   const busy = deps.runs.activeRun();
-  const ctx = {
+  const ctx: RouteContext = {
     available: deps.availableCapabilities(),
     // 传给规则的是真实状态，不是「反正前面会挡」的假设。
     busy: Boolean(busy),
     speaking: false,
+    // 没有上一轮时是 null：消歧性规则（slow_down）不会参与匹配。
+    previous: input.previous ?? null,
   };
 
   let prompt = input.prompt;
@@ -252,7 +278,7 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
   }
   // Harness 同理：建了 run 就要推进，否则它会永远停在 accepted。
   if (route === 'harness' && !result.duplicate) {
-    deps.executeHarness(result.run_id);
+    deps.executeHarness(result.run_id, input.context ?? null);
   }
 
   return {
@@ -263,6 +289,7 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
     fast_rule: result.fast_rule,
     created_at: result.created_at,
     duplicate: result.duplicate,
+    ...(matched.kind === 'matched' ? { fast_args: matched.args } : {}),
   };
 }
 
@@ -376,12 +403,37 @@ export function ambiguousQuestion(labels: readonly string[]): string {
   return `你是想${labels[0]}，还是想${labels[1]}，还是别的？`;
 }
 
-/** 受保护规则（STOP）判定：用注入的规则表，避免测试规则与生产规则分叉。 */
-function isProtectedUtterance(
+/**
+ * 语音分发器把「算了」当作对话结束（GH-12），**不会**再进 `submitRunRequest`。
+ * 所以澄清窗口的收尾必须发生在分发之前：由装配层调用这里，清空窗口并写一条
+ * 带 `user_cancelled` 原因的 `route.clarify`，判据 4 才能在真实语音链路成立。
+ *
+ * 只处理**未过期**的窗口；已过期的窗口留给正常的路由路径记 `window_expired`。
+ * 返回是否真的收尾了一个窗口。
+ */
+export function closeClarificationIfCancelled(
+  deps: Pick<RunRequestDeps, 'runs' | 'clarificationWindow'>,
   text: string,
-  rules: readonly FastRule[],
-  ctx: { available: ReadonlySet<string> | null; busy?: boolean; speaking?: boolean },
+  source: 'text' | 'asr' = 'asr',
 ): boolean {
+  const window = deps.clarificationWindow;
+  if (!window || !isClarificationCancel(text)) return false;
+  const peeked = window.peek();
+  if (peeked.status !== 'fresh') return false;
+  const pending = window.clear();
+  if (!pending) return false;
+  deps.runs.recordClarificationClosed({
+    question: pending.question,
+    reason: 'user_cancelled',
+    session_id: pending.session_id,
+    prompt: text,
+    source,
+  });
+  return true;
+}
+
+/** 受保护规则（STOP）判定：用注入的规则表，避免测试规则与生产规则分叉。 */
+function isProtectedUtterance(text: string, rules: readonly FastRule[], ctx: RouteContext): boolean {
   const matched = matchRoute(text, ctx, rules);
   return matched.kind === 'matched' && matched.rule.protected === true;
 }
