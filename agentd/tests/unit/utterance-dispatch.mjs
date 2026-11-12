@@ -15,6 +15,7 @@ import { Store, nowIso } from '../../src/agentd/store.ts';
 import { EventLog, loadRegistry } from '../../src/agentd/events.ts';
 import { RunService } from '../../src/agentd/runs.ts';
 import { RobotdEventBridge } from '../../src/agentd/robotd-event-bridge.ts';
+import { ConversationContext } from '../../src/agentd/conversation.ts';
 import { createRuntime, defaultConfig } from '../../src/agentd/service.ts';
 import { ensureApprovalSigningKey } from '../../src/agentd/approval-key.ts';
 
@@ -199,6 +200,39 @@ console.log('— 空文本不建 run');
   const res = svc.dispatchUtterance({ utterance_id: 'u-empty', text: '   ', echo: false });
   check('动作为 ignored_empty', res.action === 'ignored_empty', res.action);
   check('没有提交', submitted.length === 0);
+}
+
+console.log('— GH-12：显式结束语有自己的 action，不与空文本混用');
+{
+  const conversation = new ConversationContext();
+  const submitted = [];
+  const svc = new RunService({
+    store,
+    events,
+    log,
+    conversation,
+    submitUtterance: (input) => {
+      submitted.push(input);
+      return { run_id: 'run-should-not-exist' };
+    },
+  });
+  const before = runCount();
+  const res = svc.dispatchUtterance({ utterance_id: 'u-conversation-ended', text: '算了', echo: false });
+  check('动作为 conversation_ended', res.action === 'conversation_ended', res.action);
+  check('原因 user_ended', res.reason === 'user_ended', res.reason);
+  check('没有提交', submitted.length === 0, JSON.stringify(submitted));
+  check('没有新建 run', runCount() === before, String(runCount()));
+  const reset = store.one(
+    "SELECT * FROM events WHERE type = 'conversation.turn_reset' ORDER BY seq DESC LIMIT 1",
+  );
+  check(
+    '写了 turn_reset{user_ended}',
+    reset ? JSON.parse(reset.params_json).reason === 'user_ended' : false,
+    reset?.params_json,
+  );
+  check('结束语之后本回合计数归零', conversation.snapshot().utterances === 0, JSON.stringify(conversation.snapshot()));
+  const next = conversation.advance(1_000);
+  check('结束语之后下一句是回合第 1 句', next.index === 1 && next.joined === false, JSON.stringify(next));
 }
 
 console.log('— 事件桥把 echo 事实交给分发器（播报期间听到的 final 不算指令）');
@@ -583,6 +617,45 @@ async function runAcceptance() {
     check('中断 final 没有被当成指令提交', !runtime.store.one(
       "SELECT run_id FROM runs WHERE idempotency_key = 'asr:utt-barge'",
     ));
+
+    // ------------------------------------------------ GH-12 判据 6：显式结束不建 run
+    const runsBeforeEnd = runCount();
+    const joinedBeforeEnd = runtime.store.one(
+      "SELECT COUNT(*) AS n FROM events WHERE type = 'conversation.turn_joined'",
+    ).n;
+    feed('speech.final', { utterance_id: 'utt-conversation-end', text: '算了', stop_reason: 'endpoint' });
+    await new Promise((r) => setTimeout(r, 40));
+    check('判据 6：说「算了」不建 run', runCount() === runsBeforeEnd, `${runsBeforeEnd} → ${runCount()}`);
+    check('判据 6：没有 asr run', !runtime.store.one(
+      "SELECT run_id FROM runs WHERE idempotency_key = 'asr:utt-conversation-end'",
+    ));
+    const endReset = runtime.store.one(
+      "SELECT * FROM events WHERE type = 'conversation.turn_reset' ORDER BY seq DESC LIMIT 1",
+    );
+    check(
+      '判据 6：写 turn_reset{user_ended}',
+      endReset ? JSON.parse(endReset.params_json).reason === 'user_ended' : false,
+      endReset?.params_json,
+    );
+    check(
+      '判据 6：conversation.* 里没有「算了」原文',
+      runtime.store.one(
+        "SELECT COUNT(*) AS n FROM events WHERE type LIKE 'conversation.%' AND params_json LIKE '%算了%'",
+      ).n === 0,
+    );
+
+    // 结束之后下一句重新从第 1 句起：不该出现新的 turn_joined。
+    feed('speech.final', { utterance_id: 'utt-after-end', text: '慢一点', stop_reason: 'endpoint' });
+    const afterEndRun = await waitFor(() => runtime.store.one(
+      'SELECT * FROM runs WHERE idempotency_key = ?',
+      'asr:utt-after-end',
+    ));
+    const joinedAfterEnd = runtime.store.one(
+      "SELECT COUNT(*) AS n FROM events WHERE type = 'conversation.turn_joined'",
+    ).n;
+    check('判据 6：结束后的下一句照常建 run', Boolean(afterEndRun), String(runCount()));
+    check('判据 6：结束后的下一句走 harness', afterEndRun?.route === 'harness', afterEndRun?.route);
+    check('判据 6：下一句不续旧回合（无新 turn_joined）', joinedAfterEnd === joinedBeforeEnd, `${joinedBeforeEnd} → ${joinedAfterEnd}`);
 
     // ------------------------------------------------ speech.ignored 全链：robotd 发 → agentd 收
     const obsBeforeDropped = runtime.store.one(

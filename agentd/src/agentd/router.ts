@@ -82,6 +82,18 @@ export interface BlockedHit {
  */
 export type BlockedReason = 'negation' | 'question' | 'prefix';
 
+/**
+ * 同一「人机回合」内上一轮 run 的结论摘要（GH-12）。
+ *
+ * 只有能力名与**已经从用户话里抽取出来的参数**，没有模型正文、没有原始录音。
+ * 它只用于**消歧性规则**（如「慢一点」修饰上一轮的跟随），不是会话记忆：
+ * 进程重启即空，也不会写进事件库。
+ */
+export interface PreviousRun {
+  capability: string;
+  args: Readonly<Record<string, unknown>>;
+}
+
 /** 判断某条规则的前提时能看到的证据。**只用已经观测到的事实**，不推测。 */
 export interface RouteContext {
   /** 对端已发布的能力名（来自 robotd 能力表）；null 表示还没探测到 */
@@ -90,6 +102,12 @@ export interface RouteContext {
   busy?: boolean;
   /** 当前是否在播报（用于「停」的语义区分） */
   speaking?: boolean;
+  /**
+   * 同回合上一轮的 run 结论（GH-12）。**只有声明了 `requiresPreviousCapability`
+   * 的消歧规则会读它**；没有上下文时为 null/undefined，此时那些规则根本不参与匹配，
+   * 该句照常交给 Harness，而不是靠猜。
+   */
+  previous?: PreviousRun | null;
 }
 
 /**
@@ -143,6 +161,18 @@ export interface FastRule {
   clarify?: string;
   /** 可选的前提检查：返回 null 表示满足，否则返回缺失原因 */
   precondition?: (ctx: RouteContext) => string | null;
+  /**
+   * 仅当上一轮的能力等于该值时参与匹配（消歧性规则）。
+   *
+   * 不满足时这条规则**根本不算候选**（不是 blocked、也不澄清），
+   * 因此「慢一点」在没有上文时仍然回到 Harness，判据 2 的字面口径不变。
+   */
+  requiresPreviousCapability?: string;
+  /**
+   * 从上下文派生参数。返回 null 表示上下文不足以承载这条规则
+   * （例如上一轮没有可沿用的目标）——同样按「没有命中」处理，不拿空参数执行。
+   */
+  contextArgs?: (ctx: RouteContext) => Record<string, unknown> | null;
 }
 
 /** 匹配前做的归一化：全角转半角、去首尾空白、去句末标点。**不做同义词替换**。 */
@@ -167,6 +197,18 @@ const ADJACENT_NEGATION = /(?:不要|不用|别|甭|无需|不必|勿)[\s，,]{0
  * 除此之外的前缀（`继续停止`、`拿过来`、`停止跟着我`）视为前缀污染，不算命中。
  */
 const LEAD_IN = /(?:^|[，,、。；;]\s*|(?:请|帮我|能不能|可不可以|可以|能否|能|先|那就|嗯|好|你|您|快|赶紧|马上)\s*)$/u;
+
+/**
+ * `robot_follow.max_speed_mps` 的契约默认值与安全边界（GH-12 的 slow_down 用）。
+ *
+ * 这三个数不是规则自己的判断，而是契约里的真值；`tests/contract/router.mjs`
+ * 断言它们与 `contracts/generated/mcp-tools.json` 完全一致，漂移即红。
+ */
+export const DEFAULT_FOLLOW_SPEED_MPS = 0.15;
+export const MIN_FOLLOW_SPEED_MPS = 0.05;
+export const MAX_FOLLOW_SPEED_MPS = 0.4;
+/** 「慢一点」把速度上限乘到的比例。 */
+export const SLOW_DOWN_RATIO = 0.5;
 
 /**
  * 规则表。
@@ -230,6 +272,45 @@ export const FAST_RULES: readonly FastRule[] = [
     ],
     clarify: '要过来，得先确认走到谁那儿（目标 track）。现在还没绑定目标，先说清楚找谁。',
   },
+  {
+    // 「慢一点」不是一条独立指令，而是**修饰上一轮的动作**（GH-12）。
+    //
+    // 它只在上一轮确实是 `robot_follow` 时参与匹配；没有上文时这条规则根本不出现，
+    // 句子照常交给 Harness——判据 2「过期后不猜」靠的就是这一点。
+    //
+    // 参数落点必须是已发布能力：`robot_follow` 的 `max_speed_mps` 是当前唯一的速度
+    // 控制参数（发起跟随时指定）。因此这里沿用上一轮的目标，并把速度上限按比例降下来；
+    // 不新增「改正在进行的跟随速度」这种能力面上不存在的端点。
+    id: 'slow_down',
+    version: 1,
+    capability: 'robot_follow',
+    negationScope: 'adjacent',
+    summary: '把跟随速度降下来',
+    patterns: [
+      /^(?:再|稍微)?慢(?:一)?点(?:儿)?(?:走)?$/u,
+      /^(?:再|稍微)?慢(?:一)?些(?:走)?$/u,
+      /^(?:走|跟)(?:得|的)?慢(?:一)?点(?:儿)?$/u,
+      /^(?:放慢|减速)(?:速度)?(?:一点|一点儿|一些|些)?$/u,
+      /^(?:别|不要)(?:走|跟)(?:得|的)?太快(?:了)?$/u,
+      /^别太快(?:了)?$/u,
+    ],
+    requiresPreviousCapability: 'robot_follow',
+    contextArgs: (ctx) => {
+      const previous = ctx.previous;
+      if (!previous) return null;
+      const target = previous.args.target_track_id;
+      // 没有可沿用的目标就不猜：交给 Harness，而不是拿空 target 去执行。
+      if (typeof target !== 'string' || target.length === 0) return null;
+      const explicit = previous.args.max_speed_mps;
+      const base =
+        typeof explicit === 'number' && Number.isFinite(explicit) ? explicit : DEFAULT_FOLLOW_SPEED_MPS;
+      const next = Math.min(
+        MAX_FOLLOW_SPEED_MPS,
+        Math.max(MIN_FOLLOW_SPEED_MPS, base * SLOW_DOWN_RATIO),
+      );
+      return { target_track_id: target, max_speed_mps: Math.round(next * 1000) / 1000 };
+    },
+  },
 ];
 
 type Hit = { rule: FastRule; m: RegExpMatchArray };
@@ -279,6 +360,12 @@ export function matchRoute(rawText: string, ctx: RouteContext, rules: readonly F
   const hits: Hit[] = [];
   const blocked: { rule: FastRule; reason: BlockedReason }[] = [];
   for (const rule of rules) {
+    // 消歧性规则只在「上一轮确实是它修饰的动作」时才是候选。
+    // 这里直接跳过，而不是拦成 blocked：没有上文时这句话根本没有被规则覆盖，
+    // 应该诚实地落到 Harness（判据 2）。
+    if (rule.requiresPreviousCapability && ctx.previous?.capability !== rule.requiresPreviousCapability) {
+      continue;
+    }
     for (const p of rule.patterns) {
       const m = text.match(p);
       if (!m) continue;
@@ -327,6 +414,15 @@ export function isProtectedUtterance(rawText: string): boolean {
 }
 
 function resolve(rule: FastRule, ctx: RouteContext, text: string): MatchResult {
+  // 上下文派生参数失败 = 这条规则承载不了这句话（例如上一轮没有目标）。
+  // 按「没有命中」处理：交给 Harness，绝不带着空参数执行。
+  let contextArgs: Record<string, unknown> = {};
+  if (rule.contextArgs) {
+    const derived = rule.contextArgs(ctx);
+    if (derived === null) return { kind: 'none' };
+    contextArgs = derived;
+  }
+
   // 目标能力必须已发布：规则映射到不存在的能力 → 澄清并说明缺什么
   if (ctx.available && !ctx.available.has(rule.capability)) {
     return {
@@ -338,7 +434,7 @@ function resolve(rule: FastRule, ctx: RouteContext, text: string): MatchResult {
   }
 
   // 参数只从显式槽位取；缺必填 → 澄清，不带着空参数执行
-  const args: Record<string, unknown> = {};
+  const args: Record<string, unknown> = { ...contextArgs };
   const missing: string[] = [];
   for (const slot of rule.slots ?? []) {
     const value = text.match(slot.pattern)?.[1];

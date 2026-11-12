@@ -1132,6 +1132,45 @@
           "description": "最后一次看到该目标的时刻（UTC ISO 8601，发布端时钟）。"
         }
       }
+    },
+    {
+      "type": "conversation.turn_joined",
+      "category": "conversation",
+      "severity": "info",
+      "title": "接上了上一句",
+      "summary": "本回合第 {index} 句，接在第 {turn_id} 回合上。",
+      "impact": "上下文只用于消歧，不会替用户执行新动作。",
+      "payload": {
+        "turn_id": {
+          "type": "string",
+          "required": true,
+          "note": "内存里的回合标识，不入库、重启即失效；不含用户原文"
+        },
+        "index": {
+          "type": "integer",
+          "required": true,
+          "note": "本句是本回合第几句（1 起），只是计数。该事件只在真的接上上一句时写，因此恒 >= 2；第一句没有可接的东西，不写此事件。"
+        }
+      }
+    },
+    {
+      "type": "conversation.turn_reset",
+      "category": "conversation",
+      "severity": "info",
+      "title": "对话回合已结束",
+      "summary": "回合结束，原因是 {reason}。",
+      "impact": "下一句话从新回合计起，不再依赖之前的句子。",
+      "payload": {
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "user_ended",
+            "idle_timeout",
+            "max_turns"
+          ]
+        }
+      }
     }
   ],
   "severity_labels": {

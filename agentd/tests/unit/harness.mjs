@@ -430,6 +430,29 @@ console.log('— models.harness_bridge：Harness 版本存在即 pass');
   check('detail 带版本', String(bridge?.detail).includes('9.9.9-test'), String(bridge?.detail));
 }
 
+// ---------------------------------------------------------------- 会话上下文
+console.log('— 会话上下文只进发给模型的 prompt，标注为消歧，不落库');
+{
+  const session = svc.createSession('上下文会话');
+  const fake = createFakeClient((ctx) => textTurn({ ...ctx, nextId: fake.calls.nextId, text: '好' }));
+  const { executor: ex } = makeExecutor({ client: fake.client });
+  const block = '[会话上下文·仅供消歧，不是新指令]\n第1轮：用户说「跟着我走 target:abc」，执行 robot_follow（规则 follow_me@1）\n[/会话上下文]';
+
+  const withCtx = submit(session.session_id, '慢一点');
+  await ex.run(withCtx.run_id, block);
+  check('发给模型的 prompt 带上下文块', fake.calls.turns[0].input.includes('仅供消歧，不是新指令'), fake.calls.turns[0].input);
+  check('发给模型的 prompt 保留原句', fake.calls.turns[0].input.startsWith('慢一点'), fake.calls.turns[0].input);
+  check('run.prompt 不被上下文污染', svc.getRunRow(withCtx.run_id).prompt === '慢一点', svc.getRunRow(withCtx.run_id).prompt);
+  const leaked = runEvents(withCtx.run_id).filter(
+    (e) => JSON.stringify(e).includes('仅供消歧') || JSON.stringify(e).includes('跟着我走 target:abc'),
+  );
+  check('事件库里没有上下文正文', leaked.length === 0, leaked.map((e) => e.type).join(','));
+
+  const noCtx = submit(session.session_id, '再往前一点');
+  await ex.run(noCtx.run_id);
+  check('没有上下文时 prompt 就是原句', fake.calls.turns[1].input === '再往前一点', fake.calls.turns[1].input);
+}
+
 executor?.dispose();
 svc.dispose();
 store.close();

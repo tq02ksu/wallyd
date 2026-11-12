@@ -149,6 +149,21 @@ try {
   ];
   const speechMissing = speechRequired.filter((t) => !tpl.has(t));
   check('R14 语音事件全部已登记', speechMissing.length === 0, speechMissing.join(', '));
+  // GH-12 的会话回合事件必须登记：未登记就写不进去，上下文续接在时间线上会毫无痕迹。
+  check('conversation.turn_joined 已登记', tpl.has('conversation.turn_joined'));
+  check('conversation.turn_reset 已登记', tpl.has('conversation.turn_reset'));
+  const joinedFields = tpl.get('conversation.turn_joined')?.payload_fields ?? [];
+  check(
+    'turn_joined 只带 turn_id/index（不含对话正文）',
+    joinedFields.length === 2 && joinedFields.includes('turn_id') && joinedFields.includes('index'),
+    joinedFields.join(','),
+  );
+  const resetFields = tpl.get('conversation.turn_reset')?.payload_fields ?? [];
+  check(
+    'turn_reset 只带 reason',
+    resetFields.length === 1 && resetFields.includes('reason'),
+    resetFields.join(','),
+  );
   check('每条模板都有 title', events.templates.every((t) => t.title));
   check('每条模板都有 summary', events.templates.every((t) => t.summary));
 
