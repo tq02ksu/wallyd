@@ -9,9 +9,11 @@
 #
 # 前置（GH-55）：`WALLY_AUDIO_TEST_HARNESS=1 sh scripts/build_audio_bridge.sh`。
 # `record` 已从正式命令面删除，这里走测试专用 `harness_record_pair`；桥没在
-# bridge_ready 回报 `"test_harness": true` 时实验作废（不作「有文件就算成功」）。
+# bridge_ready 回报 test_harness=true 时实验作废（不作「有文件就算成功」）。
+# 构建身份由 `aec_assert.sh bridge --require-harness` 判（解析 JSON，不 grep 字面量）。
 set -eu
-cd "$(dirname "$0")/../.." || exit 1
+HERE=$(cd "$(dirname "$0")" && pwd)
+cd "$HERE/../.." || exit 1
 APP="$(pwd)/work/bin/AudioBridge.app"
 WAV="$(pwd)/work/verify/aec_probe.wav"
 DIR=$(cd "$(dirname "$0")/../.." && pwd)/${1:-work/verify/pairs/r1}
@@ -37,8 +39,9 @@ while [ $i -lt 60 ]; do grep -q vad_calibrated "$DIR/bridge.out" 2>/dev/null && 
 grep -q vad_calibrated "$DIR/bridge.out" || { echo "FAIL 校准超时"; kill $holder 2>/dev/null; pkill -f "AudioBridge serve"; exit 1; }
 
 # 证伪（GH-55）：只有测试专用构建才认识 harness_record_pair。
-if ! grep -q '"test_harness": true' "$DIR/bridge.out" 2>/dev/null; then
+if ! report=$("$HERE/aec_assert.sh" bridge "$DIR/bridge.out" --require-harness 2>&1); then
     echo "FAIL 桥未回报 test_harness=true（AudioBridge 未用 WALLY_AUDIO_TEST_HARNESS=1 构建）"
+    printf '%s\n' "$report" | sed 's/^/  /'
     kill $holder 2>/dev/null || true
     pkill -f "AudioBridge serve" 2>/dev/null || true
     exit 1

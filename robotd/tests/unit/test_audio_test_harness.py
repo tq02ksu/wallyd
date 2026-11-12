@@ -8,7 +8,7 @@ E0/E1 可判定的事：
      默认构建因此回 `E_CMD_UNKNOWN`；
   2. harness 复用同一个 `ServeBridgeV2` / `playerNode`，不另起播放路径；
   3. `eval/aec3` 脚本改走 harness 命令，并在 `bridge_ready` 未回报
-     `"test_harness": true` 时把实验判作废。
+     `test_harness=true` 时把实验判作废（GH-65：判据在 `aec_assert.sh` 里读 JSON 字段）。
 
 真正“默认构建真的不认识 / 开启后真的认识”由 `scripts/apple/Tests` 的两份
 XCTest 执行（apple lane，不碰音频设备）：`BridgeCoreTests` 用默认编译，
@@ -223,7 +223,11 @@ def test_eval_scripts_use_harness_commands_and_falsify_without_confirmation():
         assert command in text, f"{name} 必须走 {command}"
         assert '"cmd":"play"' not in text and '"cmd":"record"' not in text
         # 证伪锚点：bridge_ready 没回报 test_harness 就判实验作废。
-        assert '"test_harness": true' in text, f"{name} 缺 test_harness 证伪断言"
+        # GH-65：判据复用 aec_assert.sh（解析 JSON 读字段），不再 grep 带空格的
+        # 字面量——桥输出的是紧凑 JSON，字面量匹配会把成功的实验误判成作废。
+        assert "aec_assert.sh" in text, f"{name} 必须复用共用断言层"
+        assert "--require-harness" in text, f"{name} 缺 test_harness 证伪断言"
+        assert '"test_harness": true' not in text, f"{name} 还在用 grep 字面量判 JSON"
         syntax = subprocess.run(["sh", "-n", str(script)], capture_output=True, text=True, check=False)
         assert syntax.returncode == 0, syntax.stderr
 

@@ -81,6 +81,35 @@ python3 eval/aec3/voice_smoke.py \
 > `sh scripts/build_audio_bridge.sh` 重建默认桥再跑 `smoke_voice.sh`，
 > 否则 C0 会因 `test_harness=true` 判 FAIL。
 
+## 桥的构建身份判据（GH-65）
+
+`aec_ab2.sh` / `collect_pair.sh` 不再用 `grep` 字面量匹配 `bridge_ready`：桥输出的是
+紧凑 JSON（`"test_harness":true`，冒号后**没有**空格），带空格的 grep 会把已经启动
+并校准好的 harness 实验误判成「未用测试构建」。两者改调共用断言层
+`aec_assert.sh`，它复用 `voice_smoke.py` 的 `bridge_ready()` /
+`check_harness_or_production()` / `check_aec_mode()`，**解析 JSON 读字段**，与排版无关。
+
+```sh
+# 声明的构建身份：必须是 JSON true（不是字符串 "true"）
+sh eval/aec3/aec_assert.sh bridge work/verify/ab2/1-aec.out --require-harness
+
+# ABAB 的证伪锚点：桥必须真的进了 aec3，`--aec3` 被忽略时这里变红
+sh eval/aec3/aec_assert.sh bridge work/verify/ab2/1-aec3.out --require-harness --expect-aec-mode aec3
+
+# 这一轮真的播完了（缺 play_finished 即失败）
+sh eval/aec3/aec_assert.sh play work/verify/ab2/1-aec.out
+```
+
+输出每个判据一行 `PASS`/`FAIL`（`C0` 构建身份、`C0b` AEC 模式、`P1` 播完），
+最后一行是总结论。退出码：`0` = 断言通过；`1` = 断言失败；`2` = 输入/参数错误。
+
+`aec_ab2.sh` **汇总每组的退出码**：任一组失败即非零退出，只有全部通过才打印
+`OK`。以前末行是无条件 `echo OK`，六组全崩也会显示 OK——那正是 GH-65 的另一半。
+离线副本：`(cd robotd && python3 -m unittest tests.unit.test_aec_assert -v)`。
+
+换路径/离线复跑时可用 `AEC_AB2_APP` / `AEC_AB2_WAV` / `AEC_AB2_OUT` 覆盖桥、
+测试音和输出目录（一般不用改）。
+
 ## 测试专用 WAV 通道（GH-55）
 
 `play` / `record` 已从正式桥的命令面删除，正式命令只有
@@ -100,7 +129,8 @@ python3 eval/aec3/voice_smoke.py \
 {"ev": "bridge_ready", "test_harness": true, ...}
 ```
 
-脚本把 `"test_harness": true` 当作**证伪锚点**：没回报就判实验作废。
+（真实输出是紧凑 JSON，冒号后没有空格；文档这里加空格只为可读。）
+脚本把 `test_harness=true` 当作**证伪锚点**：没回报就判实验作废。
 默认构建里命令被忽略时只会得到 `FAIL`，不会产出「没有回声数据却看起来跑完」的假实验。
 
 harness 播报期间仍会按生产的 100ms 节奏发 `aec_echo_probe`，所以 ABAB 的
@@ -111,6 +141,7 @@ harness 播报期间仍会按生产的 100ms 节奏发 `aec_echo_probe`，所以
 | 脚本 | 作用 | 产出 |
 | --- | --- | --- |
 | `smoke_voice.sh` | 正式播报冒烟（默认生产桥 + `speak`，B1–B7） | `work/verify/smoke_voice/{events.ndjson,stderr.log}` |
+| `aec_assert.sh` | 实验桥断言层（`bridge` / `play`，解析 JSON，不 grep 字面量） | 终端 + 退出码 |
 | `make_probe.py` | 生成固定测试音（带限噪声 300–3400Hz + 4Hz 音节包络，纯标准库） | `work/verify/aec_probe.wav` |
 | `aec_ab2.sh` | ABAB 对照：`--aec` / `--no-aec` 各 3 轮，100ms 采样（走 `harness_play_wav`） | `work/verify/ab2/*.out` |
 | `collect_pair.sh` | 录一对真实的「参考信号 + 麦克风信号」WAV（走 `harness_record_pair`） | `work/verify/pairs/rN/{ref,mic}.wav` |
@@ -153,7 +184,7 @@ clang++ -std=c++20 -O2 -m64 -DWEBRTC_MAC -DWEBRTC_POSIX \
 
 ## 四条纪律（都是踩出来的，见 eval §5.8）
 
-1. **实验必须能证伪**：ABAB 先断言 `bridge_ready` 里有 `"test_harness": true`（否则实验作废），
+1. **实验必须能证伪**：ABAB 先断言 `bridge_ready.test_harness` 是 JSON `true`（否则实验作废），
    再断言 `play_finished` 存在、探针数够、进程无 `Terminating app`，录制的 WAV 非空。
    `smoke_voice.sh` 反过来要求 `bridge_ready` **没有** `test_harness`，并断言
    `tts_played.played > 0`。只断言「产出了文件/跑完了」会让崩溃或被忽略的命令伪装成成功。

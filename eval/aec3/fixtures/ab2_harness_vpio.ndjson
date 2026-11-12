@@ -1,0 +1,4 @@
+{"aec":true,"aec_mode":"vpio","engine_started":true,"ev":"bridge_ready","pid":2730,"preroll":5,"t_ms":331,"test_harness":true,"tts_engine":"system","tts_queue_capacity":8}
+{"ambient_db":-41,"ev":"vad_calibrated","fed_frames":47822,"silence_db":-38,"speech_db":-33,"t_ms":3340}
+{"db":-40.2,"ev":"aec_echo_probe","t_ms":4000}
+{"dur_ms":5000,"ev":"play_finished","path":"work/verify/aec_probe.wav","t_ms":12100}
