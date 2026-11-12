@@ -289,6 +289,8 @@ export interface RunServiceOptions {
     utterance_id: string;
     /** 本句所属的对话回合；装配层用它把 run 结论记回上下文。 */
     turn_id?: string;
+    /** 上游说话人分段；省略时绑定层使用匿名键，不跨人沿用。 */
+    speaker_id?: string;
   }) => { run_id?: string } | void;
   /**
    * 用户在确认窗口内说「再说一遍」：装配层据此重播**同一条**复述。
@@ -340,6 +342,10 @@ export interface RecordClarificationInput {
   fast_rule?: string | null;
   /** 结构化原因：开窗原因或窗口收尾原因。 */
   reason?: string;
+  /** 歧义候选（已按播报上限截断）；写进事件 `data`，便于事后复核。 */
+  candidates?: string[];
+  /** 候选之外还有「别的」。 */
+  more?: boolean;
 }
 
 export interface RecordClarificationClosedInput {
@@ -384,6 +390,8 @@ export interface UtteranceDispatchInput {
   echo?: boolean;
   /** 该轮 `speech.started` 的 robotd 时间戳（审批窗口因果判断用）。 */
   started_at?: string | null;
+  /** 可选：上游说话人分段，原样转给提交入口；不在本类里做身份判断。 */
+  speaker_id?: string;
 }
 
 export type UtteranceDispatchAction =
@@ -434,6 +442,7 @@ export class RunService {
         text: string;
         utterance_id: string;
         turn_id?: string;
+        speaker_id?: string;
       }) => { run_id?: string } | void)
     | undefined;
   private conversation: ConversationContext | undefined;
@@ -755,7 +764,12 @@ export class RunService {
           ...(input.reason ? { reason: input.reason } : {}),
         },
         // reason 同时放进 data：EventView 会原样暴露 data，页面/接口能直接筛「为什么没接上」。
-        data: { missing, fast_rule: input.fast_rule ?? null, reason: input.reason ?? null },
+        data: {
+          missing,
+          fast_rule: input.fast_rule ?? null,
+          reason: input.reason ?? null,
+          ...(input.candidates !== undefined ? { candidates: input.candidates, more: input.more === true } : {}),
+        },
       }).seq;
     });
     this.notify(seq);
@@ -1831,7 +1845,12 @@ export class RunService {
     const turn = this.conversation ? this.conversation.advance(this.clock()) : undefined;
     const turnId = turn?.turn_id;
     try {
-      const res = this.submitUtterance({ text, utterance_id: input.utterance_id, turn_id: turnId });
+      const res = this.submitUtterance({
+        text,
+        utterance_id: input.utterance_id,
+        turn_id: turnId,
+        speaker_id: input.speaker_id,
+      });
       if (turn && !res?.run_id) {
         // 提交入口没给出 run_id（没建成 run）：退回这一句的计数，别在时间线上留下影子。
         this.conversation?.release(turn);

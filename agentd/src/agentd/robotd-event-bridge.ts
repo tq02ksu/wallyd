@@ -18,6 +18,9 @@
  * | `device.lost`(audio) / `bridge_exit` | → `speech.audio_unavailable` |
  * | `device.ready`(audio) | → `speech.audio_recovered` |
  * | `speech.partial` / `audio.state` | **不入库**（高频，会淹没时间线） |
+ * | `person.appeared` | → `person.appeared`（事实；同时登记活 track） |
+ * | `person.moved` | → `person.moved`（事实；降频由 `EventLog` 按契约执行） |
+ * | `person.lost` | → `person.lost`（事实；并立即删除指向该 track 的绑定） |
  *
  * ## 隐私
  *
@@ -28,6 +31,7 @@
 import type { EventLog } from './events.ts';
 import type { Store } from './store.ts';
 import type { RobotdEvent } from './robotd-events.ts';
+import type { FollowTargetRegistry } from './person-bindings.ts';
 
 /** 摘要上限。超过就截断并标注，绝不把整段对话写进事件库。 */
 export const EXCERPT_MAX = 80;
@@ -59,6 +63,8 @@ export interface SpeechRouterHooks {
     started_at?: string;
     /** 该轮是否是机器人自己 TTS 的回声（事实 + 门限判定，见 ECHO_ERLE_MAX_DB）。 */
     echo: boolean;
+    /** 可选：上游说话人分段。未实现时省略，不做编号或推断。 */
+    speaker_id?: string;
   }) => void;
   /**
    * 系统播报（审批复述）的真实终态。
@@ -125,6 +131,7 @@ export class RobotdEventBridge {
   private store: Store;
   private hooks: SpeechRouterHooks;
   private runs: SafetyRunIndex | null;
+  private targets: FollowTargetRegistry | null;
   /** 上一次播报的摘要文本（按 response_id 存，用于 tts_finished 时带上 excerpt） */
   private speakText = new Map<string, string>();
   /** 待播报文本（按 task_id 存，等 tts_started 到达后转成 response_id 关联） */
@@ -143,11 +150,17 @@ export class RobotdEventBridge {
     store: Store;
     hooks?: SpeechRouterHooks;
     runs?: SafetyRunIndex;
+    /**
+     * 活 track 与绑定的唯一写入点（GH-68）。省略时不维护绑定（单测可只测事件转发）。
+     * 桥只转发事实并同步生命周期，不做绑定判断。
+     */
+    targets?: FollowTargetRegistry;
   }) {
     this.events = deps.events;
     this.store = deps.store;
     this.hooks = deps.hooks ?? {};
     this.runs = deps.runs ?? null;
+    this.targets = deps.targets ?? null;
   }
 
   /** 处理一条 robotd 事件。未知类型静默忽略（robotd 的事件面比 agentd 大）。 */
@@ -279,6 +292,21 @@ export class RobotdEventBridge {
             task_id: typeof p.task_id === 'string' ? p.task_id : undefined,
           });
         }
+        return;
+
+      // ------------------------------------------------ 人物观测（GH-68）
+      // 桥只转发**事实**：track 出现/移动/消失。是否把某条 track 绑到某个说话人、
+      // 置信度够不够、要不要澄清，全部属于绑定层与路由层，不在桥里判断。
+      case 'person.appeared':
+        this.onPersonAppeared(p);
+        return;
+
+      case 'person.moved':
+        this.onPersonMoved(p);
+        return;
+
+      case 'person.lost':
+        this.onPersonLost(p);
         return;
 
       case 'device.lost':
@@ -431,7 +459,58 @@ export class RobotdEventBridge {
       route_hint: typeof p.route_hint === 'string' ? p.route_hint : undefined,
       started_at: info?.started_at,
       echo,
+      speaker_id: typeof p.speaker_id === 'string' && p.speaker_id ? p.speaker_id : undefined,
     });
+  }
+
+  // ---------------------------------------------------------------- 人物观测
+  private onPersonAppeared(p: Record<string, unknown>): void {
+    const trackId = typeof p.track_id === 'string' ? p.track_id : '';
+    const bbox = validBbox(p.bbox);
+    const firstSeenAt = typeof p.first_seen_at === 'string' ? p.first_seen_at : '';
+    if (!trackId || !bbox || !firstSeenAt) {
+      this.hooks.log?.('忽略字段不完整的 person.appeared', {
+        track_id: trackId || undefined,
+        has_bbox: Boolean(bbox),
+        has_first_seen_at: Boolean(firstSeenAt),
+      });
+      return;
+    }
+    // 先登记活体再写事件：即使事件因频率/存储原因没落库，安全侧的「这条 track 活着」
+    // 也不该因为审计写入失败而变成「从未出现过」。反过来，track 丢失时先删绑定再写事件。
+    this.targets?.trackAppeared(trackId, firstSeenAt);
+    this.emit('person.appeared', { track_id: trackId, bbox, first_seen_at: firstSeenAt });
+  }
+
+  private onPersonMoved(p: Record<string, unknown>): void {
+    const trackId = typeof p.track_id === 'string' ? p.track_id : '';
+    const bbox = validBbox(p.bbox);
+    if (!trackId || !bbox) {
+      this.hooks.log?.('忽略字段不完整的 person.moved', {
+        track_id: trackId || undefined,
+        has_bbox: Boolean(bbox),
+      });
+      return;
+    }
+    this.targets?.trackMoved(trackId);
+    // 降频由 EventLog 按契约的 rate_limit 执行；桥不做二次限流。
+    this.emit('person.moved', { track_id: trackId, bbox });
+  }
+
+  private onPersonLost(p: Record<string, unknown>): void {
+    const trackId = typeof p.track_id === 'string' ? p.track_id : '';
+    if (!trackId) {
+      this.hooks.log?.('忽略缺 track_id 的 person.lost', {});
+      return;
+    }
+    // 绑定必须立即失效，不能等事件写入成功。这一步是安全侧优先。
+    this.targets?.trackLost(trackId);
+    const lastSeenAt = typeof p.last_seen_at === 'string' ? p.last_seen_at : '';
+    if (!lastSeenAt) {
+      this.hooks.log?.('person.lost 缺 last_seen_at，绑定已失效但不写事件', { track_id: trackId });
+      return;
+    }
+    this.emit('person.lost', { track_id: trackId, last_seen_at: lastSeenAt });
   }
 
   // ---------------------------------------------------------------- 可用性
@@ -491,6 +570,21 @@ export class RobotdEventBridge {
 function excerpt(text: string): string {
   const one = text.replace(/\s+/g, ' ').trim();
   return one.length <= EXCERPT_MAX ? one : `${one.slice(0, EXCERPT_MAX)}…`;
+}
+
+/** 契约要求 bbox 的四个数值字段齐全；缺一不可当成一次观测。 */
+function validBbox(value: unknown): Record<string, number> | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const bbox = value as Record<string, unknown>;
+  for (const key of ['x', 'y', 'width', 'height']) {
+    if (typeof bbox[key] !== 'number' || !Number.isFinite(bbox[key] as number)) return null;
+  }
+  return {
+    x: bbox.x as number,
+    y: bbox.y as number,
+    width: bbox.width as number,
+    height: bbox.height as number,
+  };
 }
 
 function int(v: unknown): number {
