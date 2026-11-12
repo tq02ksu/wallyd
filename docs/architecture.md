@@ -95,7 +95,7 @@ relations:
 | P1 | **时间尺度** | 必须本地闭环、毫秒级 → 固件；10–100Hz / 秒级 → Runtime；秒级且需语义 → 应用层 | 脉冲与脱机时序 → 固件；`Nav` 局部避障 → Runtime；任务规划 → Agent |
 | P2 | **真相归属** | 谁是该状态的权威，谁拥有它；**同一事实不许两层各存一份** | 步数 / 引脚电平 → 固件；位姿 / 模式 / 任务 / 设备 → Runtime；意图 → Agent |
 | P3 | **后果归属** | 谁承担故障后果（失联 / 掉电 / 堵转 / 不可逆动作），谁就拥有默认值与兜底 | 看门狗停机、上电默认态 → 固件；运动互斥 → Runtime；审批 → 应用层 |
-| P4 | **粒度** | 对外只暴露「**机器人能做什么**」（语义能力），不暴露「硬件怎么被操作」（引脚 / 寄存器 / 时序） | Agent 只见 OpenAPI 生成的语义工具（规划中的 `robot_move`）；`motor_set_pwm` 只能出现在固件层 |
+| P4 | **粒度** | 对外只暴露「**机器人能做什么**」（语义能力），不暴露「硬件怎么被操作」（引脚 / 寄存器 / 时序） | Agent 只见 OpenAPI 生成的语义工具（如 `robot_move` / `robot_stop`）；`motor_set_pwm` 只能出现在固件层 |
 | P5 | **旁路** | 安全与维护通道允许越过分层，但必须 ①显式命名 ②**不进 Agent 工具面** ③不成为常规路径 | 已有板侧看门狗、软件 STOP；拔 USB 与独立硬件急停是待验证项；维修脱机开关、串口调试 op |
 
 **用判据判定已出现过的争论（结论都是推论，不是新增规则）**：
@@ -419,7 +419,7 @@ C4Component
 | ├ `Camera` | 设备索引 / 名称匹配、分辨率、帧率 | 当前工具名以 OpenAPI `operationId` 为准 |
 | └ `Audio` | 麦克风 / 扬声器设备、语言（`zh_CN`）、音色（Tingting）、ASR 资产状态 | `audio_state` / `audio_mute` / `audio_unmute` / `speech_listen` / `robot_speak` |
 | `Perception` ★ | 感知事实的产出（订阅式事件流）；示例名，可用现有等价模块名替换 | 规划中：`perception_*` 事件；非当前 OpenAPI 工具 |
-| `Motion` | 每米步数、轮距、最大速度 / 加速度、引脚映射 | 规划中：`robot_move` / `robot_rotate` / `robot_stop` / `robot_state` |
+| `Motion` | 每米步数、轮距、最大速度 / 加速度、引脚映射 | 已实现：`robot_stop` / `robot_move`（最小原语，GH-74）/ `robot_state`；规划中：`robot_rotate` |
 | `Gimbal` | pan/tilt 引脚、角度范围、回中位 | 规划中：`gimbal_look_at` |
 | `Nav` | 导航策略模型路径、控制频率、最大 v/ω、安全距离（第一版可空） | 规划中：`robot_navigate`；取消使用 `task_cancel` 或 `robot_stop` |
 | `MCP Server` | 工具白名单、只读模式 | （供工具面） |
@@ -488,8 +488,8 @@ C4 的 L4 通常不画全，只对「最关键的契约」展开。本项目有�
   `operationId` 生成；modeld 的 `vision.*` 属于独立命名空间，须由 modeld 自己的工具契约定义，不能混作 robotd API。
 - 工具只做「薄封装」：参数校验（zod）→ 调模块 → 返回结构化结果；**不把业务规则写死在工具里**。
 - **robotd** 面向 Agent 的公开工具名以 `contracts/openapi.yaml` 的 `operationId` 为唯一来源，生成器据此生成 MCP 名称
-  （当前为 snake_case，如 `robot_stop`、`robot_follow`）。规划中的运动/导航 operationId 为
-  `robot_move` / `robot_rotate` / `robot_navigate`，须先进入 OpenAPI 才算正式工具。
+  （当前为 snake_case，如 `robot_stop`、`robot_follow`、`robot_move`）。规划中的运动/导航 operationId
+  `robot_rotate` / `robot_navigate` 仍须先进入 OpenAPI 才算正式工具。
 - 模块内部方法名（如 `Nav.goTo()`）不是 Agent 工具，也不是别名；Robot Skills 的 navigate/follow/stop 等
   是产品展示名，不构成第二套 API 名称。
 - 工具粒度停在**机器人语义**，不下沉到硬件：禁止 `motor_set_pwm` / `gpio_write` / `servo_pwm` / `ena_set`。
@@ -498,7 +498,7 @@ C4 的 L4 通常不画全，只对「最关键的契约」展开。本项目有�
 | 分级 | 例子 | 策略 |
 | --- | --- | --- |
 | **只读** | `robot_state`、未来的 `camera_list` / `vision_describe` | 自动放行 |
-| **有副作用** | 未来的 `robot_move` / `gimbal_look_at`，当前 `robot_speak` | 默认需审批（可配置） |
+| **有副作用** | `robot_move` / `robot_follow` / `gimbal_look_at`，当前 `robot_speak` | 默认需审批（可配置） |
 | **不可逆 / 危险** | 未来的 `robot_flash`、写设备配置、校准 | **始终需人工审批** |
 
 > **产品层叫法 = Robot Skills**：Agent 只见 OpenAPI 生成的语义工具名；产品文案可显示
@@ -969,7 +969,7 @@ robotd 校验授权（能力 / 参数 / 有效期 / 未使用）→ 执行动作
 
 - [ ] **S1 骨架**：TS monorepo + daemon + 面板壳 + 一个空模块跑通「配置存读 + 面板展示」
 - [ ] **S2 设备识别**：robot / vision / audio 各自识别设备；面板「设备」页可见
-- [ ] **S3 ESP32 闭环**：esptool 路线选定 → 刷固件 → 串口握手 → 规划中的 `robot_move` 驱动电机
+- [ ] **S3 ESP32 闭环**：esptool 路线选定 → 刷固件 → 串口握手 → `robot_move` 驱动电机（软件侧已接通，真机待验）
 - [ ] **S4 视觉**：部署 miniCPM-V → 规划中的 `camera_capture` + modeld `vision.vqa` 连通
 - [ ] **S5 音频**：接 `mac_speech.swift` 桥 + audio 服务（系统能力已确认，含 ASR 资产安装）
 - [ ] **S6 Codex 接入**：app-server 接入 + MCP 工具 + 语音审批流；调试页提供运行状态观察

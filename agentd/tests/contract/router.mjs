@@ -18,6 +18,9 @@ import {
   MAX_FOLLOW_SPEED_MPS,
   MIN_FOLLOW_SPEED_MPS,
   DEFAULT_FOLLOW_SPEED_MPS,
+  DEFAULT_MOVE_SPEED_MM_S,
+  MIN_MOVE_MM,
+  MAX_MOVE_MM,
   ruleTag,
 } from '../../src/agentd/router.ts';
 
@@ -71,8 +74,8 @@ console.log('— 能力名必须出现在 mcp-tools.json（漂移即红）');
   const missing = FAST_RULES.filter((r) => !names.has(r.capability)).map((r) => `${r.id} → ${r.capability}`);
   check('0 条能力名不在 mcp-tools.json 里', missing.length === 0, missing.join('; '));
   check(
-    '规则用到的运动能力都已发布（robot_stop / robot_follow）',
-    names.has('robot_stop') && names.has('robot_follow'),
+    '规则用到的运动能力都已发布（robot_stop / robot_move / robot_follow）',
+    names.has('robot_stop') && names.has('robot_move') && names.has('robot_follow'),
     [...names].join(','),
   );
 }
@@ -122,6 +125,31 @@ console.log('— GH-12：slow_down 只映射已发布能力与真实参数');
   check('默认跟随速度与契约一致', DEFAULT_FOLLOW_SPEED_MPS === speed.default, `${DEFAULT_FOLLOW_SPEED_MPS} vs ${speed.default}`);
   check('速度下限与契约一致', MIN_FOLLOW_SPEED_MPS === speed.minimum, `${MIN_FOLLOW_SPEED_MPS} vs ${speed.minimum}`);
   check('速度上限与契约一致', MAX_FOLLOW_SPEED_MPS === speed.maximum, `${MAX_FOLLOW_SPEED_MPS} vs ${speed.maximum}`);
+}
+
+console.log('— GH-74：move_forward 只映射已发布的 robot_move，参数与安全边界同源');
+{
+  const move = FAST_RULES.find((r) => r.id === 'move_forward');
+  check('存在 move_forward', Boolean(move));
+  check('move_forward 映射 robot_move', move?.capability === 'robot_move', move?.capability);
+  const tool = byName.get('robot_move');
+  const props = new Set(Object.keys(tool?.inputSchema?.properties ?? {}));
+  const derived = { ...(move?.contextArgs?.({ available: null }) ?? {}), distance_mm: 300 };
+  check(
+    '派生参数都在 robot_move 的 inputSchema 里',
+    Object.keys(derived).every((k) => props.has(k)),
+    JSON.stringify(derived),
+  );
+  const distance = tool?.inputSchema?.properties?.distance_mm ?? {};
+  const speed = tool?.inputSchema?.properties?.speed_mm_s ?? {};
+  check('距离下限与契约一致', MIN_MOVE_MM === distance.minimum, `${MIN_MOVE_MM} vs ${distance.minimum}`);
+  check('距离上限与契约一致', MAX_MOVE_MM === distance.maximum, `${MAX_MOVE_MM} vs ${distance.maximum}`);
+  check(
+    '默认速度与契约一致',
+    DEFAULT_MOVE_SPEED_MM_S === speed.default,
+    `${DEFAULT_MOVE_SPEED_MM_S} vs ${speed.default}`,
+  );
+  check('robot_move 需要审批（物理动作）', 'approvalParams' in (tool ?? {}));
 }
 
 console.log('— 安全底线：受保护的停止规则仍在，且映射无审批的 robot_stop');

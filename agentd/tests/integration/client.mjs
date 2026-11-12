@@ -37,6 +37,20 @@ check('capabilities 非空', tools.length > 0);
 check('每个工具都有 operation', tools.every((t) => t.operation && t.operation.method && t.operation.path));
 const stopTool = tools.find((t) => t.name === 'robot_stop');
 check('robot_stop 存在', Boolean(stopTool));
+const moveTool = tools.find((t) => t.name === 'robot_move');
+check('robot_move 存在（GH-74 位移原语）', Boolean(moveTool));
+
+// GH-74：位移是物理动作，没有审批凭据必须 403；不能落到「未实现 → 503」。
+try {
+  await client.callCapability('robot_move', { distance_mm: 300, speed_mm_s: 150 });
+  check('robot_move 无凭据必须被拒绝', false);
+} catch (e) {
+  check(
+    'robot_move 无凭据为 E_APPROVAL/403',
+    e instanceof RobotdCallError && e.code === 'E_APPROVAL' && e.httpStatus === 403,
+    `${e.code} ${e.httpStatus}`,
+  );
+}
 
 // 停止：安全旁路
 const stopRes = await client.stop('user_stop_api');

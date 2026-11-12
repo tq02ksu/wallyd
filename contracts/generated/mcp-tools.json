@@ -213,6 +213,41 @@
     }
   },
   {
+    "name": "robot_move",
+    "description": "直线位移原语（开环，不报告是否到位）\n最小位移切口：把一段直线距离（毫米）以给定速度（毫米每秒）下发到板侧。\n**开环**——ADR-0004 不提供「已到位 / 物理静止 / 堵转」字段，因此 200 只表示\n「帧已写出、板侧已应答受理」，**不代表机器人真的走过这段距离**。\n不做闭环、导航、避障，也不创建任务（没有结束事实就不提交任务终态）。\n板侧 `move` 是 JSON-Lines 命令；host 在板侧边界把毫米换算成 `hello` 声明的米\n（单位单点声明见 ADR-0004）。板侧正在执行其他运动时返回 409/E_BUSY，\n**不排队、不重发**（物理动作禁止自动重试）。\n链路未就绪（串口打不开/已断开）时返回 503，且不写任何帧。\n",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "distance_mm": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 5000,
+          "description": "直线距离（毫米），正数前进。5 米上限是安全边界，实现不得放宽"
+        },
+        "speed_mm_s": {
+          "type": "number",
+          "minimum": 50,
+          "maximum": 400,
+          "default": 150,
+          "description": "线速度（毫米/秒）。范围即安全边界，实现不得自动提速"
+        }
+      },
+      "required": [
+        "distance_mm"
+      ],
+      "additionalProperties": false
+    },
+    "operation": {
+      "method": "POST",
+      "path": "/v1/robot/move",
+      "pathParams": []
+    },
+    "approvalParams": [
+      "distance_mm",
+      "speed_mm_s"
+    ]
+  },
+  {
     "name": "robot_follow",
     "description": "跟随目标人物\n机器人语义能力：调用方表达「跟随哪个目标」，robotd 负责目标跟踪、跟随控制、运动任务与安全停止。\n不是通用自然语言接口，不保证是无人看护安全的自主行驶。\n**目标绑定来源必须唯一**：给 `target_track_id` 就只跟这条 track；只给 `target` 时是语义描述，\n需要机器人自行确定目标，歧义时由调用方澄清而非机器人私自切换。\n目标丢失、观测过期、相机/链路故障时**停止并提交明确终态**，默认不自动旋转搜索。\n",
     "inputSchema": {

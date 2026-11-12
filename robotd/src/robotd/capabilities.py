@@ -86,9 +86,20 @@ def default_capabilities() -> list[Capability]:
             public_name="robot_stop",
             group="motion",
             implementation=Implementation.IMPLEMENTED,
-            summary="有序停止：本地状态与任务表已实现，板侧 stop 下发（真机串口待 R11）",
+            summary="有序停止：本地状态与任务表 + 板侧 stop 帧（无 id、幂等、可抢占）",
             exclusivity=Exclusivity.SOFT,
             requires_approval=False,
+        ),
+        # GH-74：最小位移切口。开环下发，不声称到位；板侧忙时返回 E_BUSY。
+        Capability(
+            name="robot.move",
+            public_name="robot_move",
+            group="motion",
+            implementation=Implementation.IMPLEMENTED,
+            summary="直线位移原语（距离 mm + 速度 mm/s）；开环下发，不报告是否到位",
+            exclusivity=Exclusivity.MOTION,
+            requires_approval=True,
+            approval_params=("distance_mm", "speed_mm_s"),
         ),
         Capability(
             name="events.subscribe",

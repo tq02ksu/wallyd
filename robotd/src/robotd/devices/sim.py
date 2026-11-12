@@ -91,6 +91,9 @@ class SimBoard:
                 self.state.steps_left += left
                 self.state.steps_right += right
                 return {"accepted": True, "left": left, "right": right}
+            if op == "move":
+                # 只证明「仿真板收到了 move 命令」；不产生位移/步数事实（无标定、无里程）。
+                return {"accepted": True}
             if op == "calib":
                 return {"accepted": True, "calib": dict(args)}
             if op == "stop":

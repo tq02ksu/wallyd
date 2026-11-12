@@ -53,6 +53,10 @@ Implemented today:
   and approval gate, lifecycle/shutdown, loopback-only HTTP/WS transport with
   event cursors and resync, and speech listen/speak through the resident audio
   bridge (speech availability depends on that bridge, not on process startup).
+  A real USB-CDC serial board link (`--serial`, JSON-Lines v2) and the open-loop
+  `robot_move` primitive (distance in mm + speed in mm/s, with `robot_stop`
+  writing the id-less stop frame) exist as of GH-74; a serial device that cannot
+  be opened degrades to an explicit `error` state instead of pretending to be ready.
 - `agentd`: contract and event allow-list, SQLite persistence, task lifecycle
   and idempotency, event cursors plus WS push, model configuration with
   revisions, write-only credentials and verification, body observation with
@@ -60,9 +64,11 @@ Implemented today:
 
 Staged work, reported as `E_UNAVAILABLE` instead of pretended success:
 
-- `robotd`: board-side serial adaptation and calibration, control isolation
-  (ADR-0010 is still proposed), perception/follow (R15–R17), and real-hardware
-  timing validation.
+- `robotd`: calibration over the board link, control isolation (ADR-0010 is
+  still proposed), perception/follow (R15–R17; `robot_follow` still reports
+  `E_UNAVAILABLE`), and real-hardware timing validation. The serial link and
+  `robot_move` are implemented but their real-hardware behaviour (judgement
+  criteria 5–7 of GH-74) has not been validated on a robot.
 - `agentd`: managed Harness lifecycle (A10) and voice approval / one-time
   authorization (A13). A11/A12/A14 therefore stop at the orchestration skeleton
   plus stop bypass.

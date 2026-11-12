@@ -75,6 +75,8 @@
     "angle_deg": {"label": "角度", "type": "number", "unit": "deg"},
     "steps_per_m": {"label": "每米步数", "type": "number"},
     "wheelbase_mm": {"label": "轴距", "type": "number", "unit": "mm"},
+    "distance_mm": {"label": "距离", "type": "number", "unit": "mm"},
+    "speed_mm_s": {"label": "速度", "type": "number", "unit": "mm/s"},
     "rate": {"label": "语速", "type": "number"}
   },
   "repeat": {
