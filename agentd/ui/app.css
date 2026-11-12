@@ -188,6 +188,19 @@ code, .mono, time, .num { font-family: var(--mono); font-variant-numeric: tabula
 .event-detail[hidden] { display: none; }
 .event-detail dt { color: var(--text-3); }
 .event-detail dd { margin: 0; word-break: break-all; }
+
+/*
+ * 事件语气标记：把「你说了什么 / 我听到了 / 我决定了 / 我做完了 / 出错了」
+ * 在视觉上分开，避免同一层灰字里什么都看不出来。
+ * 只加左边框与底色，不改变字体层级，长列表仍然扫得动。
+ */
+.event.tone-said { border-left: 3px solid var(--accent, #5b8def); padding-left: 10px; background: color-mix(in srgb, var(--accent, #5b8def) 6%, transparent); }
+.event.tone-said .event-summary { color: var(--text-1); font-size: 14.5px; font-weight: 500; }
+.event.tone-decided { border-left: 3px solid var(--warn, #d9a441); padding-left: 10px; }
+.event.tone-done { border-left: 3px solid var(--ok, #3fa66b); padding-left: 10px; }
+.event.tone-bad { border-left: 3px solid var(--danger, #d9534f); padding-left: 10px; background: color-mix(in srgb, var(--danger, #d9534f) 5%, transparent); }
+.event.tone-noise { opacity: .62; }
+.event.tone-noise:hover { opacity: 1; }
 .new-banner {
   position: sticky; top: 57px; z-index: 10; display: flex; justify-content: center;
   padding: 8px 0; pointer-events: none;

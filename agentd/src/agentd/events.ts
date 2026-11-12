@@ -144,6 +144,31 @@ function fillTemplate(template: string, params: Record<string, unknown>, context
   });
 }
 
+/**
+ * 渲染后把仍然残留的 `{占位符}` 处理掉。
+ *
+ * 缺参数时 `fillTemplate` 会原样保留 `{duration_ms}`，于是页面上出现
+ * 「听音 {duration_ms} 毫秒」这种给开发者看的模板残渣。用户读到的应该是完整句子，
+ * 而不是一个占位符。这里把「占位符及其紧邻的量词/括号」整段去掉，避免留下
+ * 「听音  毫秒」这样的空壳。
+ */
+export function stripUnfilledPlaceholders(text: string): string {
+  return text
+    // 「听音 {x} 毫秒，」这种「动词 + 用法数量」的整句：数量没了句子就不成立，整段去掉
+    .replace(/[^，。！？]*\{\w+\}[^，。！？]*[，,]\s*/g, '')
+    // 先整段去掉「（时长 {x} 毫秒）」这类「括号里只剩标签」的残壳
+    .replace(/（[^（）]*\{\w+\}[^（）]*）/g, '')
+    .replace(/\([^()]*\{\w+\}[^()]*\)/g, '')
+    // 「{x} 毫秒」「{x}」连同紧邻的单位一起去掉
+    .replace(/([，,、]?\s*)?\{\w+\}\s*(毫秒|秒|ms)?/g, '')
+    .replace(/（）|\(\s*\)/g, '')
+    .replace(/^[，,、。；;]+/, '')
+    .replace(/[，,]\s*([。！？])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([。！？，、])/g, '$1')
+    .trim();
+}
+
 /** 上下文键（模板里可用的「非 payload」占位符）。 */
 function buildContext(params: Record<string, unknown>): Record<string, string> {
   const route = String(params.route ?? '');
@@ -197,9 +222,9 @@ export function renderEvent(
   const tpl = templates.get(row.type);
   const params = safeParse(row.params_json) as Record<string, unknown>;
   const context = buildContext(params);
-  const title = tpl ? fillTemplate(tpl.title, params, context) : `未知事件类型：${row.type}`;
+  const title = tpl ? stripUnfilledPlaceholders(fillTemplate(tpl.title, params, context)) : `未知事件类型：${row.type}`;
   const summary = tpl
-    ? fillTemplate(tpl.summary, params, context)
+    ? stripUnfilledPlaceholders(fillTemplate(tpl.summary, params, context))
     : '这条事件来自尚未登记的来源，诊断信息见详情。';
   return {
     event_id: row.event_id,
@@ -211,8 +236,8 @@ export function renderEvent(
     source: row.source,
     title,
     summary,
-    impact: tpl?.impact ? fillTemplate(tpl.impact, params, context) : null,
-    advice: tpl?.advice ? fillTemplate(tpl.advice, params, context) : null,
+    impact: tpl?.impact ? stripUnfilledPlaceholders(fillTemplate(tpl.impact, params, context)) : null,
+    advice: tpl?.advice ? stripUnfilledPlaceholders(fillTemplate(tpl.advice, params, context)) : null,
     // 恢复标志来自登记表，不从类型名猜：daemon.recovered 名字带 recovered，
     // 但它是「上次没跑完」的告警，标成「已恢复」是错的。
     recovered: tpl?.is_recovery === true,
