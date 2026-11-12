@@ -85,5 +85,25 @@ try {
 check('空文本抛 E_VALIDATION', code === 'E_VALIDATION', code);
 check('空文本没有发请求', calls.length === before, String(calls.length));
 
+console.log('— GH-49：澄清追问走系统播报，不签发 robot_speak 凭据');
+const beforeAnnounce = calls.length;
+await client.announce({
+  kind: 'clarification',
+  reason: 'missing_arguments',
+  action_label: '走到我这儿来',
+  missing: ['target_track_id'],
+  candidates: [],
+  more: false,
+});
+check('只发一次播报请求', calls.length === beforeAnnounce + 1, String(calls.length - beforeAnnounce));
+check('请求打到 robot_announce', calls.at(-1)?.url.endsWith('/v1/robot/announce'), calls.at(-1)?.url);
+const announceBody = JSON.parse(String(calls.at(-1)?.init?.body ?? '{}'));
+check('澄清 kind 正确', announceBody.kind === 'clarification', JSON.stringify(announceBody));
+check('澄清带结构化 missing', announceBody.missing?.includes('target_track_id') === true, JSON.stringify(announceBody));
+check('澄清不带自由文本 text', !('text' in announceBody), JSON.stringify(announceBody));
+check('澄清不带审批 ID', !('approval_id' in announceBody), JSON.stringify(announceBody));
+const announceHeaders = calls.at(-1)?.init?.headers ?? {};
+check('澄清不走审批凭据', !('X-Wally-Approval' in announceHeaders), JSON.stringify(announceHeaders));
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

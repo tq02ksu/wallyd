@@ -333,11 +333,23 @@ export interface RecordClarificationInput {
   prompt: string;
   session_id?: string;
   source?: 'text' | 'asr';
-  /** 面向用户的追问（事件摘要直接用它）。 */
+  /** 面向用户的追问（事件摘要直接用它；与 `run.waiting_input.question` 同名）。 */
   question: string;
   /** 缺失项，如 `capability:robot_stop` / `precondition`。 */
   missing?: string[];
   fast_rule?: string | null;
+  /** 结构化原因：开窗原因或窗口收尾原因。 */
+  reason?: string;
+}
+
+export interface RecordClarificationClosedInput {
+  question: string;
+  /** 窗口收尾原因，如 `window_expired` / `user_cancelled`。 */
+  reason: string;
+  session_id?: string;
+  /** 用户用于结束澄清的那句话（如「算了」）；给出时落进会话历史。 */
+  prompt?: string;
+  source?: 'text' | 'asr';
 }
 
 /** 一次语音 settle 的输入。判定所需的窗口/回声事实由调用方（事件桥）提供。 */
@@ -735,10 +747,44 @@ export class RunService {
       return this.events.emit(tx, {
         type: 'route.clarify',
         session_id: input.session_id ?? null,
-        // advice 是登记表模板 `{advice}` 的必填参数：给一句稳定的用户话术。
+        // summary 模板是 `{question}`；reason 是结构化原因，不拿它当问句。
         // 缺失项（capability:... / precondition）是给诊断看的标识符，放 data，不塞进摘要。
-        params: { reason: input.question, advice: CLARIFY_ADVICE },
-        data: { missing, fast_rule: input.fast_rule ?? null },
+        params: {
+          question: input.question,
+          advice: CLARIFY_ADVICE,
+          ...(input.reason ? { reason: input.reason } : {}),
+        },
+        // reason 同时放进 data：EventView 会原样暴露 data，页面/接口能直接筛「为什么没接上」。
+        data: { missing, fast_rule: input.fast_rule ?? null, reason: input.reason ?? null },
+      }).seq;
+    });
+    this.notify(seq);
+    return ts;
+  }
+
+  /**
+   * 记录澄清窗口的收尾原因（GH-49）。
+   *
+   * 窗口过期、用户说「算了」、被完整新指令顶掉或被 STOP 关闭时，都写一条
+   * `route.clarify`；`question` 仍是当时的追问，`reason` 说明为什么没接上。
+   * 这不是新的 run，也不占活动名额。
+   */
+  recordClarificationClosed(input: RecordClarificationClosedInput): string {
+    this.store.requireWritable();
+    const ts = nowIso();
+    const seq = this.store.transaction((tx) => {
+      if (input.session_id && input.prompt !== undefined) {
+        this.appendMessage(tx, input.session_id, 'user', input.prompt, input.source ?? 'asr', null);
+      }
+      return this.events.emit(tx, {
+        type: 'route.clarify',
+        session_id: input.session_id ?? null,
+        params: {
+          question: input.question,
+          reason: input.reason,
+          advice: CLARIFY_CLOSE_ADVICE[input.reason] ?? CLARIFY_ADVICE,
+        },
+        data: { closed: true, reason: input.reason },
       }).seq;
     });
     this.notify(seq);
@@ -2091,6 +2137,15 @@ export class RunService {
 
 /** 澄清事件的固定建议：不猜着执行。 */
 const CLARIFY_ADVICE = '补充后我会继续，不会先猜着执行。';
+
+/** 窗口收尾时的建议：说明这句话为什么没有接上。 */
+const CLARIFY_CLOSE_ADVICE: Record<string, string> = {
+  window_expired: '超过等待时间，这句话没有和上一句拼接。',
+  user_cancelled: '已取消这次补充。',
+  prompt_too_long: '拼接后的句子太长，已重新问。',
+  stop: '收到停止指令，澄清窗口已关闭。',
+  superseded: '这句话是完整指令，已按新指令处理。',
+};
 
 function outcomeOf(status: string): string {
   switch (status) {

@@ -231,6 +231,27 @@ GH-27：路由返回 `clarify` / `ambiguous` 时，`service.ts` 原先仍调用 
 决策入口收敛到 `agentd/src/agentd/run-request.ts`；单测
 `agentd/tests/unit/run-request.mjs` 用注入的规则表复现「过来缺目标」而不改 `matchRoute`。
 
+#### 3.1.4 实现记录（2026-11-09：澄清闭环，GH-49）
+
+GH-27 让澄清不建 run，但追问只留在 HTTP 响应体里，语音链路没人读；用户说完缺参指令后
+既听不到追问，也没有「补一句」的落点。GH-49 补上闭环（详见 `docs/design/GH-49.md`）：
+
+- **追问走系统播报**：`route.clarify` 的 `question` 交给 `robot_announce`
+  （`kind=clarification`）。请求仍无 `text` 字段，正文由 robotd 固定模板从结构化
+  `missing`（参数字段名）与 `candidates`（规则摘要）渲染；不走需审批的 `robot_speak`。
+- **事件带 `question`**：`route.clarify` 新增必填 `question`，与 `run.waiting_input.question`
+  同名；`reason` 改为可选的结构化原因（开窗原因或窗口收尾原因）。
+- **30s 等待补充窗口**：`clarification-window.ts` 只存最近一次追问，不写 `runs` 表、
+  不占活动名额。`speech.final` 在窗口内先单独路由；片段才与上一句拼接后重新路由
+  （`prompt = 上一句 + 下一句`，上限 500 字符）。窗口外、说「算了」、被完整新指令顶掉、
+  或说「停」时，写一条带收尾原因的 `route.clarify`。STOP 仍是安全旁路。
+- **歧义候选可念**：`ambiguous` 的 `id@version` 会在同一张规则表里反查摘要，渲染成
+  「你是想 A，还是 B？」；候选超过 3 条时只念前两条 +「还是别的」。
+
+单测：`agentd/tests/unit/run-request.mjs`（窗口的六条判据与长度上限）、
+`agentd/tests/unit/robotd-speak.mjs`（澄清播报请求形状）、
+`robotd/tests/unit/test_announce.py`（固定模板渲染与真实 `speak` 下发）。
+
 ### 3.2 任务生命周期与中断
 
 候选 run 状态：

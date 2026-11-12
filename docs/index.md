@@ -64,6 +64,7 @@
 - [摄像头自动检测与配置](spec/camera-detection.md) - macOS UVC 判定与采集配置
 - [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
 - [GH-27 澄清不建 run 的设计](design/GH-27.md) - 澄清/歧义只写 `route.clarify` 事件、不占活动名额；受保护的停止规则不受忙限制
+- [GH-49 澄清闭环的设计](design/GH-49.md) - 追问经 `robot_announce` 模板播报、事件带 `question`、30s 等待补充窗口把下一句接上
 - [GH-8 快速路由规则表的长大方式](design/GH-8.md) - 否定按作用域判断、结构化参数槽、三条规则与能力漂移断言
 - [GH-10 Harness 执行器](design/GH-10.md) - 一会话一 thread、显式 CODEX_HOME、原始事件只落 jsonl、取消走 abort
 
@@ -97,9 +98,9 @@
 - [GH-18 审批拒绝侧设计](design/GH-18.md) - `X-Wally-Approval` 一次性凭据、共享秘密与已消费 nonce 账本
 - [GH-19：审批复述的系统播报路径](design/GH-19.md) - `robot_announce` 的契约、事件与确认窗口时序
 - [GH-53：审批复述的安全词表与「再说一遍」](design/GH-53.md) - 数字/单位读法、复述次数上限与窗口不重置
+- [GH-12 有界的会话上下文](design/GH-12.md) - 同一回合内最近几轮只用于消歧（规则前置判断与 Harness 提示块）；30s/8 句/显式结束划回合，事件只记计数
 - [GH-11 语音确认通道设计](design/GH-11.md) - `waiting_confirmation` 的语音 settle、窗口/回声规则与凭据签发
 - [GH-48 任务暂停/恢复](design/GH-48.md) - `POST /v1/tasks/{id}/pause|resume`、`TaskState.paused`、暂停上限与安全优先级；resume 不重签审批
-- [GH-12 有界的会话上下文](design/GH-12.md) - 同一回合内最近几轮只用于消歧（规则前置判断与 Harness 提示块）；30s/8 句/显式结束划回合，事件只记计数
 - [GH-36 macOS CI 门禁分档](design/macos-ci.md) - `apple` lane 的编译/纯逻辑测试/AEC3 fail-closed 口径，以及哪些真机判据永远留给人
 - [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
 

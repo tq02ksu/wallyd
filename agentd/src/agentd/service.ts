@@ -21,8 +21,9 @@ import { RobotdEventSubscriber } from './robotd-events.ts';
 import { RobotdEventBridge } from './robotd-event-bridge.ts';
 import { RobotdClient } from './robotd-client.ts';
 import { RunService, RUN_STATUSES, approvalView } from './runs.ts';
-import { submitRunRequest, type RunRequestDeps, type RunRequestResult } from './run-request.ts';
+import { closeClarificationIfCancelled, submitRunRequest, type RunRequestDeps, type RunRequestResult } from './run-request.ts';
 import { ConversationContext } from './conversation.ts';
+import { ClarificationWindow } from './clarification-window.ts';
 import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
 import { codexHomePath } from './paths.ts';
@@ -254,6 +255,8 @@ export async function createRuntime(
   const harnessDataDir = path.join(config.dataDir, 'harness');
   // 有界对话上下文（GH-12）：只活在内存里，重启即空；不写事件正文。
   const conversation = new ConversationContext();
+  // 澄清窗口（GH-49）：只存最近一次追问，30s 后失效；不是 run，不占活动名额。
+  const clarificationWindow = new ClarificationWindow();
 
   // 事件提交后 → 广播给 WS 订阅者
   let hubRef: LiveHub | null = null;
@@ -349,6 +352,16 @@ export async function createRuntime(
   // 语音分发：顺序在 runs.dispatchUtterance 里钉死，这里只消费结果。
   // 审批通过后的执行仍由 approval-executor 负责（携带 #11 签发的一次性凭据）。
   utteranceDispatchRef = (input) => {
+    // GH-49 判据 4：澄清窗口内的「算了」会被 RunService 当作对话结束（GH-12），
+    // 不再进入路由；先在分发前收尾窗口，留下 route.clarify 的 user_cancelled 原因。
+    // 收尾失败不能挡住分发本身——尤其「停」是安全旁路，宁可少一条收尾事件。
+    try {
+      closeClarificationIfCancelled({ runs, clarificationWindow }, input.text);
+    } catch (e: unknown) {
+      log('澄清窗口收尾失败', {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
     const dispatched = runs.dispatchUtterance({
       utterance_id: input.utterance_id,
       text: input.text,
@@ -378,6 +391,7 @@ export async function createRuntime(
   function buildRunRequestDeps(): RunRequestDeps {
     return {
       runs,
+      clarificationWindow,
       availableCapabilities: () =>
         robotd.capabilities.current
           ? new Set(robotd.capabilities.current.map((c) => c.name))
@@ -400,6 +414,30 @@ export async function createRuntime(
             error: e instanceof Error ? e.message : String(e),
           });
         });
+      },
+      // 澄清必须被说出口：走免审批的系统播报，正文由 robotd 固定模板从结构化字段渲染。
+      // 播报失败不阻塞响应；事件里的 question 仍是可查的真相。
+      announceClarification: (a) => {
+        void robotd
+          .announce({
+            kind: 'clarification',
+            reason: a.reason,
+            ...(a.action_label ? { action_label: a.action_label } : {}),
+            missing: a.missing,
+            candidates: a.candidates,
+            more: a.more,
+          })
+          .then((accepted) => {
+            // 让随后到达的 speech.tts_finished 能在时间线上显示出实际念出的追问。
+            if (accepted.task_id) robotdBridge.noteSpeak(accepted.task_id, accepted.text);
+            log('澄清播报已受理', { task_id: accepted.task_id, reason: a.reason });
+          })
+          .catch((e: unknown) => {
+            log('澄清播报失败', {
+              reason: a.reason,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          });
       },
     };
   }
