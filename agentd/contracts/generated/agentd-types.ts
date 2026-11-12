@@ -607,9 +607,11 @@ export interface components {
              * @description 结论播报的结果。null = 还没播（或不需要播：用户取消的 run 不播报）。
              *     `interrupted` 表示话没说完（如 barge-in），**不代表任务失败**：`status` 仍是 succeeded。
              *     `failed` 表示播报请求失败（如 robotd 不可达），同样不改 `status`。
+             *     `silent` 表示**有意不播**：失败原因是环境未就绪（如 `harness_unconfigured`），
+             *     这不是用户要的事没做成，喇叭不该对着人喊「没做成」。`status` 仍按真实结果记录。
              * @enum {string|null}
              */
-            narration?: "spoken" | "interrupted" | "failed" | null;
+            narration?: "spoken" | "interrupted" | "failed" | "silent" | null;
         };
         RunDetail: {
             ok: boolean;
