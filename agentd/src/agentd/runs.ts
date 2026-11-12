@@ -70,7 +70,7 @@ export const RUN_STATUSES: readonly RunStatus[] = [
 export type Route = 'fast' | 'harness' | 'clarified';
 
 /** 结论播报的结果。**与 run 状态无关**：被打断不等于任务失败。 */
-export type NarrationOutcome = 'spoken' | 'interrupted' | 'failed';
+export type NarrationOutcome = 'spoken' | 'interrupted' | 'failed' | 'silent';
 
 export function isTerminal(status: string): boolean {
   return TERMINAL_STATUSES.has(status as RunStatus);

@@ -99,6 +99,22 @@ function fallbackPhrase(run: NarrationRunFacts): string {
 }
 
 /**
+ * 这个 `blocking_reason` 是不是「系统还没装好」而非「用户要的事没做好」？
+ *
+ * 两者的区别决定要不要占用喇叭：缺配置/缺能力时用户在页面上能看到原因，
+ * 而且常驻听会把每一句闲聊都带进这个分支——念出来就是噪音。
+ */
+export function isEnvironmentUnready(reason: string | null | undefined): boolean {
+  switch (reason) {
+    case 'harness_unconfigured':
+    case 'harness_missing':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
  * `blocking_reason` 里的结构化 cause → 人话。
  *
  * 判据与存储始终是枚举值；这里只在播报层转述，未知原因原样说出，
@@ -166,6 +182,13 @@ export class RunNarrator {
     const run = this.runs.getRunRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.status === 'cancelled') return { ok: false, reason: 'cancelled' };
+    // 环境没装好 ≠ 用户要你做的事没做成。常驻听 + 无唤醒词时，任何闲聊都会走到这里；
+    // 对着人喊「没做成」既吵又误导。静默结束，run 状态照常记账。
+    if (isEnvironmentUnready(run.blocking_reason)) {
+      this.runs.setNarration(runId, 'silent');
+      this.log('环境未就绪，不播报', { run_id: runId, reason: run.blocking_reason });
+      return { ok: true, reason: 'silent' };
+    }
     if (!this.runs.claimNarrationAttempt(runId)) {
       return { ok: false, reason: 'already_narrated' };
     }
