@@ -150,7 +150,7 @@ if (!failed) {
 //
 // 审批声明是对象 `{ params: [...] }`：字段存在即需审批，params 列出必须被用户听见
 // 并绑定的参数。旧布尔 true 仍然可被生成器接受（会 warning），但本仓库要求迁完。
-const APPROVAL_REQUIRED = ['robot_follow', 'robot_speak', 'robot_calibration_set'];
+const APPROVAL_REQUIRED = ['robot_follow', 'robot_move', 'robot_speak', 'robot_calibration_set'];
 const approvalWarning = [];
 function approvalOf(operation) {
   const raw = operation['x-requires-approval'];
@@ -177,7 +177,7 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
 // 2.6 系统播报是审批链路的组成部分，不是 Agent 能力：
 //     - 必须在契约里（不能靠「谁知道内部方法」区分）；
 //     - 必须明确免审批；
-//     - 必须被排除出 MCP 工具面；工具面总数 17（GH-6 新增 speech_abort，GH-48 新增 task_pause/task_resume）。
+//     - 必须被排除出 MCP 工具面；工具面总数 18（GH-6 speech_abort，GH-48 task_pause/task_resume，GH-74 robot_move）。
 {
   const announce = spec.paths?.['/v1/robot/announce']?.post;
   if (!announce) {
@@ -198,7 +198,7 @@ for (const [, item] of Object.entries(spec.paths ?? {})) {
     const mcpTools = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
     const names = mcpTools.map((t) => t.name);
     if (names.includes('robot_announce')) semantic.push('robot_announce 出现在 mcp-tools.json；系统路径不得成为 Agent 工具');
-    if (names.length !== 17) semantic.push(`MCP 工具面应为 17 项，实际 ${names.length}`);
+    if (names.length !== 18) semantic.push(`MCP 工具面应为 18 项，实际 ${names.length}`);
     for (const tool of mcpTools) {
       if ('requiresApproval' in tool) {
         semantic.push(`${tool.name} 的生成物仍带 requiresApproval 布尔；只允许 approvalParams`);

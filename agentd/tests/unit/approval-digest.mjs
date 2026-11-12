@@ -31,8 +31,9 @@ console.log('— 生成物：approvalParams 是唯一审批字段');
 check('没有 requiresApproval 布尔字段', tools.every((t) => !('requiresApproval' in t)));
 const approvalTools = new Set(tools.filter((t) => 'approvalParams' in t).map((t) => t.name));
 check(
-  '只有三个端点带 approvalParams',
-  JSON.stringify([...approvalTools].sort()) === JSON.stringify(['robot_calibration_set', 'robot_follow', 'robot_speak']),
+  '只有物理动作端点带 approvalParams（GH-74 新增 robot_move）',
+  JSON.stringify([...approvalTools].sort()) ===
+    JSON.stringify(['robot_calibration_set', 'robot_follow', 'robot_move', 'robot_speak']),
   JSON.stringify([...approvalTools]),
 );
 const speak = tools.find((t) => t.name === 'robot_speak');
