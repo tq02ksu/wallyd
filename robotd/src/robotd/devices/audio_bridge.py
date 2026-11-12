@@ -149,7 +149,9 @@ class AudioBridge:
             "--locale",
             self.locale,
         ]
-        if not self.aec:
+        if self.aec:
+            args.append("--aec")
+        else:
             args.append("--no-aec")
         try:
             subprocess.run(args, check=True, capture_output=True, timeout=10)
