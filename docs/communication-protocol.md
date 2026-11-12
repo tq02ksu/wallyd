@@ -79,8 +79,8 @@ relations:
 **对能力面的直接约束（P4 粒度 + P5 旁路）**：
 
 - **robotd** Agent 可调用的正式工具名以 `contracts/openapi.yaml` 的 `operationId` 为唯一来源，生成的 MCP 名称使用
-  snake_case（当前已有 `robot_stop`、`robot_follow` 等）；OpenAPI 尚未定义的 `robot_move`、
-  `robot_navigate`、`gimbal_look_at` 等只能标为规划项，不能当作已暴露工具。
+  snake_case（当前已有 `robot_stop`、`robot_follow`、`robot_move` 等）；OpenAPI 尚未定义的
+  `robot_rotate`、`robot_navigate`、`gimbal_look_at` 等只能标为规划项，不能当作已暴露工具。
 - `Nav.goTo()` 这类模块内部方法名不是 Agent 工具，也不是旧名/别名；产品显示标签（如“导航”“跟随”）同样不是 API 名称。
 - **禁止**出现 `motor_set_pwm` / `gpio_write` / `servo_pwm` / `ena_set` 这类「硬件怎么被操作」的接口。
 - **脱机 `ENA` 不进能力面**：它是固件运动状态机的内部动作（判据推论见 architecture §1）。
@@ -99,7 +99,8 @@ relations:
 ### 2.1 能力调用（MCP tools）
 
 - 工具名 = OpenAPI `operationId`（snake_case），粒度停在**机器人语义**，不下沉到硬件。当前契约中的工具名以
-  `contracts/openapi.yaml` 为准；规划中的 `robot_move` / `robot_rotate` / `robot_navigate` 等须先加入契约。
+  `contracts/openapi.yaml` 为准；`robot_move` 已加入契约（GH-74，同步受理、不返回 task_id），
+  `robot_rotate` / `robot_navigate` 等仍须先加入契约。
 - **禁止**暴露 `motor_set_pwm` / `gpio_write` / `servo_pwm`——Agent 一旦捏引脚，边界就白划了。
 - 设计目标是提供能力发现接口，返回协议版本、能力清单、单位与量程；在它进入 OpenAPI 前，不将 `robot.capabilities`
   写成当前已发布工具。

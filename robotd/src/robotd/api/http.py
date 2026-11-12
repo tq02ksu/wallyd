@@ -529,6 +529,45 @@ def _h_follow(ctx: RouteContext) -> dict[str, Any]:
     return _call_capability(ctx.app, "robot.follow", run)
 
 
+#: ``robot_move`` 的安全边界（与 contracts/openapi.yaml 的 MoveRequest 一致；契约测试兜底）。
+MIN_MOVE_MM = 1.0
+MAX_MOVE_MM = 5000.0
+MIN_MOVE_SPEED_MM_S = 50.0
+MAX_MOVE_SPEED_MM_S = 400.0
+DEFAULT_MOVE_SPEED_MM_S = 150.0
+
+
+def _h_move(ctx: RouteContext) -> dict[str, Any]:
+    """``robot_move``：直线距离（mm）+ 速度（mm/s）→ 板侧 ``move`` 帧。
+
+    **受理不等于到位**：没有闭环事实就只报「已下发」。
+    """
+    body = ctx.body
+    _reject_unknown(body, {"distance_mm", "speed_mm_s", "note"})
+    distance = _optional_number(body, "distance_mm", minimum=MIN_MOVE_MM)
+    if distance is None:
+        raise RobotdError(ErrorCode.VALIDATION, "缺少必填字段 distance_mm")
+    if distance > MAX_MOVE_MM:
+        raise RobotdError(
+            ErrorCode.VALIDATION,
+            f"distance_mm 不得超过 {MAX_MOVE_MM:g}（{MAX_MOVE_MM / 1000:g} 米）",
+            {"field": "distance_mm", "maximum": MAX_MOVE_MM},
+        )
+    speed = _optional_number(body, "speed_mm_s", minimum=MIN_MOVE_SPEED_MM_S)
+    if speed is not None and speed > MAX_MOVE_SPEED_MM_S:
+        raise RobotdError(
+            ErrorCode.VALIDATION,
+            f"speed_mm_s 不得超过 {MAX_MOVE_SPEED_MM_S:g}",
+            {"field": "speed_mm_s", "maximum": MAX_MOVE_SPEED_MM_S},
+        )
+    speed = DEFAULT_MOVE_SPEED_MM_S if speed is None else speed
+
+    def run(_cap: Any) -> dict[str, Any]:
+        return ctx.app.move(distance, speed)
+
+    return _call_capability(ctx.app, "robot.move", run)
+
+
 def _h_listen(ctx: RouteContext) -> dict[str, Any]:
     """``speech_listen``。契约：``{max_seconds, locale, auto_endpoint}`` → ``TaskAccepted``。
 
@@ -673,6 +712,13 @@ def build_routes(*, debug: bool) -> list[Route]:
         Route("GET", "/v1/health", _h_health, operation_id="robot_health"),
         Route("GET", "/v1/robot/state", _h_state, operation_id="robot_state"),
         Route("POST", "/v1/robot/stop", _h_stop, operation_id="robot_stop"),
+        Route(
+            "POST",
+            "/v1/robot/move",
+            _h_move,
+            operation_id="robot_move",
+            requires_approval=True,
+        ),
         Route("GET", "/v1/tasks", _h_tasks_list, operation_id="task_list"),
         Route("GET", "/v1/tasks/{task_id}", _h_task_get, operation_id="task_get"),
         Route("DELETE", "/v1/tasks/{task_id}", _h_task_cancel, operation_id="task_cancel"),

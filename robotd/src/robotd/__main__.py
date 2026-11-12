@@ -201,18 +201,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         config.bind,
         config.http_port,
     )
-    if not config.sim:
-        log.warning(
-            "真机模式：串口适配（R11）尚未实现。本进程不会打开 %s，"
-            "也不会驱动电机；旧 TS robotd 若在运行请勿同时占用该串口。",
-            config.serial_port,
-        )
-
     app = App(config)
     if config.sim:
         from .devices.sim import SimBoard
 
         app.attach_sim_board(SimBoard())
+    else:
+        # GH-74：真机模式真的打开串口。打不开就**显式降级**（health/事件带原因），
+        # 而不是静默跳过——「看起来起来了、其实什么都没接」是本票要修的病根。
+        from .devices.serial import SerialBoard
+
+        try:
+            app.attach_board(SerialBoard(config.serial_port, config.serial_baud))
+        except RobotdError as exc:
+            log.error("%s", exc.message)
+            app.mark_board_unavailable(exc.message)
     try:
         app.start()
     except RobotdError as exc:

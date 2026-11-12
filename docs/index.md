@@ -42,6 +42,7 @@
 - [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
 - [GH-57 结构化停止原因](design/GH-57.md) - `safety.stop_requested.cause` 必填枚举、`unknown/device_lost` 与 `confirmed/watchdog_timeout` 语义、agentd `blocking_reason` 归属与播报
 - [GH-63 person.* 事件族与可选 speaker_id](design/GH-63.md) - `person.appeared/moved/lost` 观测事实、`person.moved` 契约内 5Hz 上限、`speech.utterance_heard.speaker_id` 可选且未实现时省略
+- [GH-74 串口接入与最小位移原语](design/GH-74.md) - 可观测的串口打开失败、`robot_move`（mm/mm·s⁻¹，开环）、agentd 快速规则与停机帧；`robot_follow` 等 #68 落地
 - [模型选型](model-selection.md) - LLM / TTS / ASR 选型（苹果生态优先，2026-09-17 口径）
 - [产品定位与套件化约束](product-positioning.md) - 平台而非成品、套件化销售的口述决策
 - [可行性评估与技术风险清单](risk-assessment.md) - R1–R7 风险项与验证顺序
