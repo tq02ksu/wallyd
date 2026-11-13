@@ -53,6 +53,28 @@ function parseArgs(argv: string[]): AgentdConfig {
       case '--allow-manual-approve':
         config.allowManualApprove = true;
         break;
+      case '--follow-binding-ttl-ms': {
+        const n = Number(next());
+        if (!Number.isInteger(n) || n <= 0) throw new Error('--follow-binding-ttl-ms 必须是正整数');
+        config.followBindingTtlMs = n;
+        break;
+      }
+      case '--follow-binding-min-confidence': {
+        const n = Number(next());
+        if (!Number.isFinite(n) || n < 0 || n > 1) {
+          throw new Error('--follow-binding-min-confidence 必须是 0-1 之间的数');
+        }
+        config.followBindingMinConfidence = n;
+        break;
+      }
+      case '--follow-binding-single-track-confidence': {
+        const n = Number(next());
+        if (!Number.isFinite(n) || n < 0 || n > 1) {
+          throw new Error('--follow-binding-single-track-confidence 必须是 0-1 之间的数');
+        }
+        config.followBindingSingleTrackConfidence = n;
+        break;
+      }
       case '--help':
       case '-h':
         process.stdout.write(
@@ -66,6 +88,9 @@ function parseArgs(argv: string[]): AgentdConfig {
             '  --harness PATH            Harness 可执行文件（可选）',
             '  --log-level LEVEL         debug/info/warn/error',
             '  --allow-manual-approve    显式测试模式：允许手工批准（生产禁用）',
+            '  --follow-binding-ttl-ms N 说话人↔track 绑定有效期（默认 60000）',
+            '  --follow-binding-min-confidence F  绑定置信度门限（默认 0.5）',
+            '  --follow-binding-single-track-confidence F  单条活 track 自动绑定置信度（默认 0.6）',
             '',
             '停止机器人不经过 agentd：浏览器可信客户端直达 robotd 的 robot_stop。',
             '',

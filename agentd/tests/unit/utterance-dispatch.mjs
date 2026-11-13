@@ -545,6 +545,13 @@ async function runAcceptance() {
     runtime.runs.cancelRun(active.run_id, '清理');
 
     // ------------------------------------------------ 判据 5：审批层 + 执行层
+    // GH-68：follow 只接受**仍然活着**的 track；先注入一条 person.appeared，
+    // 让 track:abc 成为真实观测过的目标，而不是凭空的引用。
+    feed('person.appeared', {
+      track_id: 'abc',
+      bbox: { x: 0.2, y: 0.1, width: 0.2, height: 0.3 },
+      first_seen_at: new Date().toISOString(),
+    });
     const followBefore = callsTo('/v1/robot/follow').length;
     const speakBefore = callsTo('/v1/robot/speak').length;
     feed('speech.started', { utterance_id: 'utt-follow', aec_erle_db: 30 });

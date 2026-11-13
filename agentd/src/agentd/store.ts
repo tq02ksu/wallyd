@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const MIGRATIONS: string[][] = [
   [
@@ -181,6 +181,22 @@ const MIGRATIONS: string[][] = [
   // 落库而不是只放内存：进程重启后不能把用户已经用掉的复述次数清零，
   // 否则「最多 3 次」就变成了「每次重启再送 3 次」。
   ['ALTER TABLE approvals ADD COLUMN repeat_count INTEGER NOT NULL DEFAULT 0'],
+  // v5（GH-68）：说话人 ↔ track 绑定表。
+  // - confidence / source 必须落库：follow 的门限判断与审计都要能查；
+  // - expires_at 是毫秒时间戳，读取方按注入时钟判定，不依赖 sleep；
+  // - track_id 建索引：person.lost 要按 track 立即删干净，不能留悬空引用。
+  [
+    `CREATE TABLE person_bindings (
+       speaker_id TEXT PRIMARY KEY,
+       track_id   TEXT NOT NULL,
+       confidence REAL NOT NULL,
+       source     TEXT NOT NULL,
+       bound_at   INTEGER NOT NULL,
+       expires_at INTEGER NOT NULL
+     )`,
+    'CREATE INDEX idx_person_bindings_track ON person_bindings(track_id)',
+    'CREATE INDEX idx_person_bindings_expires ON person_bindings(expires_at)',
+  ],
 ];
 
 export class StoreUnavailable extends Error {

@@ -24,6 +24,12 @@ import { RunService, RUN_STATUSES, approvalView } from './runs.ts';
 import { closeClarificationIfCancelled, submitRunRequest, type RunRequestDeps, type RunRequestResult } from './run-request.ts';
 import { ConversationContext } from './conversation.ts';
 import { ClarificationWindow } from './clarification-window.ts';
+import {
+  FollowTargetRegistry,
+  DEFAULT_BINDING_TTL_MS,
+  DEFAULT_BINDING_MIN_CONFIDENCE,
+  DEFAULT_SINGLE_TRACK_CONFIDENCE,
+} from './person-bindings.ts';
 import { ModelService } from './models.ts';
 import { Overview, type HarnessInfo } from './overview.ts';
 import { codexHomePath } from './paths.ts';
@@ -93,6 +99,12 @@ export interface AgentdConfig {
   /** 只会由 CLI 的显式测试开关打开；health 里必须显示出来。 */
   allowManualApprove: boolean;
   harnessBinary: string | null;
+  /** GH-68：说话人↔track 绑定的有效期（毫秒，默认 60s）。 */
+  followBindingTtlMs: number;
+  /** GH-68：低于该置信度的绑定不得直接下发 follow，必须澄清。 */
+  followBindingMinConfidence: number;
+  /** GH-68：画面里恰好一条活 track 时自动绑定的置信度（显式策略值）。 */
+  followBindingSingleTrackConfidence: number;
 }
 
 export function defaultConfig(): AgentdConfig {
@@ -104,6 +116,9 @@ export function defaultConfig(): AgentdConfig {
     logLevel: 'info',
     allowManualApprove: false,
     harnessBinary: null,
+    followBindingTtlMs: DEFAULT_BINDING_TTL_MS,
+    followBindingMinConfidence: DEFAULT_BINDING_MIN_CONFIDENCE,
+    followBindingSingleTrackConfidence: DEFAULT_SINGLE_TRACK_CONFIDENCE,
   };
 }
 
@@ -171,11 +186,25 @@ export async function createRuntime(
   let runsRef: RunService | null = null;
   // 语音分发入口：桥收到 final 后交给 runs.dispatchUtterance（审批 → 忙 → 提交）。
   let utteranceDispatchRef:
-    | ((input: { utterance_id: string; text: string; started_at?: string; echo: boolean }) => void)
+    | ((input: {
+        utterance_id: string;
+        text: string;
+        started_at?: string;
+        echo: boolean;
+        speaker_id?: string;
+      }) => void)
     | null = null;
+  // GH-68：说话人 ↔ track 绑定。不是 run；track 存活由 person.* 事件驱动。
+  const followTargets = new FollowTargetRegistry({
+    store,
+    ttlMs: config.followBindingTtlMs,
+    minConfidence: config.followBindingMinConfidence,
+    singleTrackConfidence: config.followBindingSingleTrackConfidence,
+  });
   const robotdBridge = new RobotdEventBridge({
     events,
     store,
+    targets: followTargets,
     runs: {
       findRunByRobotTask: (taskId) => runsRef?.findRunByRobotTask(taskId) ?? null,
       cancelRun: (runId, reason) => runsRef?.cancelRun(runId, reason),
@@ -293,7 +322,7 @@ export async function createRuntime(
     },
     // 语音 final 走与 POST /api/run 同一条路径；幂等键用 utterance_id，
     // 断线重连补发同一条 final 不会产生第二个 run。
-    submitUtterance: ({ text, utterance_id, turn_id }): { run_id?: string } => {
+    submitUtterance: ({ text, utterance_id, turn_id, speaker_id }): { run_id?: string } => {
       const res = submitRunRequest(buildRunRequestDeps(), {
         prompt: text,
         source: 'asr',
@@ -302,6 +331,7 @@ export async function createRuntime(
         context: conversation.promptBlock(),
         // 同回合上一轮的结论只给规则的消歧判断（如「慢一点」沿用跟随目标与速度）。
         previous: conversation.previousRun(Date.now()),
+        speaker_id,
       });
       // 回合关联：run 建好之后才拿得到 route/fast_rule，记回上下文供下一句使用。
       if (turn_id && res.run_id) {
@@ -367,6 +397,7 @@ export async function createRuntime(
       text: input.text,
       echo: input.echo,
       started_at: input.started_at ?? null,
+      speaker_id: input.speaker_id,
     });
     const approved = dispatched.approval;
     if (dispatched.action === 'approval' && approved?.outcome === 'approved') {
@@ -396,6 +427,8 @@ export async function createRuntime(
         robotd.capabilities.current
           ? new Set(robotd.capabilities.current.map((c) => c.name))
           : null,
+      // GH-68：follow 的目标解析与 track 存活校验都读同一张绑定表。
+      followTargets,
       // 守卫拦下的命中要能在日志里解释原因（否定 / 疑问 / 词边界）。
       log: (m: string, x?: Record<string, unknown>) => log(m, x),
       // 快速路由必须**真的执行**：规则命中后启动执行，不阻塞响应。
@@ -559,6 +592,15 @@ export async function createRuntime(
       const sessionId =
         body.session_id === undefined ? undefined : requireString(body.session_id, 'session_id', { max: 120 });
       const source = optionalEnum(body.source, 'source', ['text', 'asr'] as const) ?? 'text';
+      // 契约里的 `asr_meta.speaker_id` 与语音事件同源；显式提交时也走同一张绑定表。
+      const asrMeta =
+        body.asr_meta && typeof body.asr_meta === 'object'
+          ? (body.asr_meta as Record<string, unknown>)
+          : null;
+      const speakerId =
+        asrMeta && typeof asrMeta.speaker_id === 'string' && asrMeta.speaker_id
+          ? asrMeta.speaker_id
+          : undefined;
 
       // 「一句话 → run 还是澄清」的决策在 run-request.ts：
       // 澄清不建 run（否则会留下永不推进的活动任务），受保护的 STOP 不受忙限制。
@@ -568,6 +610,7 @@ export async function createRuntime(
         session_id: sessionId,
         source,
         idempotency_key: idem,
+        speaker_id: speakerId,
       });
       return accepted;
     }),

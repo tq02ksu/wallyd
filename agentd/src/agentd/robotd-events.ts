@@ -85,6 +85,11 @@ export const NODE_EVENT_TYPES = [
   'device.recovered',
   'device.reset',
   'device.changed',
+  // GH-68：人物观测是节点性事实；`person.moved` 的 5Hz 上限由
+  // `EventLog` 按契约执行，订阅层不预先过滤（否则绑定层会看不到轨迹刷新）。
+  'person.appeared',
+  'person.moved',
+  'person.lost',
   'safety.stopped',
   'safety.stop_requested',
 ] as const;

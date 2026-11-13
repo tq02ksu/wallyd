@@ -39,6 +39,7 @@ import type {
   ClarificationReason,
   ClarificationWindow,
 } from './clarification-window.ts';
+import type { FollowBindingLookup, FollowTargetResolution } from './person-bindings.ts';
 import { ApiError } from './http.ts';
 
 /** 歧义时的兜底话术：候选连规则摘要都拿不到时才会用到。 */
@@ -69,6 +70,13 @@ export interface RunRequestInput {
    * **不落库、不进事件**，HTTP 入口不提供它（无状态请求没有「上一句」）。
    */
   previous?: { capability: string; args: Record<string, unknown> } | null;
+  /**
+   * 这句话的说话人标识（与 `speech.utterance_heard.speaker_id` 同源）。
+   *
+   * 只用于查「这个说话人绑到了哪条 track」。未提供时使用匿名键，
+   * **不会**沿用其他说话人的绑定。
+   */
+  speaker_id?: string;
 }
 
 /** 系统播报的结构化请求；正文由 robotd 固定模板渲染。 */
@@ -97,6 +105,11 @@ export interface RunRequestDeps {
   clarificationWindow?: ClarificationWindow;
   /** 测试可注入的规则表；生产使用 `FAST_RULES`。 */
   rules?: readonly FastRule[];
+  /**
+   * 说话人 ↔ track 绑定（GH-68）。省略时不启用自动绑定与 track 存活校验，
+   * 保持 `matchRoute` 的纯路由语义（单测可以只测路由与澄清）。
+   */
+  followTargets?: FollowBindingLookup;
   /** 拼接后的 prompt 上限；默认 `MAX_COMBINED_PROMPT_CHARS`。 */
   maxCombinedPromptChars?: number;
   /**
@@ -239,7 +252,73 @@ export function submitRunRequest(deps: RunRequestDeps, input: RunRequestInput): 
     }
   }
 
-  const matched = matchRoute(prompt, ctx, rules);
+  let matched = matchRoute(prompt, ctx, rules);
+
+  // ---- GH-68：把「跟着我」解析到一条活 track。
+  //
+  // 规则层只认显式槽位，所以未写目标的 follow 会落成 `clarify`。这里在澄清之前
+  // 先查绑定表：已有高置信度绑定 → 直接带上目标；恰好一条活 track → 自动绑定；
+  // 低置信度或多条活 track → 仍走澄清，绝不按「唯一的那个人」静默兜底。
+  let targetFromBinding = false;
+  if (
+    matched.kind === 'clarify' &&
+    deps.followTargets &&
+    matched.rule.capability === 'robot_follow' &&
+    matched.missing.includes('slot:target_track_id')
+  ) {
+    const resolution = deps.followTargets.resolveFollowTarget(input.speaker_id);
+    if (resolution.status === 'bound') {
+      matched = {
+        kind: 'matched',
+        rule: matched.rule,
+        args: { target_track_id: resolution.binding.track_id },
+      };
+      targetFromBinding = true;
+    } else if (resolution.status === 'low_confidence') {
+      return issueClarification(
+        deps,
+        input,
+        prompt,
+        lowConfidenceSpec(matched.rule, resolution),
+      );
+    } else if (resolution.status === 'multiple_tracks') {
+      return issueClarification(
+        deps,
+        input,
+        prompt,
+        multipleTracksSpec(matched.rule, resolution),
+      );
+    }
+  }
+
+  // ---- GH-68：track 引用必须仍然有效；失效时明确拒绝，不按 `target` 静默兜底。
+  //
+  // 这条对显式 `target_track_id`、绑定解析出的目标、以及上一轮沿用的目标都生效。
+  // 但「失效」必须是**有证据的失效**：只有 `person.lost` 明确报告过的 track 才拒绝。
+  // 从未观测过的 `track_id` 是 `unknown`，不是 `dead`——把「没数据」当成「数据说它死了」
+  // 会让直接 POST 的旧客户端/夹具被这条校验误伤（GH-68 第二轮接缝约定）。
+  // `deps.followTargets` 省略时整段跳过，保持 `matchRoute` 的纯路由语义。
+  if (matched.kind === 'matched' && matched.rule.capability === 'robot_follow' && deps.followTargets) {
+    const trackId = matched.args.target_track_id;
+    if (typeof trackId === 'string' && trackId.length > 0) {
+      if (deps.followTargets.isTrackKnownLost(trackId)) {
+        throw new ApiError('E_VALIDATION', `目标已离开画面（track ${trackId} 已失效），未执行跟随`, {
+          details: { field: 'target_track_id', track_id: trackId, reason: 'target_gone' },
+          hint: '重新说「跟着我」让我绑定当前画面里的目标',
+        });
+      }
+      // 用户明确点名了一条**观测过的活 track**：证据来源如实记成 explicit。
+      // 自动绑定已在 resolveFollowTarget 里落库，不重复覆盖；unknown 的 track
+      // 没有任何观测证据，不写绑定（写了也只会被读取路径当成悬空条目删掉）。
+      if (
+        !targetFromBinding &&
+        deps.followTargets.isTrackLive(trackId) &&
+        (matched.rule.id === 'follow_me' || matched.rule.id === 'come_here')
+      ) {
+        deps.followTargets.bindExplicit(input.speaker_id, trackId);
+      }
+    }
+  }
 
   // 被守卫拦下的命中：留一条可解释的原因（否定 / 疑问 / 词边界）。
   // 这三种都走 Harness，但排查时要能分开——判据是 `BlockedReason`，不回写规则表。
@@ -308,6 +387,8 @@ function issueClarification(
     missing: spec.missing,
     fast_rule: spec.fast_rule,
     reason: spec.reason,
+    // 候选是「为什么没执行」的一部分：事件原文里要能查到最后问的是哪几条 track。
+    ...(spec.candidates.length > 0 ? { candidates: spec.candidates, more: spec.more } : {}),
   });
 
   deps.clarificationWindow?.open({
@@ -340,6 +421,45 @@ function issueClarification(
     // 歧义同时回显规则 ID（诊断）与面向用户的 question（UI/TTS 共用同一份文案）。
     ...(spec.ambiguous_tags ? { ambiguous: spec.ambiguous_tags } : {}),
     clarify: { question: spec.question, missing: spec.missing },
+  };
+}
+
+/** 低置信度绑定：有绑定，但不够格直接下发。 */
+function lowConfidenceSpec(
+  rule: FastRule,
+  resolution: Extract<FollowTargetResolution, { status: 'low_confidence' }>,
+): ClarificationSpec {
+  const percent = Math.round(resolution.binding.confidence * 100);
+  return {
+    question: `我看到目标了，但还不确定它是不是你（绑定置信度 ${percent}%，不够可靠），先不跟。可以说「跟着我 track:<id>」指定目标。`,
+    reason: 'precondition',
+    missing: ['binding:low_confidence'],
+    announce_missing: ['target_track_id'],
+    candidates: [],
+    more: false,
+    action_label: rule.summary,
+    fast_rule: ruleTag(rule),
+  };
+}
+
+/** 多条活 track：不猜「唯一的那个人」，按 #49 的候选渲染规则澄清。 */
+function multipleTracksSpec(
+  rule: FastRule,
+  resolution: Extract<FollowTargetResolution, { status: 'multiple_tracks' }>,
+): ClarificationSpec {
+  const labels = resolution.live_track_ids.map((id) => `目标 ${id}`);
+  const spoken = speakableCandidates(labels);
+  const shown = labels.slice(0, 2).join('、');
+  const tail = labels.length > 2 ? '（还有别的）' : '';
+  return {
+    question: `画面里有多个目标：${shown}${tail}。我不确定要跟谁，先不动——请说「跟着我 track:<id>」指定目标。`,
+    reason: 'ambiguous',
+    missing: [],
+    announce_missing: [],
+    candidates: spoken.candidates,
+    more: spoken.more,
+    action_label: null,
+    fast_rule: ruleTag(rule),
   };
 }
 
