@@ -308,19 +308,13 @@ class App:
                 f"距离 {distance_mm}mm 换算后不足 1 步（steps_per_m={steps_per_m}），拒绝下发空动作",
                 {"distance_mm": float(distance_mm), "steps_per_m": steps_per_m},
             )
-        reply = self.board.request(
+        self.board.request(
             "move",
             {"left": steps, "right": steps, "speed": speed_mps},
             timeout_ms=self.config.board_reply_timeout_ms,
         )
-        eta_ms = 0
-        if isinstance(reply, dict):
-            try:
-                eta_ms = int(reply.get("eta_ms") or 0)
-            except (TypeError, ValueError):
-                eta_ms = 0
         # 有界步数的 move 中间没有别的流量；不持续喂心跳就会被 300ms 看门狗打断。
-        # **不按 eta_ms 截止**：板侧实测比标称慢，按 eta 停心跳会提前断供反而触发看门狗。
+        # **不按板侧 eta 截止**：板侧实测比标称慢，按 eta 停心跳会提前断供反而触发看门狗。
         # 心跳由 motion.done / motion.aborted 收尾，缺省 30s 安全上限。
         start_hb = getattr(self.board, "start_heartbeat", None)
         if callable(start_hb):
