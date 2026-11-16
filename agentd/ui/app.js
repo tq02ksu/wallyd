@@ -115,7 +115,6 @@ const state = {
   overviewTimer: null,
   live: null,
   wsStatus: 'connecting',
-  pendingNew: 0,
   events: [],
   eventsCursor: null,
   eventsHasMore: false,
@@ -324,7 +323,7 @@ async function renderOverview() {
                     ev.severity !== 'info' ? severityPill(ev.severity) : null,
                     ev.recovered ? pill('ok', '已恢复') : null,
                   ),
-                  ev.summary ? el('div', { class: 'event-summary', text: ev.summary }) : null,
+                  ev.summary ? el('div', { class: 'event-summary', text: clampText(ev.summary, 120) }) : null,
                 ),
               ),
             ),
@@ -915,7 +914,6 @@ async function renderEvents({ append = false } = {}) {
   else state.events = data.events;
   state.eventsCursor = data.next_cursor;
   state.eventsHasMore = Boolean(data.next_cursor);
-  state.pendingNew = 0;
 
   if (!append) {
     const head = el('div', { class: 'page-head' }, el('h1', { text: '事件' }), el('span', { class: 'meta', text: '人类可读的时间线' }));
@@ -952,7 +950,6 @@ async function renderEvents({ append = false } = {}) {
     main.replaceChildren(
       head,
       el('div', { class: 'row', style: 'margin-bottom:12px; flex-wrap:wrap' }, sevSel, srcSel, el('div', { class: 'grow' }, search), pause),
-      el('div', { id: 'new-events-host' }),
       el('div', { class: 'card', id: 'events-list', style: 'padding:8px 16px' }),
       el('div', { id: 'events-footer', style: 'text-align:center; padding:12px' }),
     );
@@ -1048,7 +1045,7 @@ function renderEventRow(ev) {
 
   return el(
     'div',
-    { class: 'event' },
+    { class: `event${eventTone(ev)}` },
     el('time', { text: localTime(ev.occurred_at), title: fullTime(ev.occurred_at) }),
     el(
       'div',
@@ -1061,13 +1058,53 @@ function renderEventRow(ev) {
         ev.recovered ? pill('ok', '已恢复') : null,
         ev.type.startsWith('未知') ? pill('muted', '未登记类型') : null,
       ),
-      ev.summary ? el('div', { class: 'event-summary', text: ev.summary }) : null,
+      ev.summary ? el('div', { class: 'event-summary', text: clampText(ev.summary, 120) }) : null,
       ev.impact ? el('div', { class: 'small muted', text: `影响：${ev.impact}` }) : null,
       ev.advice ? el('div', { class: 'small muted', text: `建议：${ev.advice}` }) : null,
       actions.childElementCount ? actions : null,
       detail,
     ),
   );
+}
+
+/**
+ * 给事件一个「人话」语气标记，方便一眼分辨发生了什么。
+ *
+ * 用户看不懂的从来不是事件本身，而是把「我听到了」「我判断了」「我做完了」
+ * 混在同一层灰色文字里。这里只加视觉分类，不改任何语义字段：
+ *
+ *   said    —— 你说的话（用户输入）
+ *   heard   —— 识别结果
+ *   decided —— 路由/澄清/审批判断
+ *   done    —— 动作完成
+ *   bad     —— 失败
+ *   noise   —— 回合轮转等背景事件，弱化显示
+ */
+/**
+ * 摘要截断：长语音转写会把一屏撑满，把后面的事件全挤走。
+ * 完整内容在「展开详情」里（`data` 字段），列表只留能一眼读完的长度。
+ */
+function clampText(text, max) {
+  const s = String(text ?? '');
+  const chars = Array.from(s);
+  if (chars.length <= max) return s;
+  return `${chars.slice(0, max).join('')}…（共 ${chars.length} 字，展开看全文）`;
+}
+
+function eventTone(ev) {
+  const t = String(ev.type || '');
+  // 失败优先判红：`run.finished` 既可能是成功也可能是失败（severity=error），
+  // 先判类型会把失败涂成绿色，正好骗了最该一眼看见的东西。
+  if (ev.severity === 'error' || t === 'run.failed' || t === 'speech.speak_failed') return ' tone-bad';
+  if (t === 'speech.utterance_heard') return ' tone-said';
+  if (t === 'speech.no_speech') return ' tone-noise';
+  if (t.startsWith('conversation.') || t.startsWith('observation.') || t.startsWith('speech.ignored')) {
+    return ' tone-noise';
+  }
+  if (t.startsWith('route.') || t.startsWith('approval.')) return ' tone-decided';
+  if (t === 'run.accepted' || t === 'task.started') return ' tone-decided';
+  if (t === 'run.finished' || t.startsWith('task.') || t === 'speech.spoken') return ' tone-done';
+  return '';
 }
 
 // ---------------------------------------------------------------- 设置
@@ -1504,8 +1541,6 @@ async function renderDiagnostics() {
         { class: 'kv' },
         el('dt', { text: '实时事件' }),
         el('dd', { text: wsStatusLabel() }),
-        el('dt', { text: '待处理新事件' }),
-        el('dd', { text: String(state.pendingNew) }),
       ),
     ),
   );
@@ -1536,35 +1571,10 @@ function startLive() {
     onStatus: setWsStatus,
     onEvent: (ev) => {
       if (state.route === 'events') {
+        // 暂停时照旧不打扰；否则新事件**直接插到列表顶部**，不再让用户点「刷新」。
+        // 用户停在原处阅读时，滚动位置保持不变（见 prependEvent）。
         if (state.eventsPaused) return;
-        if (state.pendingNew === 0) {
-          // 先提示「有 N 条新事件」，不顶走正在读的历史
-          state.pendingNew = 1;
-          const host = $('#new-events-host');
-          if (host) {
-            host.replaceChildren(
-              el(
-                'div',
-                { class: 'new-banner' },
-                el(
-                  'button',
-                  {
-                    class: 'btn primary btn-sm',
-                    onclick: async () => {
-                      state.pendingNew = 0;
-                      await renderEvents();
-                    },
-                  },
-                  '有 1 条新事件，点击刷新',
-                ),
-              ),
-            );
-          }
-        } else {
-          state.pendingNew += 1;
-          const btn = $('#new-events-host button');
-          if (btn) btn.textContent = `有 ${state.pendingNew} 条新事件，点击刷新`;
-        }
+        prependEvent(ev);
       } else if (state.route === 'overview') {
         // 总览让轮询负责，避免与输入框抢焦点
       }
@@ -1581,6 +1591,60 @@ function startLive() {
       }
     },
   });
+}
+
+/**
+ * 把一条实时事件插到列表顶部，**不重建整个列表**。
+ *
+ * 为什么要保住滚动位置：用户在看历史时，新事件每分钟来十几条；如果每次都重排，
+ * 视线会被顶走。这里只改 DOM 并补偿 `scrollTop`，读数位置不动。
+ * 新事件超过上限时裁掉最旧的，避免页面无限增长。
+ */
+function prependEvent(ev) {
+  const host = $('#events-list');
+  if (!host) return;
+  // 过滤条件由服务端负责；既然这条事件从 WS 推来了，说明它符合订阅。
+  // 但用户可能设置了级别/来源筛选——本地再判一次，避免筛掉的又冒出来。
+  const f = state.eventsFilters;
+  if (f.severity && ev.severity !== f.severity) return;
+  if (f.source && ev.source !== f.source) return;
+  if (f.q) {
+    const hay = `${ev.title ?? ''} ${ev.summary ?? ''} ${ev.code ?? ''}`.toLowerCase();
+    if (!hay.includes(String(f.q).toLowerCase())) return;
+  }
+
+  const scroller = window;
+  const before = scroller.scrollY;
+  const atTop = before <= 40;
+  const firstDayHead = host.querySelector('.day-head');
+  const today = localDay(ev.occurred_at);
+  const currentDay = firstDayHead?.textContent ?? null;
+
+  if (currentDay !== today) {
+    // 跨天：直接在顶部补一个日期头
+    host.prepend(el('div', { class: 'day-head', text: today }), renderEventRow(ev));
+  } else {
+    // 找到今天的第一个事件行，插在它前面；没有就放到第一个日期头之后
+    const rows = [...host.children];
+    const headIdx = rows.findIndex((n) => n.classList?.contains('day-head'));
+    const ref = rows[headIdx + 1] ?? null;
+    if (ref) host.insertBefore(renderEventRow(ev), ref);
+    else host.appendChild(renderEventRow(ev));
+  }
+
+  state.events = [ev, ...state.events].slice(0, 200);
+
+  // 补偿滚动：用户没在顶部时保持原来的可视位置
+  if (!atTop) {
+    const after = scroller.scrollY;
+    scroller.scrollTo(0, after + (after - before));
+  }
+
+  const footer = $('#events-footer');
+  if (footer) {
+    const shown = footer.querySelector('span.small.muted');
+    if (shown) shown.textContent = `显示 ${state.events.length} 条`;
+  }
 }
 
 function resyncReason(reason) {

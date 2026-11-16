@@ -198,6 +198,31 @@ console.log('— 兜底短语必须诚实（失败不说「完成了」）');
   check('失败兜底不说「完成」', !res.text?.includes('完成'), res.text);
 }
 
+console.log('— 环境未就绪导致的失败不播报（不把「没听懂」念给用户听）');
+{
+  // 「往前走」这类不在快速规则里的话会交给 Harness；Harness 没配置时 run 必然 failed。
+  // 这不是「用户要的事没做成」，而是「系统还没装好」——喇叭不该对着人喊「没做成」。
+  const s = setup();
+  const run = runs.submitRun({ prompt: '随便聊两句', route: 'harness' });
+  runs.transition(run.run_id, 'executing');
+  runs.transition(run.run_id, 'failed', { reason: 'harness_unconfigured', detail: '未配置 Harness' });
+  const res = await s.narrator.narrate(run.run_id);
+  check('harness_unconfigured 不调用 speak', s.robotd.calls.length === 0, JSON.stringify(s.robotd.calls));
+  check('返回 silent 而不是失败', res.ok === true && res.reason === 'silent', JSON.stringify(res));
+  check('run 状态仍是 failed（记账不受影响）', runs.getRunDetail(run.run_id).run.status === 'failed');
+  check('不写 speech.spoken / speech.speak_failed', eventCount('speech.spoken', run.run_id) === 0 && eventCount('speech.speak_failed', run.run_id) === 0);
+}
+{
+  // 对照：真正执行失败的（能力缺失）仍然要念，否则用户不知道结果。
+  const s = setup();
+  const run = runs.submitRun({ prompt: '往左挪一点', route: 'fast' });
+  runs.transition(run.run_id, 'executing');
+  runs.transition(run.run_id, 'failed', { reason: 'capability_missing', detail: '对端没有提供能力' });
+  const res = await s.narrator.narrate(run.run_id);
+  check('capability_missing 仍然播报', s.robotd.calls.length === 1, JSON.stringify(s.robotd.calls));
+  check('capability_missing 播报以「没做成」开头', res.text?.startsWith('没做成'), res.text);
+}
+
 console.log('— 只念执行事实，不念 prompt / 模型推理；result_summary 优先');
 {
   const s = setup();
