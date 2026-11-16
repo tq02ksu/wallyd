@@ -38,7 +38,7 @@ from .core.audio_runtime import (
     AudioRuntime,
 )
 from .core.announce import PAUSE_EXPIRED_TEXT
-from .core.errors import ErrorCode, RobotdError
+from .core.errors import ErrorCode, EventContractError, RobotdError
 from .core.kernel import EventKernel
 from .core.safety import (
     LEGACY_REASON_TO_CAUSE,
@@ -146,6 +146,12 @@ class App:
         #: task_id → (token, timer)。token 让旧定时器不会误伤重新暂停的任务。
         self._pause_timers: dict[str, tuple[int, Any]] = {}
         self._pause_token_seq = 0
+        #: 最近一次设备级失败原因（串口打不开等）。``None`` 表示没有失败。
+        #: 它进 health，也解释 `robot_move` 为什么被拒——不靠猜。
+        self.board_error: str | None = None
+        #: 板侧 `hello` 的原始应答（`steps_per_m` / `wheelbase_mm` / `fw` …）。
+        #: 单位换算与固件比对都以它为准，不从配置猜。
+        self.board_info: dict[str, Any] | None = None
         #: HTTP 传输层（R09）由调用方装配后挂上，便于健康/诊断读取连接数
         self.transport: Any | None = None
 
@@ -247,12 +253,80 @@ class App:
             "transport": self.config.transport_kind,
             "esp32": self.state.esp32.value,
             "mode": self.state.mode.value,
+            "device_error": self.board_error,
             "pid": os.getpid(),
             "implementation_version": self.info.version,
         }
 
     def snapshot(self) -> dict[str, Any]:
         return self.kernel.snapshot()
+
+    # ------------------------------------------------------------ 位移原语（GH-74）
+    def move(self, distance_mm: float, speed_mm_s: float) -> dict[str, Any]:
+        """``robot_move``：把一段直线距离下发到板侧。
+
+        **受理 ≠ 到位**（ADR-0004）：返回只说明帧已写出且板侧应答了 ok。
+        不建任务、不推进 progress——开环下没有「走完了」这个事实。
+
+        单位：公开口径是毫米；**在板固件（poc-2.0）的 `move.left/right` 是步数**
+        （实测 `left=0.001` 被 `int()` 截断为 0 步）。所以这里用 `hello.steps_per_m`
+        把毫米换成步数再下发。缺 `steps_per_m` 时**拒绝猜测**，明确报不可用。
+        """
+        if self.board is None:
+            raise RobotdError(
+                ErrorCode.UNAVAILABLE,
+                f"无板侧适配，未下发移动指令：{self.board_error or '串口未打开'}",
+                {"device_error": self.board_error},
+            )
+        if not self.state.link_ready:
+            raise RobotdError(
+                ErrorCode.LINK,
+                f"板侧链路未就绪（esp32={self.state.esp32.value}），未下发移动指令",
+                {"esp32": self.state.esp32.value},
+            )
+        info = self.board_info or {}
+        try:
+            steps_per_m = float(info.get("steps_per_m"))
+        except (TypeError, ValueError):
+            raise RobotdError(
+                ErrorCode.UNAVAILABLE,
+                "板侧 hello 未提供 steps_per_m，无法把毫米换算成步数（拒绝猜测单位）",
+                {"board_info_keys": sorted(info.keys())},
+            ) from None
+        if steps_per_m <= 0:
+            raise RobotdError(
+                ErrorCode.UNAVAILABLE,
+                f"板侧 steps_per_m={steps_per_m} 非正，无法换算步数",
+                {"steps_per_m": steps_per_m},
+            )
+        distance_m = round(float(distance_mm) / 1000.0, 6)
+        speed_mps = round(float(speed_mm_s) / 1000.0, 6)
+        steps = int(round(distance_m * steps_per_m))
+        if steps <= 0:
+            raise RobotdError(
+                ErrorCode.VALIDATION,
+                f"距离 {distance_mm}mm 换算后不足 1 步（steps_per_m={steps_per_m}），拒绝下发空动作",
+                {"distance_mm": float(distance_mm), "steps_per_m": steps_per_m},
+            )
+        self.board.request(
+            "move",
+            {"left": steps, "right": steps, "speed": speed_mps},
+            timeout_ms=self.config.board_reply_timeout_ms,
+        )
+        # 有界步数的 move 中间没有别的流量；不持续喂心跳就会被 300ms 看门狗打断。
+        # **不按板侧 eta 截止**：板侧实测比标称慢，按 eta 停心跳会提前断供反而触发看门狗。
+        # 心跳由 motion.done / motion.aborted 收尾，缺省 30s 安全上限。
+        start_hb = getattr(self.board, "start_heartbeat", None)
+        if callable(start_hb):
+            start_hb()
+        return {
+            "ok": True,
+            "dispatched": True,
+            "distance_mm": float(distance_mm),
+            "speed_mm_s": float(speed_mm_s),
+            "steps": steps,
+            "board_ack": True,
+        }
 
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -288,10 +362,41 @@ class App:
         **不让板侧直接改状态**：状态只有内核一个写入点。仿真板必须由外部注入，
         因为它的故障注入接口只给测试用，不该出现在生产装配路径里。
         """
-        self.board = board
-        if hasattr(board, "_on_event"):
-            board._on_event = self._board_event
+        self.attach_board(board)
         log.info("已装配仿真板（--sim）：无硬件，不驱动电机")
+
+    def attach_board(self, board: Any) -> None:
+        """装配一个真实的 ``BoardPort``（串口）或仿真板。
+
+        板侧主动上报（复位/断链）→ ``_board_event`` → 内核 ``emit()``，
+        **不让板侧直接改状态**：状态只有内核一个写入点。
+        """
+        self.board = board
+        if hasattr(board, "set_event_handler"):
+            board.set_event_handler(self._board_event)
+        elif hasattr(board, "_on_event"):
+            board._on_event = self._board_event
+
+    def mark_board_unavailable(self, reason: str) -> None:
+        """板侧打不开时的诚实降级：状态置 ``error``、事件带原因、health 能读到。
+
+        这不是「假装就绪」：``link_ready`` 保持 false，所有运动能力都会拒绝下发。
+        之所以还继续提供服务，是因为现场排障要能读 health/events，且 ``robot_stop``
+        不能因为串口打不开就一起消失（它只会如实报未送达）。
+        """
+        self.board_error = str(reason)
+        self.state._apply_link(DeviceStatus.ERROR)
+        # mode 的唯一推导函数要求「链路不通 → degraded」；device.changed 只归并 pump，
+        # 所以这里显式重算一次，别让状态停在 idle 把故障藏起来。
+        self.state.recompute_mode(has_motion_task=False)
+        try:
+            self.kernel.emit(
+                "device.changed",
+                {"device": "esp32", "state": DeviceStatus.ERROR.value, "reason": self.board_error},
+            )
+        except Exception:  # noqa: BLE001 - 事件失败不能让进程起不来
+            log.warning("记录 device.changed 失败", exc_info=True)
+        log.error("板侧不可用：%s", self.board_error)
 
     def _board_event(self, event_type: str, payload: dict[str, Any]) -> None:
         """板侧上报的统一入口。"""
@@ -332,8 +437,23 @@ class App:
 
         try:
             self.kernel.emit(event_type, payload)
+        except EventContractError:
+            # 板侧会推一些主机还没建模的事实（如 `ena.changed` / `ena.release_scheduled`）。
+            # 契约是唯一放行判据：**未登记就忽略**，但要说清楚是「没建模」，不是「处理坏了」——
+            # 用 warning + traceback 刷屏会掩盖真正的故障。
+            log.info("板侧推送 %s 未在契约登记，已忽略", event_type)
         except Exception:  # noqa: BLE001
             log.warning("板侧事件 %s 处理失败", event_type, exc_info=True)
+        else:
+            # 运动终态是现场判读的第一手证据（「跑完了」还是「被谁停的」）。
+            if event_type == "motion.done":
+                log.info("运动完成：steps=%s（受理≠物理到位）", payload.get("steps"))
+            elif event_type == "motion.aborted":
+                log.warning(
+                    "运动中止：reason=%s hb_age_ms=%s",
+                    payload.get("reason"),
+                    payload.get("hb_age_ms"),
+                )
 
         if event_type == "device.lost" and str(payload.get("device")) == "esp32":
             # 串口/链路掉线：主机侧已经无法确认板侧是否停稳。
@@ -348,13 +468,19 @@ class App:
     def _start_board_link(self) -> None:
         """建立板侧链路。
 
-        现状：只有仿真板可直接用；真机串口适配在 R11。这里**不做假握手**——
-        没有板侧就保持 ``starting``，能力表里相应项报 UNAVAILABLE。
+        没有板侧就保持 ``starting``（或装配层已经标好的 ``error``），
+        **不做假握手**——能力表里相应项报 UNAVAILABLE。
         """
         if self.board is None:
             if not self.config.sim:
-                log.warning("未提供板侧适配（R11 未完成）：状态保持 %s", self.state.esp32.value)
+                log.warning(
+                    "未提供板侧适配（串口未装配）：状态保持 %s%s",
+                    self.state.esp32.value,
+                    f"（{self.board_error}）" if self.board_error else "",
+                )
             return
+        # 先登记再握手：hello 失败时启动清理要能把串口关掉，不能把设备句柄漏在进程里。
+        self._register_component("board", self.board)
         try:
             info = self.board.request("hello", {"proto": 2}, timeout_ms=1500)
         except Exception as exc:  # noqa: BLE001
@@ -367,8 +493,8 @@ class App:
         firmware = None
         if isinstance(info, dict):
             firmware = info.get("fw")
+            self.board_info = info
         self.state._apply_link(DeviceStatus.READY, firmware)
-        self._register_component("board", self.board)
 
     # ------------------------------------------------------------ 暂停 / 恢复（GH-48）
     def _pausable(self, task_id: str) -> Task:

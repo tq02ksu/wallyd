@@ -461,8 +461,8 @@ console.log('— 可追溯标识：新增规则不改写历史');
   check('stop_robot 仍是 stop_robot@1', ruleTag(stop) === 'stop_robot@1', ruleTag(stop));
   check('stop_robot 仍受保护且映射 robot_stop', stop.protected === true && stop.capability === 'robot_stop');
   check(
-    '本版规则表就是 stop_robot / follow_me / come_here / slow_down 四条',
-    FAST_RULES.map((r) => r.id).join(',') === 'stop_robot,follow_me,come_here,slow_down',
+    '本版规则表就是 stop_robot / move_forward / follow_me / come_here / slow_down 五条',
+    FAST_RULES.map((r) => r.id).join(',') === 'stop_robot,move_forward,follow_me,come_here,slow_down',
     FAST_RULES.map((r) => ruleTag(r)).join(','),
   );
   check('规则 id 唯一', new Set(FAST_RULES.map((r) => r.id)).size === FAST_RULES.length);
@@ -470,6 +470,40 @@ console.log('— 可追溯标识：新增规则不改写历史');
   check(
     '规则不携带审批字段（审批只从能力契约取）',
     FAST_RULES.every((r) => !Object.keys(r).some((k) => /approv/i.test(k))),
+  );
+}
+
+// ---------------------------------------------------------------- GH-74：带距离的「往前走」
+console.log('— GH-74：「往前走 30 厘米」命中 robot_move，不交 Harness');
+{
+  const move = ruleById('move_forward');
+  const moveCtx = { available: new Set([...ANY, 'robot_move']) };
+  check('存在 move_forward 且映射 robot_move', move?.capability === 'robot_move', move?.capability);
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['往前走 30 厘米', { distance_mm: 300, speed_mm_s: 150 }],
+    ['向前走30cm', { distance_mm: 300, speed_mm_s: 150 }],
+    ['前进 1 米', { distance_mm: 1000, speed_mm_s: 150 }],
+    ['往前移动 25.5 厘米', { distance_mm: 255, speed_mm_s: 150 }],
+  ];
+  const sameArgs = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+    JSON.stringify(Object.keys(a).sort().map((k) => [k, a[k]])) ===
+    JSON.stringify(Object.keys(b).sort().map((k) => [k, b[k]]));
+  for (const [text, expected] of cases) {
+    const r = matchRoute(text, moveCtx);
+    check(
+      `「${text}」→ move_forward ${JSON.stringify(expected)}`,
+      matched(r, 'move_forward') && sameArgs((r as any).args, expected),
+      show(r),
+    );
+  }
+  // 反例：没说距离 / 距离越界 → 不执行（前者交 Harness，后者澄清）
+  check('「往前走」缺距离 → 不执行', matchRoute('往前走', moveCtx).kind === 'none');
+  check('「往前走 9 米」越界 → 澄清', clarified(matchRoute('往前走 9 米', moveCtx), 'move_forward'));
+  check('「别往前走 30 厘米」→ 不执行', matchRoute('别往前走 30 厘米', moveCtx).kind === 'none');
+  check('「能不能往前走 30 厘米」→ 不执行', matchRoute('能不能往前走 30 厘米', moveCtx).kind === 'none');
+  check(
+    '对端没有 robot_move 时 → 澄清，不假装执行',
+    clarified(matchRoute('往前走 30 厘米', { available: ANY }), 'move_forward'),
   );
 }
 

@@ -178,6 +178,10 @@ class AudioRuntime:
         self.last_erle_ms: int = 0
         #: 同一次 probe 的渲染电平（ERLE 的参考侧事实）。
         self.last_render_db: float | None = None
+        #: 桥 ``bridge_ready`` 报的 AEC 开关。``False`` = 桥没做回声消除，
+        #: 此时它给的 ``aec_erle_db`` 不是回声抑制量（AEC 关闭时仍会发出
+        #: ``render_db - mic_db``），不能作为打断判据。``None`` = 未知。
+        self.bridge_aec: bool | None = None
         #: 打断门限里「回声残余相对本底 + 安全余量」的可调项（dB）。
         self.barge_in_erle_margin_db = float(barge_in_erle_margin_db)
         #: ``aec_erle_db`` 可作为判据的可用性底线（dB），同样来自配置。
@@ -596,10 +600,12 @@ class AudioRuntime:
         """桥事件 → 契约事件。**未知事件只记日志**，不伪造语义。"""
         name = ev.get("ev")
         if name == "bridge_ready":
+            aec = ev.get("aec")
             with self._lock:
                 self.mic_format = str(ev.get("asr_format") or "")
                 self.last_error = None
                 self._bridge_ready_seen = True
+                self.bridge_aec = None if aec is None else bool(aec)
                 self._halted = False
                 if self.utt is None and self.response is None:
                     self._last_end_ms = None
@@ -838,6 +844,9 @@ class AudioRuntime:
 
         「可用于判定」= 有值、1 秒内、且不低于生效的 ``barge_in_erle_floor_db``
         （默认 20 dB）。缺失、过期、明确为 0 都落在 ``None``：缺证据 ≠ 有证据（B4）。
+        桥明确报过 ``aec: false`` 时同样落在 ``None``：AEC 关闭时它发的 ``aec_erle_db``
+        只是「渲染电平 − 麦克风电平」，不是回声抑制量，拿来放行会把机器人自己的
+        播报当成用户插话。
         原始值仍然原样回传，供 ``speech.gate`` 如实记录。
         ``speech.started`` 只带 1 秒内的值（更早的探测属于上一轮播报，agentd 拿来判本轮回声会误伤）。
         """
@@ -847,6 +856,8 @@ class AudioRuntime:
             fresh_value = raw if fresh else None
             floor = self.barge_in_erle_floor_db
             usable = fresh_value if fresh_value is not None and fresh_value >= floor else None
+            if self.bridge_aec is False:
+                usable = None
         return raw, fresh_value, usable
 
     def _barge_in_verdict(

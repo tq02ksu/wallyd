@@ -131,6 +131,12 @@ export interface RuleSlot {
   name: string;
   pattern: RegExp;
   required: boolean;
+  /**
+   * 捕获组 → 能力参数。省略时保持字符串（如 `target_track_id`）；
+   * 返回 `undefined` 表示这个值不可用（例如距离越界），按「缺参」澄清，
+   * 绝不把越界值硬塞给能力。
+   */
+  transform?: (raw: string) => unknown;
 }
 
 export interface FastRule {
@@ -211,6 +217,36 @@ export const MAX_FOLLOW_SPEED_MPS = 0.4;
 export const SLOW_DOWN_RATIO = 0.5;
 
 /**
+ * `robot_move.distance_mm` / `speed_mm_s` 的契约默认值与安全边界（GH-74）。
+ * `tests/contract/router.mjs` 断言它们与 `contracts/generated/mcp-tools.json` 完全一致。
+ */
+export const MIN_MOVE_MM = 1;
+export const MAX_MOVE_MM = 5000;
+export const DEFAULT_MOVE_SPEED_MM_S = 150;
+
+/** 口述距离的单位 → 毫米。只认明确单位，避免「往前走 30」被猜成 30 毫米或 30 米。 */
+const MOVE_UNIT_MM: Readonly<Record<string, number>> = {
+  毫米: 1,
+  mm: 1,
+  厘米: 10,
+  cm: 10,
+  分米: 100,
+  米: 1000,
+  m: 1000,
+};
+
+/** 「30 厘米 / 1 米 / 50mm」→ 毫米；越界或无法解析返回 `undefined`。 */
+export function parseDistanceMm(raw: string): number | undefined {
+  const m = /^([0-9]+(?:\.[0-9]+)?)\s*(毫米|厘米|分米|米|mm|cm|m)$/u.exec(raw.trim());
+  if (!m) return undefined;
+  const factor = MOVE_UNIT_MM[m[2]];
+  if (factor === undefined) return undefined;
+  const mm = Number(m[1]) * factor;
+  if (!Number.isFinite(mm) || mm < MIN_MOVE_MM || mm > MAX_MOVE_MM) return undefined;
+  return Math.round(mm);
+}
+
+/**
  * 规则表。
  *
  * 只放**高确定性**的少量指令；场景需求明确后按 §3.1「增量扩展」补，
@@ -231,6 +267,30 @@ export const FAST_RULES: readonly FastRule[] = [
     negationScope: 'sentence',
     summary: '停止机器人',
     patterns: [/^(停下来|停止|快停|停一下|立即停止|紧急停止)$/u, /^停$/u],
+  },
+  {
+    // GH-74：「往前走 30 厘米」必须命中能力并下发，而不是交给 Harness。
+    // 只说「往前走」不入此规则：没有距离就没有可确认的参数，交 Harness 理解意图。
+    // 距离越界（>5m）同样不执行：transform 返回 undefined → 澄清。
+    id: 'move_forward',
+    version: 1,
+    capability: 'robot_move',
+    negationScope: 'adjacent',
+    summary: '向前直行一段距离',
+    patterns: [
+      /^(?:请|帮我)?(?:往前走|向前走|往前移动|向前移动|往前挪|向前挪|直走|前进)(?:大约|差不多)?\s*[0-9]+(?:\.[0-9]+)?\s*(?:毫米|厘米|分米|米|mm|cm|m)(?:吧|啊|呀)?$/u,
+    ],
+    slots: [
+      {
+        name: 'distance_mm',
+        pattern: /([0-9]+(?:\.[0-9]+)?\s*(?:毫米|厘米|分米|米|mm|cm|m))/u,
+        required: true,
+        transform: (raw) => parseDistanceMm(raw),
+      },
+    ],
+    // 用户只说了距离；速度用契约默认值，并显式下发，避免「默认值」变成第二份真值。
+    contextArgs: () => ({ speed_mm_s: DEFAULT_MOVE_SPEED_MM_S }),
+    clarify: '要往前走，请说清距离（1 到 5000 毫米之间，例如「往前走 30 厘米」）。',
   },
   {
     // 「跟着我走」/「跟紧点」→ robot_follow。目标必须可靠绑定（`target_track_id`），
@@ -437,7 +497,9 @@ function resolve(rule: FastRule, ctx: RouteContext, text: string): MatchResult {
   const args: Record<string, unknown> = { ...contextArgs };
   const missing: string[] = [];
   for (const slot of rule.slots ?? []) {
-    const value = text.match(slot.pattern)?.[1];
+    const raw = text.match(slot.pattern)?.[1];
+    let value: unknown = raw;
+    if (raw !== undefined && slot.transform) value = slot.transform(raw);
     if (value === undefined || value === '') {
       if (slot.required) missing.push(`slot:${slot.name}`);
       continue;

@@ -45,28 +45,31 @@ fs.writeFileSync(
 );
 
 const VERIFY = `
-import sys
+import json, sys
 from pathlib import Path
 from robotd.approval import enforce_approval
-header, work = sys.argv[1], Path(sys.argv[2])
+header, work, spec_json = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+spec = json.loads(spec_json)
 enforce_approval(
     header_value=header,
-    capability="robot_follow",
-    approval_params=["target_track_id", "target"],
-    body={"target_track_id": sys.argv[3]},
+    capability=spec["capability"],
+    approval_params=spec["params"],
+    body=spec["body"],
     work_dir=work,
 )
 print("accepted")
 `;
 
-function verify(header, target, workDir) {
+function verify(header, spec, workDir) {
   const env = {
     ...process.env,
     WALLY_APP_DATA_DIR: tmp,
     PYTHONPATH: path.join(REPO, 'robotd', 'src') + (process.env.PYTHONPATH ? `:${process.env.PYTHONPATH}` : ''),
   };
-  return spawnSync(python, ['-c', VERIFY, header, workDir, target], { env, encoding: 'utf8' });
+  return spawnSync(python, ['-c', VERIFY, header, workDir, JSON.stringify(spec)], { env, encoding: 'utf8' });
 }
+
+const FOLLOW = { capability: 'robot_follow', params: ['target_track_id', 'target'], body: { target_track_id: 'abc' } };
 
 try {
   const cred = mintApprovalCredential({
@@ -75,7 +78,7 @@ try {
     approvalParams: ['target_track_id', 'target'],
   });
 
-  const ok = verify(cred.header, 'abc', path.join(tmp, 'work-ok'));
+  const ok = verify(cred.header, FOLLOW, path.join(tmp, 'work-ok'));
   check(
     'robotd 接受 TS 签发的凭据（签名 + 摘要 + nonce）',
     ok.status === 0 && ok.stdout.includes('accepted'),
@@ -83,7 +86,7 @@ try {
   );
 
   // 同一凭据换参数必须被拒：证明 args_digest 真的绑定到了这组参数。
-  const mismatch = verify(cred.header, 'xyz', path.join(tmp, 'work-mismatch'));
+  const mismatch = verify(cred.header, { ...FOLLOW, body: { target_track_id: 'xyz' } }, path.join(tmp, 'work-mismatch'));
   check(
     '换参数后 robotd 拒绝（args_digest_mismatch）',
     mismatch.status !== 0 && `${mismatch.stderr}`.includes('args_digest_mismatch'),
@@ -91,11 +94,36 @@ try {
   );
 
   // 同一个 nonce 再验一次必须被拒（一次性）。
-  const replay = verify(cred.header, 'abc', path.join(tmp, 'work-ok'));
+  const replay = verify(cred.header, FOLLOW, path.join(tmp, 'work-ok'));
   check(
     '同一 nonce 重放被拒绝',
     replay.status !== 0 && `${replay.stderr}`.includes('nonce_replayed'),
     `${replay.status} ${replay.stderr}`,
+  );
+
+  // GH-74：数值参数（distance_mm / speed_mm_s）的摘要必须两端一致——
+  // 这是 agentd 真的能把 robot_move 交给 robotd 的最后一跳。
+  const MOVE = { capability: 'robot_move', params: ['distance_mm', 'speed_mm_s'], body: { distance_mm: 300, speed_mm_s: 150 } };
+  const moveCred = mintApprovalCredential({
+    capability: 'robot_move',
+    args: MOVE.body,
+    approvalParams: MOVE.params,
+  });
+  const moveOk = verify(moveCred.header, MOVE, path.join(tmp, 'work-move'));
+  check(
+    'robotd 接受 robot_move 的数值参数凭据',
+    moveOk.status === 0 && moveOk.stdout.includes('accepted'),
+    `${moveOk.status} ${moveOk.stderr}`,
+  );
+  const moveMismatch = verify(
+    mintApprovalCredential({ capability: 'robot_move', args: MOVE.body, approvalParams: MOVE.params }).header,
+    { ...MOVE, body: { distance_mm: 301, speed_mm_s: 150 } },
+    path.join(tmp, 'work-move-mismatch'),
+  );
+  check(
+    'robot_move 换距离后 robotd 拒绝（args_digest_mismatch）',
+    moveMismatch.status !== 0 && `${moveMismatch.stderr}`.includes('args_digest_mismatch'),
+    `${moveMismatch.status} ${moveMismatch.stderr}`,
   );
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

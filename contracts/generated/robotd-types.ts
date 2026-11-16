@@ -197,6 +197,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/robot/move": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 直线位移原语（开环，不报告是否到位）
+         * @description 最小位移切口：把一段直线距离（毫米）以给定速度（毫米每秒）下发到板侧。
+         *     **开环**——ADR-0004 不提供「已到位 / 物理静止 / 堵转」字段，因此 200 只表示
+         *     「帧已写出、板侧已应答受理」，**不代表机器人真的走过这段距离**。
+         *     不做闭环、导航、避障，也不创建任务（没有结束事实就不提交任务终态）。
+         *     板侧 `move` 是 JSON-Lines 命令；host 在板侧边界把毫米换算成 `hello` 声明的米
+         *     （单位单点声明见 ADR-0004）。板侧正在执行其他运动时返回 409/E_BUSY，
+         *     **不排队、不重发**（物理动作禁止自动重试）。
+         *     链路未就绪（串口打不开/已断开）时返回 503，且不写任何帧。
+         */
+        post: operations["robot_move"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/robot/follow": {
         parameters: {
             query?: never;
@@ -452,6 +479,11 @@ export interface components {
             esp32?: string;
             /** @description 与 RobotState.mode 同一推导函数 */
             mode?: string;
+            /**
+             * @description 最近一次设备级失败原因（如串口打不开/权限不足）；无失败时为 null。
+             *     `robot_move` 被拒时可用它解释原因，调用方不必解析 message 猜。
+             */
+            device_error?: string | null;
             pid?: number;
         };
         /**
@@ -722,6 +754,30 @@ export interface components {
         SpeechAbortRequest: {
             /** @description 只中止这一轮播报；省略表示停掉当前所有播报。 */
             response_id?: string;
+        };
+        MoveRequest: {
+            /** @description 直线距离（毫米），正数前进。5 米上限是安全边界，实现不得放宽 */
+            distance_mm: number;
+            /**
+             * @description 线速度（毫米/秒）。范围即安全边界，实现不得自动提速
+             * @default 150
+             */
+            speed_mm_s?: number;
+        };
+        /**
+         * @description **受理不等于到位**：只表示帧已写出且板侧应答了 `ok`。开环下没有
+         *     「到位 / 静止 / 堵转」的权威事实（ADR-0004），调用方不得据此推进下一步动作。
+         */
+        MoveAccepted: {
+            ok: boolean;
+            /** @description 帧已写入串口 */
+            dispatched: boolean;
+            /** @description 实际下发的距离（毫米，已按契约取整） */
+            distance_mm: number;
+            /** @description 实际下发的速度（毫米/秒） */
+            speed_mm_s: number;
+            /** @description 板侧应答受理；不表示到位 */
+            board_ack: boolean;
         };
         /**
          * @description 目标绑定来源二选一，至少给一个：
@@ -1316,6 +1372,66 @@ export interface operations {
             };
             /** @description 字段不合法 */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    robot_move: {
+        parameters: {
+            query?: never;
+            header: {
+                /**
+                 * @description agentd 在用户语音确认后签发的一次性授权凭据：
+                 *     `<base64url(payload-json)>.<base64url(hmac-sha256(secret, payload-segment))>`。
+                 *     robotd 校验签发者、capability、参数摘要、有效期与 nonce 未消费；
+                 *     失败或缺失一律 `403` + `E_APPROVAL`。凭据与共享秘密格式见
+                 *     `docs/design/GH-18.md`。
+                 */
+                "X-Wally-Approval": components["parameters"]["ApprovalCredential"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveRequest"];
+            };
+        };
+        responses: {
+            /** @description 已下发（不等于已到位） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MoveAccepted"];
+                };
+            };
+            /** @description 距离或速度越界 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 板侧正在执行另一段运动（E_BUSY） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 板侧链路未就绪（串口未打开/已断开） */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

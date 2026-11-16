@@ -128,6 +128,27 @@
       "notes": "计划摘要，不代表已到位；应发步数不是实际位移证明。"
     },
     {
+      "type": "motion.done",
+      "category": "motion",
+      "no_state": true,
+      "payload": {
+        "steps": {"type": "integer", "required": true},
+        "task_id": {"type": "string", "required": false}
+      },
+      "notes": "板侧报告这一段有界位移的脉冲已发完。**不等于物理到位**：开环无编码器，位姿仍是未知。"
+    },
+    {
+      "type": "motion.aborted",
+      "category": "motion",
+      "no_state": true,
+      "payload": {
+        "reason": {"type": "string", "required": true, "enum": ["stop", "watchdog", "link_lost"]},
+        "hb_age_ms": {"type": "integer", "required": false},
+        "task_id": {"type": "string", "required": false}
+      },
+      "notes": "板侧中止了本次运动。`reason=watchdog` 表示板侧 300ms 内没收到心跳，属于安全兜底而不是主机指令。"
+    },
+    {
       "type": "safety.stopped",
       "category": "safety",
       "payload": {

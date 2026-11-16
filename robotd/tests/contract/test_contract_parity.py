@@ -89,10 +89,11 @@ def test_mcp_tool_face_matches_contract_tools(tools):
     assert "debug_serial" not in names
     assert "events_subscribe" not in names
     assert "robot_announce" not in names
-    # GH-6 新增 speech_abort：14 → 15；GH-48 新增 task_pause/task_resume：15 → 17。
+    # GH-6 新增 speech_abort：14 → 15；GH-48 新增 task_pause/task_resume：15 → 17；
+    # GH-74 新增 robot_move：17 → 18。
     # 数量是契约的一部分，增删端点必须同时改这里，
     # 否则「契约悄悄多了一条路」不会被发现。
-    assert len(tools) == 17, f"MCP 工具面必须保持 17 项，实际 {len(tools)}"
+    assert len(tools) == 18, f"MCP 工具面必须保持 18 项，实际 {len(tools)}"
 
 
 def test_robot_announce_is_contract_declared_system_path(spec, tools):
@@ -261,7 +262,7 @@ def test_approval_params_reference_real_request_body_fields(spec, tools):
 def test_generated_tools_use_approval_params_only(tools):
     """生成物只能有 approvalParams：存在即需审批，[] 表示需审批但无参数可绑。"""
     approval_tools = {t["name"] for t in tools if "approvalParams" in t}
-    assert approval_tools == {"robot_follow", "robot_speak", "robot_calibration_set"}
+    assert approval_tools == {"robot_follow", "robot_move", "robot_speak", "robot_calibration_set"}
     for tool in tools:
         assert "requiresApproval" not in tool, f"{tool['name']} 仍生成 requiresApproval 布尔"
         if "approvalParams" in tool:

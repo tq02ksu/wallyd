@@ -100,7 +100,7 @@ TB6600、步进电机、舵机、摄像头、电池**不是「层」**——它�
 
 | 模块 | 执行位置（§3） | 交互类型（本节） |
 | --- | --- | --- |
-| `Motion` | L2 | ① 请求/应答（规划中的 OpenAPI `robot_move` 返回 `task_id`）+ 也推 `motion.*` 事件 |
+| `Motion` | L2 | ① 请求/应答（`robot_move` 同步受理，**不返回 `task_id`**：开环下没有完成事实）+ 也推 `motion.*` 事件 |
 | `Perception`（基础感知） | L2（robotd 内） | **② 感知/事件源**（订阅式，推 `perception.*`） |
 | `Audio`（VAD 流） | L2（robotd 内） | **② 感知/事件源**（`speech.*` 流） |
 | robotd 内核（事件归并） | L2 | ③ 整流/派生（`deriveMode()`） |
@@ -127,7 +127,7 @@ TB6600、步进电机、舵机、摄像头、电池**不是「层」**——它�
 | ├ `Camera` | L2 | robotd | ① | ✅ 经 Swift 桥 | 规划中：`camera_list` / `camera_capture` | 摄像头可用性 |
 | └ `Audio` | L2 | robotd | **②**（VAD 流）+ ①（转写/合成） | ✅ 经 Swift 桥 | 当前以 OpenAPI operationId 为准（如 `audio_state`、`speech_listen`、`robot_speak`） | 音频设备状态 |
 | ★ `Perception`（基础感知） | L2 | robotd | **② 感知/事件源** | ✅（经 `Camera` / `ESP32`） | 规划中：`perception_*` 事件流 | **感知事实**（「看到了什么」） |
-| `Motion` | L2 | robotd | ①（返回 `task_id`）+ ②（进度事件） | ✅ 经 ESP32 | 规划中：`robot_move` / `robot_rotate` / `robot_stop` / `robot_state` | 位姿 / 任务（**标定值权威在此**，ADR-0002） |
+| `Motion` | L2 | robotd | ①（`robot_move` 同步受理）+ ②（进度事件） | ✅ 经 ESP32 | 已实现：`robot_stop` / `robot_move`（GH-74）/ `robot_state`；规划中：`robot_rotate` | 位姿 / 任务（**标定值权威在此**，ADR-0002） |
 | `Gimbal` | L2 | robotd | ① | ✅ 经 ESP32 | 规划中：`gimbal_look_at` | 云台角度 |
 | `Nav` | L2 | robotd | ① + 消费 ② | ❌（纯计算） | 规划中：`robot_navigate`；取消使用 `task_cancel` 或 `robot_stop` | 导航策略输出 |
 | `MCP Server` | L2 | robotd | ④ 适配 | ❌ | ✅（工具面） | — |

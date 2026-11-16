@@ -180,6 +180,33 @@
       ]
     },
     {
+      "type": "motion.done",
+      "category": "motion",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "steps",
+        "task_id"
+      ],
+      "required_fields": [
+        "steps"
+      ]
+    },
+    {
+      "type": "motion.aborted",
+      "category": "motion",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "reason",
+        "hb_age_ms",
+        "task_id"
+      ],
+      "required_fields": [
+        "reason"
+      ]
+    },
+    {
       "type": "safety.stopped",
       "category": "safety",
       "payload_ref": null,

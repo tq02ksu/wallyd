@@ -395,6 +395,45 @@ def test_gate_suppressed_without_erle_fact():
     assert not [c for c in rt.bridge.sent if c.get("cmd") == "stop_speak"]
 
 
+def test_erle_from_bridge_with_aec_off_cannot_authorize_barge_in():
+    """桥明确报 ``aec: false`` 时，它发的 ``aec_erle_db`` 不是回声抑制量。
+
+    真机 inline 模式（无 AEC）下桥仍会发 ``render_db - mic_db``，数值很容易
+    超过 20 dB 底线；若把它当成「AEC 压住了」，机器人念审批复述时就会被
+    自己的声音打断（GH-74 真机语音确认失败即此因）。
+    """
+    rt, emitted = make_runtime()
+    rt.handle_bridge_event({"ev": "bridge_ready", "asr_format": "x", "aec": False})
+    calibrate(rt)
+    start_speaking(rt, approval_id="a-1")
+    probe_erle(rt, erle=32.0, render=-10.0)
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "suppressed"
+    assert gate["reason"] == "no_erle"
+    # 桥说过什么仍然如实记录，但不得用来放行
+    assert gate["aec_erle_db"] == 32.0
+    assert rt.response is not None
+    assert not [c for c in rt.bridge.sent if c.get("cmd") == "stop_speak"]
+
+
+def test_erle_with_aec_on_still_authorizes_barge_in():
+    """同一份 ERLE 事实，AEC 开着时才可作为判据。"""
+    rt, emitted = make_runtime()
+    rt.handle_bridge_event({"ev": "bridge_ready", "asr_format": "x", "aec": True})
+    calibrate(rt)
+    start_speaking(rt)
+    probe_erle(rt, erle=32.0, render=-10.0)
+
+    vad_rise(rt, db=-5.0)
+
+    gate = gates(emitted)[-1]
+    assert gate["decision"] == "pass"
+    assert gate["reason"] == "barge_in"
+
+
 def test_gate_suppressed_when_erle_probe_is_stale():
     """B4：上次探测超过 1000ms → 同样 no_erle。"""
     rt, emitted = make_runtime()
