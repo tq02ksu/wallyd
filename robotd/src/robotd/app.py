@@ -38,7 +38,7 @@ from .core.audio_runtime import (
     AudioRuntime,
 )
 from .core.announce import PAUSE_EXPIRED_TEXT
-from .core.errors import ErrorCode, RobotdError
+from .core.errors import ErrorCode, EventContractError, RobotdError
 from .core.kernel import EventKernel
 from .core.safety import (
     LEGACY_REASON_TO_CAUSE,
@@ -149,6 +149,9 @@ class App:
         #: 最近一次设备级失败原因（串口打不开等）。``None`` 表示没有失败。
         #: 它进 health，也解释 `robot_move` 为什么被拒——不靠猜。
         self.board_error: str | None = None
+        #: 板侧 `hello` 的原始应答（`steps_per_m` / `wheelbase_mm` / `fw` …）。
+        #: 单位换算与固件比对都以它为准，不从配置猜。
+        self.board_info: dict[str, Any] | None = None
         #: HTTP 传输层（R09）由调用方装配后挂上，便于健康/诊断读取连接数
         self.transport: Any | None = None
 
@@ -264,7 +267,10 @@ class App:
 
         **受理 ≠ 到位**（ADR-0004）：返回只说明帧已写出且板侧应答了 ok。
         不建任务、不推进 progress——开环下没有「走完了」这个事实。
-        毫米是公开口径；板侧按 ``hello`` 声明的米接收（单位单点声明）。
+
+        单位：公开口径是毫米；**在板固件（poc-2.0）的 `move.left/right` 是步数**
+        （实测 `left=0.001` 被 `int()` 截断为 0 步）。所以这里用 `hello.steps_per_m`
+        把毫米换成步数再下发。缺 `steps_per_m` 时**拒绝猜测**，明确报不可用。
         """
         if self.board is None:
             raise RobotdError(
@@ -278,18 +284,53 @@ class App:
                 f"板侧链路未就绪（esp32={self.state.esp32.value}），未下发移动指令",
                 {"esp32": self.state.esp32.value},
             )
+        info = self.board_info or {}
+        try:
+            steps_per_m = float(info.get("steps_per_m"))
+        except (TypeError, ValueError):
+            raise RobotdError(
+                ErrorCode.UNAVAILABLE,
+                "板侧 hello 未提供 steps_per_m，无法把毫米换算成步数（拒绝猜测单位）",
+                {"board_info_keys": sorted(info.keys())},
+            ) from None
+        if steps_per_m <= 0:
+            raise RobotdError(
+                ErrorCode.UNAVAILABLE,
+                f"板侧 steps_per_m={steps_per_m} 非正，无法换算步数",
+                {"steps_per_m": steps_per_m},
+            )
         distance_m = round(float(distance_mm) / 1000.0, 6)
         speed_mps = round(float(speed_mm_s) / 1000.0, 6)
-        self.board.request(
+        steps = int(round(distance_m * steps_per_m))
+        if steps <= 0:
+            raise RobotdError(
+                ErrorCode.VALIDATION,
+                f"距离 {distance_mm}mm 换算后不足 1 步（steps_per_m={steps_per_m}），拒绝下发空动作",
+                {"distance_mm": float(distance_mm), "steps_per_m": steps_per_m},
+            )
+        reply = self.board.request(
             "move",
-            {"left": distance_m, "right": distance_m, "speed": speed_mps},
+            {"left": steps, "right": steps, "speed": speed_mps},
             timeout_ms=self.config.board_reply_timeout_ms,
         )
+        eta_ms = 0
+        if isinstance(reply, dict):
+            try:
+                eta_ms = int(reply.get("eta_ms") or 0)
+            except (TypeError, ValueError):
+                eta_ms = 0
+        # 有界步数的 move 中间没有别的流量；不持续喂心跳就会被 300ms 看门狗打断。
+        # **不按 eta_ms 截止**：板侧实测比标称慢，按 eta 停心跳会提前断供反而触发看门狗。
+        # 心跳由 motion.done / motion.aborted 收尾，缺省 30s 安全上限。
+        start_hb = getattr(self.board, "start_heartbeat", None)
+        if callable(start_hb):
+            start_hb()
         return {
             "ok": True,
             "dispatched": True,
             "distance_mm": float(distance_mm),
             "speed_mm_s": float(speed_mm_s),
+            "steps": steps,
             "board_ack": True,
         }
 
@@ -402,8 +443,23 @@ class App:
 
         try:
             self.kernel.emit(event_type, payload)
+        except EventContractError:
+            # 板侧会推一些主机还没建模的事实（如 `ena.changed` / `ena.release_scheduled`）。
+            # 契约是唯一放行判据：**未登记就忽略**，但要说清楚是「没建模」，不是「处理坏了」——
+            # 用 warning + traceback 刷屏会掩盖真正的故障。
+            log.info("板侧推送 %s 未在契约登记，已忽略", event_type)
         except Exception:  # noqa: BLE001
             log.warning("板侧事件 %s 处理失败", event_type, exc_info=True)
+        else:
+            # 运动终态是现场判读的第一手证据（「跑完了」还是「被谁停的」）。
+            if event_type == "motion.done":
+                log.info("运动完成：steps=%s（受理≠物理到位）", payload.get("steps"))
+            elif event_type == "motion.aborted":
+                log.warning(
+                    "运动中止：reason=%s hb_age_ms=%s",
+                    payload.get("reason"),
+                    payload.get("hb_age_ms"),
+                )
 
         if event_type == "device.lost" and str(payload.get("device")) == "esp32":
             # 串口/链路掉线：主机侧已经无法确认板侧是否停稳。
@@ -443,6 +499,7 @@ class App:
         firmware = None
         if isinstance(info, dict):
             firmware = info.get("fw")
+            self.board_info = info
         self.state._apply_link(DeviceStatus.READY, firmware)
 
     # ------------------------------------------------------------ 暂停 / 恢复（GH-48）

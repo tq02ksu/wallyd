@@ -45,7 +45,10 @@ def test_default_speed_is_the_contract_default_and_frame_is_written():
         result = call(app, {"distance_mm": 300})
         assert result["distance_mm"] == 300.0
         assert result["speed_mm_s"] == 150.0
-        assert fake.writes[-1] == (b'{"id":2,"op":"move","args":{"left":0.3,"right":0.3,"speed":0.15}}\n')
+        assert result["steps"] == 2400
+        # move 是第一个写出的帧；之后还会跟心跳（velocity），所以不能断言「最后一帧」。
+        move_frame = next(w for w in fake.writes if b'"op":"move"' in w)
+        assert move_frame == (b'{"id":2,"op":"move","args":{"left":2400,"right":2400,"speed":0.15}}\n')
     finally:
         app.shutdown()
 

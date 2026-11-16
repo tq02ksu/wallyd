@@ -155,12 +155,20 @@ def test_move_needs_approval_then_writes_contract_frame(serial_server):
 
     assert board_side.wait_for(lambda cmds: any(cmd.get("op") == "move" for cmd in cmds))
     move = next(cmd for cmd in board_side.received if cmd.get("op") == "move")
-    # 判据 2：串口侧收到的就是契约帧（300mm / 150mm·s⁻¹ → 0.3m / 0.15m·s⁻¹）
+    # 判据 2：300mm 经 hello.steps_per_m=8000 换算成 2400 步；speed 仍是 m/s。
+    # 板侧 poc-2.0 的 move.left/right 是**步数**（实测 left=0.001 → int() → 0），
+    # 所以这里断言的是步数，不是米。
     assert move == {
         "id": 2,
         "op": "move",
-        "args": {"left": 0.3, "right": 0.3, "speed": 0.15},
+        "args": {"left": 2400, "right": 2400, "speed": 0.15},
     }, move
+
+    # 运动期间必须持续喂心跳：固件 300ms 收不到 velocity 就自主停机。
+    assert board_side.wait_for(
+        lambda cmds: sum(1 for c in cmds if c.get("op") == "velocity") >= 2,
+        timeout=2.0,
+    ), board_side.received
 
 
 def test_stop_frame_is_idless_and_is_the_last_write(serial_server):

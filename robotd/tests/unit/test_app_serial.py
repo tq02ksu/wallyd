@@ -41,7 +41,7 @@ def test_start_handshakes_and_reports_ready():
         app.shutdown()
 
 
-def test_move_converts_mm_to_meters_and_writes_one_frame():
+def test_move_converts_mm_to_steps_and_writes_one_frame():
     app = serial_app()
     board, fake = fake_serial_board()
     app.attach_board(board)
@@ -53,10 +53,13 @@ def test_move_converts_mm_to_meters_and_writes_one_frame():
             "dispatched": True,
             "distance_mm": 300.0,
             "speed_mm_s": 150.0,
+            "steps": 2400,
             "board_ack": True,
         }
-        # 判据 2：串口侧收到的字节（「往前走 30 厘米」= 300mm/150mm/s）
-        assert fake.writes[-1] == (b'{"id":2,"op":"move","args":{"left":0.3,"right":0.3,"speed":0.15}}\n')
+        # 判据 2：「往前走 30 厘米」= 300mm → hello.steps_per_m=8000 → 2400 步。
+        # 板侧 poc-2.0 的 left/right 是步数（实测 0.001 被 int() 截成 0），speed 仍是 m/s。
+        move_frame = next(w for w in fake.writes if b'"op":"move"' in w)
+        assert move_frame == (b'{"id":2,"op":"move","args":{"left":2400,"right":2400,"speed":0.15}}\n')
     finally:
         app.shutdown()
 

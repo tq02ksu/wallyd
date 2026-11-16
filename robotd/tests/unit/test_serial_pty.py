@@ -23,15 +23,16 @@ def test_real_serial_round_trip_and_move_frame_bytes():
     board = SerialBoard(board_side.path, 115200, timeout_s=0.05)
     try:
         hello = board.request("hello", {"proto": 2})
-        assert hello == {"fw": "pty-2.0"}
-        board.request("move", {"left": 0.3, "right": 0.3, "speed": 0.15})
+        assert hello["fw"] == "pty-2.0"
+        assert hello["steps_per_m"] == 8000.0
+        board.request("move", {"left": 2400, "right": 2400, "speed": 0.15})
         deadline = time.monotonic() + 2
         while len(board_side.received) < 2 and time.monotonic() < deadline:
             time.sleep(0.005)
         assert board_side.received[1] == {
             "id": 2,
             "op": "move",
-            "args": {"left": 0.3, "right": 0.3, "speed": 0.15},
+            "args": {"left": 2400, "right": 2400, "speed": 0.15},
         }, board_side.received
         board.notify("stop")
         deadline = time.monotonic() + 2

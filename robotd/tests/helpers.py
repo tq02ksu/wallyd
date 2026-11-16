@@ -83,7 +83,28 @@ def fake_serial_board(replies: dict[str, dict[str, Any]] | None = None):
             return
         if "id" not in command:
             return
-        reply = (replies or {}).get(command.get("op"), {"ok": True, "data": {}})
+        op = command.get("op")
+        if op in (replies or {}):
+            reply = replies[op]
+        elif op == "hello":
+            # 与真机同形的握手：hello 必须声明 steps_per_m，能力层据此做毫米→步数。
+            reply = {
+                "ok": True,
+                "data": {
+                    "fw": "fake-2.0",
+                    "proto": 2,
+                    "steps_per_m": 8000.0,
+                    "wheelbase_mm": 120.0,
+                    "drivers": ["L", "R"],
+                },
+            }
+        elif op == "move":
+            reply = {
+                "ok": True,
+                "data": {"steps": abs(int((command.get("args") or {}).get("left", 0))), "eta_ms": 200},
+            }
+        else:
+            reply = {"ok": True, "data": {}}
         fake.feed_json({"id": command["id"], **reply})
 
     fake.on_write = on_write
@@ -108,6 +129,9 @@ class PseudoBoard:
 
         self.master, self._slave = os.openpty()
         tty.setraw(self._slave)
+        # master 必须非阻塞 + select 轮询：否则读线程会永久阻塞在 os.read 上，
+        # 主线程 close(master) 时会被这个未返回的读卡住（macOS 实测会挂死整个测试）。
+        os.set_blocking(self.master, False)
         self.path = os.ttyname(self._slave)
         self.received: list[dict[str, Any]] = []
         self._stop = threading.Event()
@@ -115,12 +139,20 @@ class PseudoBoard:
         self._thread.start()
 
     def _run(self) -> None:
+        import select
+
         buffer = b""
         while not self._stop.is_set():
             try:
-                chunk = os.read(self.master, 4096)
-            except OSError:
+                ready, _, _ = select.select([self.master], [], [], 0.05)
+            except (OSError, ValueError):
                 return
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self.master, 4096)
+            except (BlockingIOError, OSError):
+                continue
             if not chunk:
                 continue
             buffer += chunk
@@ -132,6 +164,22 @@ class PseudoBoard:
                 self.received.append(command)
                 if "id" in command:
                     reply = {"id": command["id"], "ok": True, "data": {"fw": "pty-2.0"}}
+                    if command.get("op") == "hello":
+                        # 与真机 poc-2.0 同形：hello 必须声明 steps_per_m，
+                        # 能力层要用它把毫米换成步数（缺了就该拒绝，不猜）。
+                        reply["data"] = {
+                            "fw": "pty-2.0",
+                            "proto": 2,
+                            "steps_per_m": 8000.0,
+                            "wheelbase_mm": 120.0,
+                            "drivers": ["L", "R"],
+                        }
+                    elif command.get("op") == "move":
+                        args = command.get("args") or {}
+                        steps = max(abs(int(args.get("left", 0))), abs(int(args.get("right", 0))))
+                        speed = float(args.get("speed", 0.15)) or 0.15
+                        eta_ms = int(steps / (speed * 8000.0) * 1000) if steps else 0
+                        reply["data"] = {"steps": steps, "eta_ms": eta_ms}
                     os.write(self.master, (json.dumps(reply, separators=(",", ":")) + "\n").encode())
 
     def wait_for(self, predicate: Callable[[list[dict[str, Any]]], bool], timeout: float = 3.0) -> bool:

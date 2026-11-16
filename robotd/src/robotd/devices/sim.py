@@ -82,7 +82,15 @@ class SimBoard:
             self.state.ops.append(op)
 
             if op == "hello":
-                return {"fw": "sim-0.1.0", "proto": 2, "enabled": self.state.enabled}
+                return {
+                    "fw": "sim-0.1.0",
+                    "proto": 2,
+                    "enabled": self.state.enabled,
+                    # 与真机同形的单位声明：能力层要用它把毫米换成步数。
+                    "steps_per_m": 8000.0,
+                    "wheelbase_mm": 120.0,
+                    "drivers": ["L", "R"],
+                }
             if op == "ping":
                 return {"pong": True}
             if op == "steps":
@@ -115,6 +123,17 @@ class SimBoard:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+
+    # ------------------------------------------------------------ 运动心跳（仿真无操作）
+    def start_heartbeat(self, duration_ms: int) -> None:
+        """仿真板没有看门狗，心跳是空操作。
+
+        保留同名方法是为了让能力层不必为仿真分支写 `if kind == "sim"`——
+        真机与仿真的差异收在各自的适配器里。
+        """
+
+    def stop_heartbeat(self) -> None:
+        """同上：仿真板无心跳可停。"""
 
     # ------------------------------------------------------------ 故障注入（仅测试）
     def inject_fault(self, fault: SimFault) -> None:

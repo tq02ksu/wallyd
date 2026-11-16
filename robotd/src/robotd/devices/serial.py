@@ -2,11 +2,17 @@
 
 线协议复用 ``docs/communication-protocol.md`` §3 的 JSON-Lines，不另立一套：
 
-    命令    {"id":7,"op":"move","args":{"left":0.3,"right":0.3,"speed":0.15}}
-    应答    {"id":7,"ok":true,"data":{...}}
+    命令    {"id":7,"op":"move","args":{"left":2400,"right":2400,"speed":0.15}}
+    应答    {"id":7,"ok":true,"data":{"steps":2400,"eta_ms":2000}}
     失败    {"id":7,"ok":false,"err":{"code":"E_BUSY","msg":"..."}}
-    推送    {"ev":"motion.done","steps":[1000,1050],"ts":123456}
+    推送    {"ev":"motion.done","steps":2400,"ts":123456}
     stop    {"op":"stop"}            ← 无 id：契约规定的最高优先级命令
+
+⚠️ **单位以板子实核为准**：`firmware/robot_server_v2.py`（板侧 `poc-2.0`）对
+`move.left/right` 执行 `int(args["left"])`，即**步数**；`speed` 是 m/s（板侧再乘
+`steps_per_m` 得脉冲速率）。`docs/communication-protocol.md` §3.2 写的是米，
+与在板固件不一致；robotd 按 `hello.steps_per_m` 把毫米换算成步数后下发，
+doc 的差异已在本文件与 PR 说明里标明，待人工定夺（不擅自改线协议）。
 
 纪律：
 
@@ -32,6 +38,11 @@ from ..core.errors import ErrorCode, RobotdError
 log = logging.getLogger("robotd.devices.serial")
 
 EventHandler = Callable[[str, dict[str, Any]], None]
+
+#: 运动期间的心跳间隔。契约要求 ≥5Hz；10Hz 给看门狗（300ms）留足够余量。
+HEARTBEAT_INTERVAL_S = 0.1
+#: 板侧推送这两个事件即表示本次运动结束，心跳应立刻停。
+_MOTION_END_EVENTS = frozenset({"motion.done", "motion.aborted"})
 
 
 class SerialPortLike(Protocol):
@@ -133,6 +144,9 @@ class SerialBoard:
         self._pending: dict[int, _Pending] = {}
         self._closed = threading.Event()
         self._lost = False
+        self._hb_stop = threading.Event()
+        self._hb_lock = threading.Lock()
+        self._hb_thread: threading.Thread | None = None
         self._reader = threading.Thread(target=self._read_loop, name="robotd-serial", daemon=True)
         self._reader.start()
         log.info("串口已打开：%s @ %s（等待 hello 握手）", port, baud)
@@ -191,6 +205,9 @@ class SerialBoard:
 
     def notify(self, op: str, args: dict[str, Any] | None = None) -> None:
         """单向通知。``stop`` 走无 id 帧：不等应答，也不与排队命令关联。"""
+        if op == "stop":
+            # 先停心跳：否则 stop 之后还会继续发 velocity，把看门狗续上。
+            self.stop_heartbeat()
         if self._closed.is_set():
             return
         if op == "stop":
@@ -199,9 +216,59 @@ class SerialBoard:
         message = {"op": op, "args": dict(args or {})}
         self._write((json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
 
+    # ------------------------------------------------------------ 运动心跳
+    def start_heartbeat(self, duration_ms: int | None = None) -> None:
+        """运动期间按 10Hz 发 ``velocity``，直到收到结束推送或到达安全上限。
+
+        为什么必须有：固件 `poc-2.0` 在有运动意图时，300ms 收不到 `velocity`
+        就自主停机（`motion.aborted reason=watchdog`）。而 `move` 是**有界步数**
+        的一次性命令，中间不会有别的流量，所以 30cm 这种动作必然被看门狗打断——
+        除非 host 持续喂心跳（契约 §3.3 就是这么要求的）。
+
+        **不能用固件回填的 `eta_ms` 当截止时间**：实测板侧实际速率比标称慢
+        （串口轮询与脉冲循环串行，2400 步标称 2s、实测 3~5s），按 eta 停心跳会在
+        运动完成前断供，反而触发看门狗。所以默认**不设时限**，只靠
+        `motion.done` / `motion.aborted` 收尾；`duration_ms` 仅作为测试用的上限，
+        缺省取 30s 安全上限（与固件 `ENAGED_MAX_MS` 同量级）。
+        """
+        self.stop_heartbeat()
+        self._hb_stop.clear()
+        cap_ms = 30000.0 if duration_ms is None else max(300.0, float(duration_ms))
+        deadline = time.monotonic() + cap_ms / 1000.0
+
+        def loop() -> None:
+            while not self._hb_stop.is_set():
+                if time.monotonic() >= deadline:
+                    break
+                if self._closed.is_set() or self._lost:
+                    break
+                try:
+                    with self._id_lock:
+                        self._id += 1
+                        request_id = self._id
+                    # 不登记等待者：应答会被读线程按「迟到应答」忽略（debug 级），
+                    # 心跳失败也不抛给调用方——运动是否真的还在跑，由板侧推送判定。
+                    self._write(encode_request(request_id, "velocity"))
+                except Exception:  # noqa: BLE001 - 写失败意味着链路已坏，退出即可
+                    break
+                self._hb_stop.wait(HEARTBEAT_INTERVAL_S)
+
+        thread = threading.Thread(target=loop, name="robotd-serial-hb", daemon=True)
+        self._hb_thread = thread
+        thread.start()
+
+    def stop_heartbeat(self) -> None:
+        """停止心跳。可重入、可从读线程调用（会 join，但线程在 0.1s 内必然退出）。"""
+        self._hb_stop.set()
+        with self._hb_lock:
+            thread, self._hb_thread = self._hb_thread, None
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
+
     def close(self) -> None:
         if self._closed.is_set():
             return
+        self.stop_heartbeat()
         self._closed.set()
         try:
             self._port.close()
@@ -276,6 +343,10 @@ class SerialBoard:
     def _emit_push(self, message: dict[str, Any]) -> None:
         event_type = str(message["ev"])
         payload = {k: v for k, v in message.items() if k != "ev"}
+        if event_type in _MOTION_END_EVENTS:
+            # 板侧说这次运动结束了（无论完成还是被看门狗中止）→ 立刻停心跳，
+            # 不再给一个已经停下的运动续命。
+            self.stop_heartbeat()
         handler = self._on_event
         if handler is None:
             log.debug("板侧推送 %s 没有接收者（已丢弃）", event_type)
