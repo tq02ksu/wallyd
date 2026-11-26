@@ -3,7 +3,8 @@
 This is the one-page executable architecture summary for the `wallyd`
 repository. The complete architecture and canonical ADRs live in
 [`projects/wallyd`](https://github.com/tq02ksu/persona/tree/main/projects/wallyd/design).
-This summary was reconciled against `fe10878` on 2026-11-26.
+This summary was reconciled against `main` on 2026-11-26 and does not claim the
+staged capabilities are implemented.
 
 Source hierarchy:
 
