@@ -1,7 +1,7 @@
 ---
-title: Mac mini 移动机器人 — 层与模块关系（唯一口径）
+title: Mac mini 移动机器人 — 历史层与模块关系
 type: project
-description: 全项目「层」的统一口径：4 层执行位置（L1 固件 / L2 进程内模块 / L3 进程 / L4 交互面）、模块按交互方式分四类（请求应答 / 感知事件源 / 整流派生 / 适配）、层与模块的映射表、边界命名 B1–B4 与接口面 A–C 的对应，以及四个正交维度（职权 / 执行位置 / 时间 / 部署）的区分。凡其它文档说「某层」，一律以本页为准。
+description: 2026-11-26 前的历史层与模块映射，仅用于迁移取证；当前定义以 tq02ksu/persona/projects/wallyd/design/layers-and-modules.md 为准。
 tags: [project, robot, architecture, glossary]
 domain: robot
 project: macmini-robot
@@ -20,14 +20,15 @@ relations:
     target: /docs/archive/interface-redesign.md
 ---
 
-# 层与模块关系（唯一口径）
+# 层与模块关系（历史）
 
 > **Historical design (2026-11-26):** The old L1–L4 model and module mapping are
 > superseded by `projects/wallyd/design/layers-and-modules.md`. This file is no
 > longer the “唯一口径”.
 
-> **本页是全项目「层」这个词的唯一解释。** 其它文档出现「固件层 / Runtime / 应用层 / 边界 B / 面 A」
-> 这类说法时，含义一律按本页，不再各自解释。新增文档若需要新层，先改本页。
+> **本页是 2026-11-26 前的历史解释。** 当前「层」与模块边界见 persona 的
+> [`layers-and-modules.md`](https://github.com/tq02ksu/persona/blob/main/projects/wallyd/design/layers-and-modules.md)；
+> 本文只保留旧 L1–L4、B1–B4 与接口面的迁移对照，不再作为新增文档的依据。
 >
 > 起因：文档里曾同时存在四套互不相通的数法——`architecture.md` 的四层（交互/认知/执行/基础，**按软件职责**）、
 > `architecture.md` 的三容器（robotd/modeld/agentd，**按部署**）、

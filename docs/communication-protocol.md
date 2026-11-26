@@ -1,7 +1,7 @@
 ---
-title: Mac mini 移动机器人 — 分层通信与接口设计
+title: Mac mini 移动机器人 — 历史分层通信与接口设计
 type: project
-description: 逐层定义边界通信：应用层 ↔ Runtime（MCP + WS）、Runtime ↔ ESP32（文本行 JSON 串口协议 v2，含心跳看门狗）、Runtime ↔ modeld / 原生桥、面板与内部契约；含 Capability / State / Task / Event 四类最小契约、超时重试与背压策略。
+description: 2026-11-26 前的历史通信设计，仅用于迁移取证；当前边界与任务语义以 persona 的 communication-protocol.md 和 canonical ADR 为准。
 tags: [project, robot, design, protocol]
 domain: robot
 project: macmini-robot
@@ -14,7 +14,7 @@ relations:
     target: /docs/architecture.md
 ---
 
-# 分层通信与接口设计
+# 分层通信与接口设计（历史）
 
 > **Historical design (2026-11-26):** The old all-capability HTTP/MCP surface,
 > approval flow, and interface profile are superseded by

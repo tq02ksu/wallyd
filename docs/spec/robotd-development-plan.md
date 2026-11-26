@@ -38,8 +38,8 @@ checklist，并在任务表填入实现提交或验收记录。没有证据不�
   [`contracts/openapi.yaml`](../../contracts/openapi.yaml)仍是机器可读事实源，现有 schema 缺口必须先补。
 - 快速检测先接 macOS Vision，不预装 YOLO；跟随不是把检测框直接换算成电机命令，见
   [ADR-0001](../decisions/0001-vision-fast-slow.md)。
-- ADR-0006 仍为 proposed；ADR-0007 已于 2026-10-23 接受，明确独立契约、公开接口与审批适配器归属，
-  并取消运行时读取对端生成物的旧例外。决策接受不代表实现完成，也不冻结新的进程拓扑。
+- 历史基线：ADR-0006/0007 的旧实现假设已被 canonical ADR-0013～0019 取代；当前边界见
+  [`docs/project/architecture.md`](../project/architecture.md) 与 persona 主源。本文不再定义新拓扑。
 
 **本期目标**：可独立安装运行的 Python robotd；完整 v1 公开接口；仿真与设备适配；
 异步感知和受限的人物跟随；故障下可靠停止；通过验收后显式切换默认启动路径。

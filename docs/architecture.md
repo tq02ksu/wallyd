@@ -1,7 +1,7 @@
 ---
-title: Mac mini 移动机器人 — 架构设计（C4）
+title: Mac mini 移动机器人 — 历史架构设计（C4）
 type: project
-description: 全项目总架构文档，按 C4 模型组织（L1 系统上下文 / L2 容器 / L3 组件 / L4 代码 + 动态视图），并保留目标与硬约束、职责边界判据 P1–P5、硬件与电气边界、成本与里程碑。本文合并了原 architecture.md / software-architecture.md / software-design.md 三份，是软件架构与模块划分的唯一口径。
+description: 2026-11-26 前的历史 C4 设计，仅用于迁移取证；当前架构与 ADR 以 tq02ksu/persona/projects/wallyd 为准。
 tags: [project, robot, design, architecture]
 aliases: [机器人架构设计, 架构设计, 软件架构, C4 架构]
 domain: robot
@@ -19,7 +19,7 @@ relations:
     target: /AGENTS.md
 ---
 
-# Mac mini 移动机器人 — 架构设计（C4）
+# Mac mini 移动机器人 — 历史架构设计（C4）
 
 > **Historical design (2026-11-26):** This document predates the Autonomy Runtime
 > architecture. Its “agentd brain / robotd body”, broad HTTP/MCP capability
@@ -34,11 +34,11 @@ relations:
 > 不作为新架构的实现选型；Python 控制隔离机制另行设计，既有时序与安全要求不变。
 > `modeld` 仍是独立的慢模型进程，主要服务 `robotd`；`agentd` 可独立配置可选的更高级模型。
 
-> **一句话**：给 24G Mac mini 装上「脚、眼睛、电池」——`robotd` 管身体、`modeld` 跑模型、`agentd` 管大脑，
+> **历史一句话**：给 24G Mac mini 装上「脚、眼睛、电池」——`robotd` 管身体、`modeld` 跑模型、`agentd` 管大脑，
 > 三进程用 MCP / HTTP 缝合，本地全离线，可 DIY 复刻。
-> **读之前**：「层」的定义以 [层与模块关系](layers-and-modules.md) 为唯一口径（本文用 C4 编号，务必带 `C4` 前缀）；
-> 每个边界的传输选型见 [分层通信与接口设计](communication-protocol.md)；为什么这么定见 [决策日志](decisions/README.md)。
-> **时效**：2026-10-19 按 C4 重组，合并原 `architecture` / `software-architecture` / `software-design` 三份 —— 当前有效。
+> **历史读法**：本文中的「层」「容器」「审批」「robot_move」都只描述 2026-11-26 前的设计；
+> 当前定义见 [Autonomy Runtime 摘要](project/architecture.md) 与 persona 主源，不要从本文推出当前边界。
+> **时效**：2026-10-19 按 C4 重组，合并原 `architecture` / `software-architecture` / `software-design` 三份 —— 现仅作迁移取证。
 
 > **本页导航**：[§1 目标与约束](#1-目标与硬约束)｜[§2 判据](#2-职责边界判据p1p5)｜[§3 硬件](#3-硬件架构)｜
 > [§4 C4 总览](#4-c4-总览)｜[§5 L1 上下文](#5-c4-l1--系统上下文)｜[§6 L2 容器](#6-c4-l2--容器)｜
@@ -414,7 +414,7 @@ C4Component
 ### 7.3 模块归属权威表
 
 > **本表是模块归属的权威。** 每个模块的层（L2）、所属进程、真相归属见
-> [层与模块关系](layers-and-modules.md) §4——那份是全项目唯一口径。
+> [历史层与模块关系](layers-and-modules.md) §4——该页同样是历史口径；当前定义以 persona 主源为准。
 
 **`robotd`（身体）**
 
@@ -1011,9 +1011,9 @@ robotd 校验授权（能力 / 参数 / 有效期 / 未使用）→ 执行动作
 
 ## 相关页面
 
-- [层与模块关系（唯一口径）](layers-and-modules.md) —— 「层」的定义、4 层执行位置、模块交互四分类、B1–B4 与面 A–C
+- [历史层与模块关系](layers-and-modules.md) —— 2026-11-26 前的 L1–L4、B1–B4 与接口面记录
 - [分层通信与接口设计](communication-protocol.md) —— 每个边界传什么、帧格式、心跳看门狗、四类统一契约
-- [历史接口契约重设计提案](archive/interface-redesign.md) —— 非现行口径；当前契约以 OpenAPI 与本文为准
+- [历史接口契约重设计提案](archive/interface-redesign.md) —— 非现行口径；当前契约以机器可读 OpenAPI 与 persona 主源为准
 - [接口契约升级方案](contract-upgrade.md) —— 板侧线协议与模型帧的 spec 骨架与门禁设计
 - [语音输入输出改造方案（流式优先）](voice-architecture.md) —— 音频子系统的当前设计
 - [LLM / TTS / ASR 模型选型](model-selection.md) —— 苹果生态优先的模型决策
