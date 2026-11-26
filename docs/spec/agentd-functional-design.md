@@ -18,6 +18,10 @@ relations:
 
 # agentd 详细功能与用户界面设计
 
+> **Partially historical (2026-11-26):** Session/UI/persistence ideas remain
+> useful. “agentd as brain”, per-action approval, broad robotd HTTP/MCP surface,
+> and one-time authorization are superseded by canonical ADR-0016.
+
 > **这是目标设计，不是功能完成声明。** 本轮只设计，不改运行时代码与机器可读契约。
 > 总体边界沿用 [architecture.md](../architecture.md) §7、§10.6；
 > 实施顺序与完成标准见 [开发任务清单](agentd-development-plan.md)。

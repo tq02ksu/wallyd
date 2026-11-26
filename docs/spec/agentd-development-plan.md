@@ -16,6 +16,10 @@ relations:
 
 # agentd 开发任务清单与界面交付计划
 
+> **Historical plan (2026-11-26):** Approval/authorization tasks A02/A13/A17 are
+> obsolete. agentd is a Cognitive Runtime and curated-tool adapter; re-plan
+> against canonical ADR-0013～0019 before execution.
+
 ## 1. 使用方式与范围
 
 目标行为与 UI 线框以 [详细功能与界面设计](agentd-functional-design.md) 为准。

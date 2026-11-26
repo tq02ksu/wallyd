@@ -22,6 +22,10 @@ relations:
 
 # 层与模块关系（唯一口径）
 
+> **Historical design (2026-11-26):** The old L1–L4 model and module mapping are
+> superseded by `projects/wallyd/design/layers-and-modules.md`. This file is no
+> longer the “唯一口径”.
+
 > **本页是全项目「层」这个词的唯一解释。** 其它文档出现「固件层 / Runtime / 应用层 / 边界 B / 面 A」
 > 这类说法时，含义一律按本页，不再各自解释。新增文档若需要新层，先改本页。
 >

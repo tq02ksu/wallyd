@@ -7,6 +7,11 @@
 > [`project/architecture.md`](project/architecture.md#current-implementation-state) 的
 > 「Current implementation state」；`robotd` 逐项能力以 `robotd/src/robotd/capabilities.py`
 > 的注册表为准。文档描述目标与理由，不代表已实现。
+>
+> **完整架构与 ADR 不在此仓库复制。** 主源是
+> [`tq02ksu/persona/projects/wallyd`](https://github.com/tq02ksu/persona/tree/main/projects/wallyd)。
+> 本仓库的 `architecture.md`、`layers-and-modules.md` 与 `communication-protocol.md` 是
+> 2026-11-26 前的历史设计，只用于迁移取证。
 
 ## 状态标记
 
@@ -21,6 +26,7 @@
 
 - [项目总览（README）](../README.md) - WALLY 是什么、三进程边界、验证方式
 - [项目架构](project/architecture.md) - 机器人运行时、不可协商的不变量、当前实现状态
+- [完整架构与 ADR](https://github.com/tq02ksu/persona/tree/main/projects/wallyd/design) - 上游完整设计主源
 - [Robot API](project/robot-api.md) - 契约是机器可读接口的唯一源；生成物不得手改
 - [设备协议](project/device-protocol.md) - USB CDC JSON Lines、握手、看门狗与 stop 语义
 - [硬件与电气基线](project/hardware-baseline.md) - 已采购基线及其工程验证风险
@@ -29,10 +35,10 @@
 
 > 这里描述目标设计与理由；是否已经实现，以 §1 的「当前实现状态」为准。
 
-- [架构设计（C4）](architecture.md) - 四层视图、动态视图、模块与数据模型；继承自参考实现的完整设计
-- [层与模块关系（唯一口径）](layers-and-modules.md) - 「层」这个词的唯一解释：执行位置、边界 B1–B4、接口面 A–C
-- [分层通信与接口设计](communication-protocol.md) - 进程内/进程间/线协议每条边界的传输方式
-- [语音输入输出改造方案（流式优先）](voice-architecture.md) - 语音从 request/response 改为流式管线；方案已部分落地
+- [历史架构设计（C4）](architecture.md) - 2026-11 前的旧设计；不代表当前架构
+- [历史层与模块关系](layers-and-modules.md) - 旧 L1–L4 与全量 MCP/HTTP 口径
+- [历史分层通信与接口设计](communication-protocol.md) - 旧 robotd 全量 HTTP/MCP 能力面
+- [语音输入输出改造方案（流式优先）](voice-architecture.md) - 语音流式管线；robotd 独占实时音频与并行 Safety Word，agentd 只接收复杂文本上下文
 - [GH-4 语音桥双管道设计](design/GH-4.md) - 拾音（采集→VAD→ASR）与出话（分句→合成→有界队列→渲染）拆分及可替换 engine 边界
 - [GH-5 播报期 VAD 门控](design/GH-5.md) - 桥只报事实、AudioRuntime 单点判 barge-in，产出 `speech.gate`
 - [GH-6 实时 AEC3 / speech_abort](design/GH-6.md) - 停止播报端点、打断计数对账、AEC3 离线证据驱动的门限取值与实时接入方案
@@ -58,11 +64,11 @@
 ## 4. 实现规范与计划（计划 / 草案）
 
 - [实现规范入口](spec/README.md) - 本目录的定位：不得覆盖总体架构的口径
-- [robotd 对外接口契约 v1（设计稿）](spec/robotd-interface-contract.md) - HTTP/MCP、状态、WebSocket 事件、任务与安全时序
-- [robotd Python 模块开发计划](spec/robotd-development-plan.md) - 六阶段任务、依赖与逐项完成标准
+- [robotd 对外接口契约 v1（历史设计）](spec/robotd-interface-contract.md) - 旧 HTTP/MCP 接口；当前任务语义见 ADR-0014
+- [robotd Python 模块开发计划（历史）](spec/robotd-development-plan.md) - 旧 R02 独立控制进程与模块布局
 - [robotd TS→Python 迁移差异矩阵](spec/robotd-migration-matrix.md) - 逐项登记迁移现状、判定与承接任务
-- [agentd 详细功能与界面设计](spec/agentd-functional-design.md) - 编排、模型配置、总览/任务/事件界面与安全边界
-- [agentd 开发任务清单](spec/agentd-development-plan.md) - 六阶段任务与分批交付门槛
+- [agentd 详细功能与界面设计（部分历史）](spec/agentd-functional-design.md) - 会话/界面可参考；旧审批与全量能力面已过时
+- [agentd 开发任务清单（历史）](spec/agentd-development-plan.md) - 旧审批/授权任务不再执行
 - [摄像头自动检测与配置](spec/camera-detection.md) - macOS UVC 判定与采集配置
 - [GH-17 事件归并的「先算后发」设计](design/GH-17.md) - 归并工作副本、失败丢弃、`state.rejected` 与订阅 backlog 语义修正
 - [GH-27 澄清不建 run 的设计](design/GH-27.md) - 澄清/歧义只写 `route.clarify` 事件、不占活动名额；受保护的停止规则不受忙限制
@@ -72,25 +78,28 @@
 
 ## 5. 契约专题（有时效）
 
-- [接口契约升级方案](contract-upgrade.md) - 提案：把「生成 + 门禁」的做法补到板侧线协议与模型帧
+- [接口契约升级方案（历史）](contract-upgrade.md) - 独立 wire/model 契约仍可复用；全量工具面假设已过时
 - [时间约束与接口契约 — 现状核实](timing-contract-review.md) - 2026-10-18 的三态核实（已实现 / 已定稿未实现 / 真空白）
 
 ## 6. 架构决策（ADR）
 
 - [决策日志与待回填清单](decisions/README.md) - 每条决策的动机、代价与验证方式
 
+> **Canonical decisions:** ADR-0013～0019 are maintained in
+> `tq02ksu/persona/projects/wallyd/design/decisions/` and are not copied here.
+
 | 编号 | 决策 | 状态 |
 | --- | --- | --- |
 | [ADR-0001](decisions/0001-vision-fast-slow.md) | 视觉走快慢双路径 | accepted |
 | [ADR-0002](decisions/0002-closed-loop-layering.md) | 闭环分两层：编码器在 ESP32、低频修正在 robotd | accepted |
-| [ADR-0003](decisions/0003-timing-constraints-layering.md) | 时间约束分层已成立，只补两个跨层参数 | proposed |
-| [ADR-0004](decisions/0004-serial-contract-redlines.md) | 串口契约 v2：不可知状态红线与取消语义 | proposed |
-| [ADR-0005](decisions/0005-contract-upgrade-v2.md) | 契约升级到 v2：可发现的线协议与模型帧 | proposed |
-| [ADR-0006](decisions/0006-robotd-event-driven-core.md) | robotd 以事件循环为内核、状态单点持有 | proposed |
-| [ADR-0007](decisions/0007-agentd-robotd-boundary.md) | agentd / robotd 模块边界分离 | accepted |
+| [ADR-0003](decisions/0003-timing-constraints-layering.md) | 板侧时间研究；旧分层与停止数值已被 canonical ADR-0017 局部取代 | partial historical |
+| [ADR-0004](decisions/0004-serial-contract-redlines.md) | 串口不可知状态与 stop/estop；单位口径被 canonical ADR-0014 更新 | partial historical |
+| [ADR-0005](decisions/0005-contract-upgrade-v2.md) | wire/model 契约；旧全量工具面假设过时 | partial historical |
+| [ADR-0006](decisions/0006-robotd-event-driven-core.md) | robotd 事件内核与状态单点 | accepted |
+| [ADR-0007](decisions/0007-agentd-robotd-boundary.md) | 独立契约；旧审批与能力面被 canonical ADR-0016 取代 | partial historical |
 | [ADR-0008](decisions/0008-robotd-control-worker.md) | robotd 用 Control Worker 隔离导航（Node 方案已取代） | superseded |
 | [ADR-0009](decisions/0009-robotd-python-runtime.md) | robotd 新架构采用 Python | accepted |
-| [ADR-0010](decisions/0010-robotd-python-control-isolation.md) | Python 控制隔离与串口所有权（候选 A） | proposed |
+| [ADR-0010](decisions/0010-robotd-python-control-isolation.md) | 独立控制进程候选；不采纳 | superseded by canonical ADR-0013 |
 | [ADR-0011](decisions/0011-audio-bridge-app-bundle-tcc.md) | 音频桥做成 .app bundle 并由 open 拉起 | accepted |
 
 ## 7. 设计记录（按 issue）

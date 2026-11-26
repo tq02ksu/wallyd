@@ -1,8 +1,8 @@
 # 实现规范与方案
 
-此目录收录面向具体能力、可供实现与验收使用的技术方案。项目总体边界与跨模块架构以
-[`../architecture.md`](../architecture.md) 和 [`../communication-protocol.md`](../communication-protocol.md)
-为准；本目录文件不得覆盖这些单一事实源。
+此目录收录面向具体能力、可供实现与验收使用的技术方案。当前总体边界与 canonical ADR
+位于 `tq02ksu/persona/projects/wallyd`，本仓库的一页摘要见
+[`../project/architecture.md`](../project/architecture.md)。下列旧方案中与当前架构冲突的内容只作历史。
 
 - [摄像头自动检测与配置（macOS / UVC 判定）](camera-detection.md) - 摄像头可用性判定、采集配置与排错步骤
 - [robotd 对外接口契约 v1（设计稿）](robotd-interface-contract.md) - Python 迁移后的 HTTP/MCP、状态、WebSocket 事件、任务与安全时序约定

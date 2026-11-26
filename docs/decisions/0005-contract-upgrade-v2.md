@@ -24,6 +24,10 @@ relations:
 
 # ADR-0005 契约升级到 v2：补上「可发现的线协议」与模型帧的准入条件
 
+> **Historical / partially superseded (2026-11-26):** Independent wire/model
+> contracts remain useful; deriving the whole agent surface from OpenAPI is
+> superseded by canonical ADR-0014/0016.
+
 ## 背景
 
 ADR-0004 复核了边界 B2（`Runtime ↔ ESP32`）并判定「主体已成形」。本条是**再往下一层**的复核：

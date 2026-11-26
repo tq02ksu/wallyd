@@ -22,6 +22,10 @@ relations:
 
 # ADR-0010 robotd Python 控制隔离与串口所有权（候选，待确认）
 
+> **Superseded (2026-11-26):** Canonical ADR-0013 selects a single-process
+> modular robotd. Serial ownership, bounded resources, stop priority, and the
+> board watchdog requirements remain valid.
+
 > **状态说明**：本条是[开发计划](../spec/robotd-development-plan.md) R02 的产出，**proposed**。
 > 计划要求「提交一条新 ADR 供确认」——确认之前，Python 代码里**不得**按任何一条候选落实现，
 > 也不得把「线程能跑就行」当成结论。现有 `robotd/` 骨架只用 `threading.RLock` 保证

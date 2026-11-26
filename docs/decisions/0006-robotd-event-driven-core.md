@@ -5,7 +5,7 @@ description: 回答「robotd 该不该做成消息队列为底层」——不该
 tags: [adr, robot, architecture, event-driven, state]
 domain: robot
 project: macmini-robot
-adr_status: proposed
+adr_status: accepted
 date: 2026-10-18
 sources: []
 generated: { by: assistant:workbuddy, at: 2026-10-18T23:40:00+08:00 }
@@ -21,6 +21,10 @@ relations:
 ---
 
 # ADR-0006 robotd 以事件循环为内核、状态单点持有
+
+> **Accepted in principle (2026-11-26):** Event merging, a single state owner,
+> and snapshot-plus-increment subscription are current design foundations. Old
+> TypeScript/HTTP paths are historical evidence only.
 
 ## 背景
 

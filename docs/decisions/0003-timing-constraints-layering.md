@@ -22,6 +22,10 @@ relations:
 
 # ADR-0003 时间约束分层已成立——原地保留，只补两个跨层参数
 
+> **Historical / partially superseded (2026-11-26):** Layer names and stop
+> numbers are superseded by canonical ADR-0017 and the Autonomy Runtime
+> architecture. Board-side timing facts remain historical evidence.
+
 > **层与模块的统一口径见 [[../layers-and-modules|层与模块关系（唯一口径）]]**——本条只负责**时间维度**
 > 那一段。时间尺度划成三段（微秒–毫秒 / 10–100Hz / 秒–分钟），它与执行位置的 4 层（L1 固件 / L2 进程内
 > 模块 / L3 进程 / L4 交互面）是**多对一**关系：

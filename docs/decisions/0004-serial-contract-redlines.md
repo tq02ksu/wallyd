@@ -22,6 +22,10 @@ relations:
 
 # ADR-0004 串口契约 v2 已成形——补「不可知状态」红线与取消语义
 
+> **Historical / partially superseded (2026-11-26):** Unit semantics and
+> task-facing fields are superseded by canonical ADR-0014. The unknowable-state
+> and stop/estop redlines remain useful.
+
 ## 背景
 
 用「组件之间必须有明确契约」这条判据复核 `Runtime ↔ ESP32`（边界 B2）的契约完整度。

@@ -21,6 +21,12 @@ relations:
 
 # Mac mini 移动机器人 — 架构设计（C4）
 
+> **Historical design (2026-11-26):** This document predates the Autonomy Runtime
+> architecture. Its “agentd brain / robotd body”, broad HTTP/MCP capability
+> surface, per-action approval, and milestone assumptions are superseded by
+> `projects/wallyd/design/architecture.md` and canonical ADR-0013～0019. Keep it
+> only as migration evidence.
+
 > **2026-10-21 选型更新**：[ADR-0009](decisions/0009-robotd-python-runtime.md) 已接受：
 > **新架构 robotd 改用 Python**，面向感知、定位与 SLAM/导航扩展。旧 TS POC 已于
 > 2026-10-23 整体删除，Python `robotd` 是当前唯一实现。

@@ -1,8 +1,9 @@
 # Device Protocol
 
-The current design target is the USB CDC JSON-Lines protocol documented in
-[communication-protocol.md](../communication-protocol.md), with the
-MicroPython implementation in
+The transport target is USB CDC JSON-Lines. Its semantic boundary is documented
+in the canonical
+[communication design](https://github.com/tq02ksu/persona/blob/main/projects/wallyd/design/communication-protocol.md),
+with the MicroPython implementation in
 [firmware/robot_server_v2.py](../../firmware/robot_server_v2.py).
 
 Key protocol properties:
@@ -15,6 +16,10 @@ Key protocol properties:
 - idempotent, preempting `stop` that remains available without the agent;
 - explicit errors for busy, range, state, firmware mismatch, and hardware faults;
 - no silent success when a requested capability is unavailable.
+- target motion fields are explicitly device-facing steps and step rates;
+  user-facing `distance_m` / `speed_mps` are converted in the robotd Device
+  Adapter. Mixed units in the current v2 prototype must not become the final
+  contract.
 
 TB6600 inputs in the adopted hardware revision require a low-or-high-impedance
 two-state discipline. Driving them to 3.3 V is not a safe inactive state. See

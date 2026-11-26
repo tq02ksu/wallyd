@@ -16,6 +16,10 @@ relations:
 
 # ADR-0009 robotd 新架构采用 Python，为感知与 SLAM 扩展准备
 
+> **Scope narrowed (2026-11-26):** Only the Python/model-process decision remains
+> canonical. Transport, approval, and capability-surface details are superseded
+> by canonical ADR-0013, ADR-0014, and ADR-0016.
+
 ## 背景
 
 现有 `robotd` 是 TypeScript POC，承担设备、状态、任务与运动控制编排；原选型以 HTTP、

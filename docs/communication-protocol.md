@@ -16,6 +16,10 @@ relations:
 
 # 分层通信与接口设计
 
+> **Historical design (2026-11-26):** The old all-capability HTTP/MCP surface,
+> approval flow, and interface profile are superseded by
+> `projects/wallyd/design/communication-protocol.md` and canonical ADR-0014/0016.
+
 > **2026-10-21 选型更新**：[ADR-0009](decisions/0009-robotd-python-runtime.md) 已确定新架构 robotd
 > 使用 Python；本文 Node `worker_threads` / `MessagePort` 细节是迁移前方案，不再作为新架构选型。
 > 对外契约、控制时序、状态单点所有权与快慢分离要求保留；Python 控制隔离机制另行设计。

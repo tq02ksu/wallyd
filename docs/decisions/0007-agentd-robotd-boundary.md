@@ -22,6 +22,10 @@ relations:
 
 # ADR-0007 agentd / robotd 模块边界分离
 
+> **Historical / partially superseded (2026-11-26):** Independent contracts and
+> runtime decoupling remain valid. agentd-issued authorization and the broad
+> robotd capability surface are superseded by canonical ADR-0016.
+
 > 2026-10-23：用户确认以下边界决策，本稿修订后接受。
 > **accepted 表示决策已确认，不表示重构已完成。** 下述 POC 证据保留为迁移基线，
 > 后续改变已接受的决策须新建 ADR。

@@ -1,8 +1,8 @@
 # WALLY Contributor and Agent Guide
 
-WALLY is an open-source, WALL-E-inspired DIY robot platform: a Mac mini brain
-drives an ESP32-S3 motion controller over USB serial, and owners extend it with
-their own attachments, sensors, and skills.
+WALLY is an open-source, WALL-E-inspired DIY robot platform. A Mac mini hosts
+the cognitive and autonomy runtimes, while an ESP32-S3 owns real-time device
+control over USB serial.
 
 `wallyd` is the repository/project identifier only. It is not a daemon, and this
 repository is not a background-job or task-queue system; do not introduce or
@@ -11,30 +11,41 @@ and `modeld`.
 
 ## Source of truth
 
-GitHub Issues and pull requests are authoritative. Work only on the supplied
-issue, in its assigned branch/worktree. Do not infer missing requirements or
-invent robot APIs, device protocols, hardware behavior, or architecture.
+GitHub Issues and pull requests are authoritative for implementation scope.
+Work only on the supplied issue, in its assigned branch/worktree. Do not infer
+missing requirements or invent robot APIs, device protocols, hardware behavior,
+or architecture.
+
+The complete architecture and canonical ADRs live in the `projects/wallyd`
+documentation directory of `tq02ksu/persona`. This repository keeps a one-page
+executable summary and the machine-readable contracts.
 
 Read the relevant product documentation before changing code:
 
 - `docs/project/architecture.md`
-- `docs/architecture.md`
-- `docs/communication-protocol.md`
+- canonical ADRs linked from `docs/decisions/README.md`
 - `contracts/openapi.yaml` and `agentd/contracts/openapi.yaml`
-- relevant ADRs under `docs/decisions/`
+- `docs/project/robot-api.md` and `docs/project/device-protocol.md`
 
 ## Ownership rules
 
-- `robotd/` owns body state, serial adaptation, task state, and safety behavior.
-- `agentd/` owns sessions, UI, orchestration, approvals, and managed Codex
-  lifecycle inside the robot product.
+- `robotd/` exclusively owns the Autonomy Runtime input path: microphone/live
+  audio, AEC/VAD, ASR, Safety Word, TTS playback, deterministic routing, tasks,
+  actions, state, behavior, motion, resource arbitration, safety, and device
+  adaptation. Safety Word runs in parallel with ASR and does not wait for
+  `speech.final`.
+- `agentd/` is an optional attached cognitive processor: it receives complex
+  text/context requests from robotd and owns sessions, UI, open-ended
+  orchestration, and managed Codex lifecycle. It does not own the microphone or
+  receive live audio. Codex audio capability availability is not a dependency.
 - `modeld` is a separate slow-model process.
 - `firmware/` owns pulse timing, ENA behavior, and the board-side watchdog.
 - Contracts are the only machine-readable interface source.
 
-Do not create a second mutable copy of robot state outside `robotd`. The model
-tool surface exposes semantic capabilities, never raw GPIO, PWM, or serial
-operations.
+Do not create a second mutable copy of robot state outside `robotd`. Codex only
+sees curated high-level tools, never raw GPIO, PWM, serial operations,
+calibration writes, firmware flashing, or internal module RPCs. Normal robot
+tasks do not use per-action human approval.
 
 ## Development workflow
 
@@ -47,7 +58,9 @@ operations.
 7. Never merge a pull request without human review.
 
 Contract changes follow: contract -> generated artifacts -> tests ->
-implementation. Do not hand-edit generated files.
+implementation. Do not hand-edit generated files. Internal module boundaries
+must not automatically become public tools; update the curated agent tool schema
+explicitly.
 
 ## Verification
 

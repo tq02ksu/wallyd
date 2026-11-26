@@ -41,6 +41,13 @@ relations:
 
 # Mac mini 移动机器人 — 语音输入输出改造方案（流式优先）
 
+> **2026-11-26 input-boundary update:** `robotd` exclusively owns microphone/live audio, AEC/VAD, ASR,
+> Utterance events, Safety Word, TTS playback and deterministic short-command routing. Safety Word runs in
+> parallel with normal ASR and never waits for `speech.final`. agentd receives structured text/context only
+> for complex requests; baseline calls contain no live audio. Codex may support audio inputs, but it never
+> owns the microphone. Old references to “agentd fast routing” below are implementation history, not target
+> architecture.
+
 > 定位：本文回答「**语音输入输出怎么改**」。核心不是换一个更聪明的模型，而是把语音从
 > **request/response** 形态改成 **stream** 形态——输入是「一直在听、边说边出字、说完自动收尾」，
 > 输出是「边生成边分句、边播边说、随时被打断」。
@@ -119,7 +126,7 @@ relations:
 
 ```text
 ┌─ 第一层 Application ─────────────────────────────────────────────────────┐
-│  Agent / Skill / Memory / Behavior（agentd；快速路由 + 可选 Codex Harness）│
+│  Robot Input Router / Skill / Memory / Behavior（robotd；agentd 仅为复杂请求附属）│
 │  · 只消费结构化事件（speech.*，含 speaker / tts），只调用能力              │
 │  · 明确短指令先快速映射；复杂、多步、定时任务才交给 Harness 规划             │
 │  · 不碰麦克风、不碰播放设备、不碰采样率（P4 粒度判据）                     │
@@ -173,12 +180,13 @@ relations:
 重采样 → 16kHz / mono / Int16                        ← ASR 与 VAD 要的格式
   ▼
 环形缓冲（带单调时间戳 ring buffer，保留最近 N 秒）
+  ├──────────────► Safety Word 本地并行识别 ──► robotd Safety Stop
   ├──────────────► VAD（Silero）──► speech_started / speech_ended（端点）
   │                                        │
   │                                        ▼
   └──────────────► 流式 ASR（增量）──► speech.partial(revision) / speech.final
-                          ∥（并行，不等 ASR 结束）
-                  说话人分析（声纹嵌入 / 分段聚类）──► speech.speaker_segment / speech.speaker_resolved
+                           ∥（并行，不等 ASR 结束）
+                   说话人分析（声纹嵌入 / 分段聚类）──► speech.speaker_segment / speech.speaker_resolved
   ▼
 Speaker-aware Transcript（文本 + 时间范围 + 说话人标签 + 置信度）
   ▼
@@ -193,15 +201,17 @@ Robot Runtime 事件总线 ──► Agent / 面板
    墙钟只用于日志展示。跨进程比较与说话人/视觉对齐**只用单调时间**。
 3. **VAD 与 ASR 解耦。** VAD 负责「什么时候有人说话、说到哪结束」；ASR 只负责「说了什么」。
    二者独立，才能把端点检测换成可用的模型，而不受系统 `SpeechDetector` 冲突拖累。
-4. **端点检测（说完自动收尾）策略**：`VAD 静音 ≥ 600~800ms` **且** `ASR 文本在静音期内无新增`
+4. **Safety Word 与普通 ASR 解耦。** 安全词直接消费 AEC/VAD 后音频或实时识别信号并进入 robotd
+   Safety Stop；不得等待 `speech.final`、agentd/Codex 或普通任务路由。
+5. **端点检测（说完自动收尾）策略**：`VAD 静音 ≥ 600~800ms` **且** `ASR 文本在静音期内无新增`
    **且** `utterance 已 ≥ 最短话长` → 判 final。纯静音永不触发；用户插话（新的 speech_started）立即结束当前回合。
    这些阈值要可配置并实测（短句、长句、停顿、口头语各测一遍）。
-5. **partial / final 语义分开。** `speech.partial` 明确可修订（带 `revision`），`speech.final` 默认冻结；
+6. **partial / final 语义分开。** `speech.partial` 明确可修订（带 `revision`），`speech.final` 默认冻结；
    若后续模型确实要改 final，必须发**显式修订事件**，不允许悄悄覆盖已有文本。
-6. **说话人标签允许后到。** 说话人分段通常比 ASR 结果慢，允许先给 `speaker_id:"unknown"`，
+7. **说话人标签允许后到。** 说话人分段通常比 ASR 结果慢，允许先给 `speaker_id:"unknown"`，
    随后补 `speech.speaker_segment` / `speech.speaker_resolved` **修订**同一 `utterance_id`。
    系统 ASR 的识别结果自带**时间范围**，用它把「文本片段」与「说话人片段」按时间对齐。
-7. **长会话可用。** 不允许「一条识别任务永远挂在一次 spawn 里」——常听意味着会话可以持续数小时；
+8. **长会话可用。** 不允许「一条识别任务永远挂在一次 spawn 里」——常听意味着会话可以持续数小时；
    桥与 speech 服务都要有**周期性提交/回收**与健康检查（避免某个已实测的「攒到结束才吐」类问题复发）。
 
 ## 5. 流式输出管线与打断（输入的另一半）
@@ -363,7 +373,7 @@ speech.tts_started / speech.tts_chunk / speech.tts_finished 事件
   - 说话人分段/声纹嵌入与 ASR **并行**；`speech.speaker_segment` / `speech.speaker_resolved`；
   - 说话人标签后置修订；两人轮流 / 相近音色 / 插话三组数据验证。
 - **M3 — 接入 Agent 与人物**
-  - 语音事件接入 Application：明确短指令走 agentd 快速路由，复杂/多步/定时请求再交 Harness；
+  - 语音事件由 robotd 接收：明确短指令走 robotd Input Router，复杂/多步/定时请求再交 agentd/Codex；
   - 快速路由不得猜测缺失参数或绕过工具审批；Agent 只消费事件、调用能力；
   - 摄像头人物跟踪 `track_id`，与 `speaker_id` 做阶段 A 关联（可选阶段 B）。
 

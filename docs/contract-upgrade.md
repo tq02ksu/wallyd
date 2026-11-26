@@ -20,6 +20,10 @@ relations:
 
 # 接口契约升级方案
 
+> **Historical proposal (2026-11-26):** Independent wire-protocol and model-frame
+> contracts remain useful, but the assumption that all agent tools derive from
+> one broad OpenAPI surface is superseded by canonical ADR-0014/0016.
+
 > 决策与理由见 [[decisions/0005-contract-upgrade-v2|ADR-0005]]。本文只写**是什么、长什么样、怎么验**。
 > 上位文书：[[communication-protocol|分层通信与接口设计]]（每两个边界用什么传）。
 

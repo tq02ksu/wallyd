@@ -1,9 +1,10 @@
 # WALLY
 
-WALLY is an open-source, WALL-E-inspired **DIY robot platform**. The body pairs
-a Mac mini as the brain with an ESP32-S3 for real-time motion control over USB
-serial. It is a platform, not a fixed product: owners are expected to add their
-own attachments, sensors, and skills on top of the base chassis.
+WALLY is an open-source, WALL-E-inspired **DIY robot platform**. A Mac mini hosts
+the Autonomy Runtime (`robotd`) and an optional attached Cognitive Assistant
+(`agentd` + Codex); an ESP32-S3 owns real-time device control over USB serial. It
+is a platform, not a fixed product: owners can add attachments, sensors, and
+skills over the base chassis.
 
 `wallyd` is only the name of this GitHub repository and of the
 package/project namespace. It is **not** a daemon and **not** a
@@ -23,10 +24,12 @@ jobs for a server or for the development harness.
 
 The runtime follows three explicit process boundaries:
 
-- `robotd`: Python body runtime; owns device state, tasks, safety rules, and
-  eventually the serial link to the ESP32.
-- `agentd`: TypeScript brain and local UI; owns sessions, task orchestration,
-  approvals, and the Codex App Server lifecycle.
+- `robotd`: Python Autonomy Runtime; exclusively owns microphone/live audio,
+  parallel Safety Word and ASR, RobotTask, ActionEpisode, RobotState, behavior,
+  motion, resource arbitration, safety, and device adaptation.
+- `agentd`: optional TypeScript cognitive processor and local UI; receives
+  complex text/context requests from robotd without live audio, owns sessions and
+  open-ended orchestration, and manages Codex App Server.
 - `modeld`: independent slow-model process, isolated so model failures do not
   block robot control.
 
@@ -34,8 +37,9 @@ GitHub Issues and pull requests drive development. Pages in `contracts/` are the
 machine-readable interface source, and `docs/` contains hardware, electrical,
 software, simulation, and decision records.
 
-> Real-hardware operation requires explicit human authorization. Default
-> verification uses simulation and contract tests.
+> Development-time real-hardware operation requires explicit human authorization.
+> Runtime normal tasks do not use per-action human approval. Default verification
+> uses simulation and contract tests.
 
 ## Hardware baseline
 
@@ -80,6 +84,7 @@ reports but does not block a merge.
 ## Current architecture
 
 - [Architecture overview](docs/project/architecture.md)
+- [Canonical architecture and ADRs](https://github.com/tq02ksu/persona/tree/main/projects/wallyd/design)
 - [Hardware and electrical baseline](docs/project/hardware-baseline.md)
 - [Robot API](docs/project/robot-api.md)
 - [Device protocol](docs/project/device-protocol.md)

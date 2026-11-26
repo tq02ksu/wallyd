@@ -22,6 +22,12 @@ relations:
 
 # robotd 对外接口契约 v1（设计稿）
 
+> **Historical design (2026-11-26):** HTTP/MCP/approval assumptions are
+> superseded by canonical ADR-0014, ADR-0016, and ADR-0019. The old agentd fast
+> routing assumption is also obsolete: robotd exclusively owns live audio and
+> runs Safety Word in parallel with ASR. Current task semantics live in
+> `projects/wallyd/design/communication-protocol.md`.
+
 > 本文规定 robotd 的**进程边界行为**，供 Python 迁移与后续验收使用。  
 > 本文是设计与验收说明，不复制机器可读 schema；HTTP 契约的唯一事实源仍是
 > [`contracts/openapi.yaml`](../../contracts/openapi.yaml)，生成物由 `contract:generate` 维护。

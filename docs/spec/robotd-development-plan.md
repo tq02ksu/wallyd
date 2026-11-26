@@ -18,6 +18,10 @@ relations:
 
 # robotd Python 模块开发计划与任务清单
 
+> **Historical plan (2026-11-26):** The independent control process, old `core/`
+> layout, broad HTTP/MCP capability surface, and per-action approval assumptions
+> conflict with canonical ADR-0013～0019. Do not execute this plan directly.
+
 ## 1. 范围与当前基线
 
 本轮交付是**开发计划**，不是 Python 迁移完成声明。下面任务初始均为待开始；完成时勾选
@@ -271,7 +275,10 @@ work/                          # 日志、抓帧、编译物、测量原始数�
 - [ ] 对齐 utterance/task 关联、partial revision/final、说话结束和错误事件。
 - [ ] 保留分句播报、取消与 barge-in 的既有适用语义；明确音频资源冲突策略。
 - [ ] 静音期间不产生新的识别结果；缺权限/空音频/桥退出不能伪装为成功听音。
-- [ ] 用公开或合成夹具验证接口与打断；语音事件只供 agentd 路由，robotd 不解析通用自然语言命令。
+- [ ] **Superseded by ADR-0019:** the old item routed ordinary speech through
+      agentd. robotd now exclusively owns live audio, runs Safety Word in parallel
+      with ASR, handles simple commands locally, and sends only complex text
+      requests to agentd.
 
 ### R15 — 快速检测与跟踪
 
