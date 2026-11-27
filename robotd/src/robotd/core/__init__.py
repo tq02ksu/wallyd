@@ -12,8 +12,8 @@
 模块组成：
 - ``errors``  —— 稳定错误码与 HTTP 映射
 - ``types``   —— 公开 DTO 与内部记录
-- ``state``   —— RobotState 的权威持有与派生
-- ``kernel``  —— 事件归并、序号、保留日志、订阅分发
+- ``state``   —— RobotState / RobotTask / ActionEpisode 的权威持有与派生
+- ``kernel``  —— 事件归并、原子提交、序号、保留日志、订阅分发
 """
 
 from __future__ import annotations
@@ -22,9 +22,11 @@ from .errors import ErrorCode, RobotdError, http_status_for
 from .kernel import EventKernel, Subscription
 from .state import RobotStateStore, derive_mode
 from .types import (
+    ActionEpisode,
     Event,
     Pose,
     RobotMode,
+    RobotTask,
     Task,
     TaskError,
     TaskState,
@@ -42,6 +44,8 @@ __all__ = [
     "Event",
     "Pose",
     "RobotMode",
+    "RobotTask",
+    "ActionEpisode",
     "Task",
     "TaskError",
     "TaskState",

@@ -210,9 +210,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     app = App(config)
     if config.sim:
-        from .devices.sim import SimBoard
-
-        app.attach_sim_board(SimBoard())
+        # 设备对象由 Composition Root 构造；入口只触发装配（GH-84）。
+        app.attach_sim_board()
     try:
         app.start()
     except RobotdError as exc:

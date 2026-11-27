@@ -112,6 +112,7 @@
 - [GH-12 有界的会话上下文](design/GH-12.md) - 同一回合内最近几轮只用于消歧（规则前置判断与 Harness 提示块）；30s/8 句/显式结束划回合，事件只记计数
 - [GH-11 语音确认通道设计](design/GH-11.md) - `waiting_confirmation` 的语音 settle、窗口/回声规则与凭据签发
 - [GH-48 任务暂停/恢复](design/GH-48.md) - `POST /v1/tasks/{id}/pause|resume`、`TaskState.paused`、暂停上限与安全优先级；resume 不重签审批
+- [GH-84 M0 边界抽取与 import 门禁](design/GH-84.md) - interfaces/task/motion/device/safety/app 六个最小模块、EventKernel 只做归并提交、Task Executive 决定转移、音频完成端口、分层 import 门禁与只减不增的 allowlist
 - [GH-36 macOS CI 门禁分档](design/macos-ci.md) - `apple` lane 的编译/纯逻辑测试/AEC3 fail-closed 口径，以及哪些真机判据永远留给人
 - [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
 

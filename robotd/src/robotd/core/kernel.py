@@ -2,8 +2,9 @@
 
 结构（ADR-0006 的三条规定）：
 
-1. 串口行、子进程事件、定时器 tick、HTTP 请求 → 先转成内部事件 → 进入 ``emit()`` 一个入口；
-2. 派生状态由 ``_reduce()`` 在锁内改写；外部只能读 ``snapshot()``；
+1. 串口行、子进程事件、定时器 tick、HTTP 请求 → 先转成内部事件 → 进入 ``emit()``
+   （事实）或 ``commit()``（任务命令，由 Task Executive 给出改写计划）一个提交口；
+2. 派生状态由 ``_reduce()`` / ``commit(plan)`` 在锁内改写工作副本；外部只能读 ``snapshot()``；
 3. 对外只暴露「快照 + 增量」：``snapshot()`` 与订阅注册在**同一把锁**内完成，
    所以快照与实时推送之间不存在竞态（旧实现 `v1Replay` 在 `accepted` 之后才读日志，
    期间新事件已推走）。订阅**不补发**注册之前的事件；补发是 ``resume()`` 的职责。
@@ -20,24 +21,22 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, TypeVar
 
-from .errors import ErrorCode, EventContractError, RobotdError
+from .errors import ErrorCode, EventContractError
 from .event_registry import load_event_registry
 from .state import RobotStateStore, StateRejection
 from .types import (
     DeviceStatus,
     Event,
-    Exclusivity,
-    Task,
-    TaskError,
-    TaskState,
     iso_utc,
     now_ms,
     scrub_payload,
 )
 
 log = logging.getLogger("robotd.kernel")
+
+T = TypeVar("T")
 
 
 #: 事件名合法形状：``category.name``，全小写、下划线分隔
@@ -90,7 +89,11 @@ class Subscription:
 
 
 class EventKernel:
-    """事件归并、序号分配、保留日志、订阅分发、任务表。"""
+    """事件归并、原子提交、序号分配、保留日志、订阅分发与快照。
+
+    内核**不持有任务表**：RobotTask / ActionEpisode 是 State Store 的权威记录，
+    由 Task Executive 决定怎么改，再通过 :meth:`commit` 在同一把锁里原子提交。
+    """
 
     def __init__(
         self,
@@ -107,10 +110,6 @@ class EventKernel:
         self._log_max = event_log_max
         self._subs: dict[int, Subscription] = {}
         self._next_sub_id = 1
-        self._tasks: dict[str, Task] = {}
-        self._task_seq = 0
-        #: 当前独占运动任务（同一时刻至多一个）
-        self._motion_task: Task | None = None
         #: 被拒事件的形状记录（``{type, payload_keys, reason}``），不含 payload 原文
         self._rejections: deque[dict[str, Any]] = deque(maxlen=event_log_max)
         #: 归并步骤钩子：唯一的可注入失败点（测试用它模拟「算到一半出错」）
@@ -125,15 +124,6 @@ class EventKernel:
     def replay_window(self) -> int:
         return self._log_max
 
-    def _motion_active(self) -> bool:
-        """是否真有排他运动任务在驱动运动。
-
-        ``paused`` 仍占运动槽位（新运动任务照样 409），但它不产生 ``mode: moving``：
-        ``mode`` 表示身体在不在动，任务粒度由 ``Task.state`` 表达（GH-48 D3）。
-        """
-        task = self._motion_task
-        return task is not None and task.state is not TaskState.PAUSED
-
     def oldest_seq(self) -> int:
         """保留窗口内最早一条的序号；窗口为空时返回 ``last_seq + 1``。"""
         with self._lock:
@@ -146,266 +136,42 @@ class EventKernel:
             self.state.event_seq = self._seq
             return self.state.snapshot(event_seq=self._seq)
 
-    # ------------------------------------------------------------ 任务
-    def new_task(self, capability: str, exclusivity: Exclusivity) -> Task:
-        """受理任务。
-
-        互斥规则：
-        - ``motion``：全进程唯一；已有未终结的运动任务 → 409/E_BUSY（不排队）。
-        - ``soft``：按 capability 去重；与运动任务可并存。
-        """
-        with self._lock:
-            if exclusivity is Exclusivity.MOTION and self._motion_task is not None:
-                raise RobotdError(
-                    ErrorCode.BUSY,
-                    f"运动任务 {self._motion_task.task_id} 正在运行",
-                    {"task_id": self._motion_task.task_id},
-                )
-            if exclusivity is Exclusivity.SOFT:
-                for t in self._tasks.values():
-                    if t.exclusivity is Exclusivity.SOFT and not t.terminal and t.capability == capability:
-                        raise RobotdError(
-                            ErrorCode.BUSY,
-                            f"同类任务 {t.task_id} 正在运行",
-                            {"task_id": t.task_id},
-                        )
-            self._task_seq += 1
-            task = Task(
-                task_id=f"t-{self._task_seq:04d}",
-                capability=capability,
-                exclusivity=exclusivity,
-            )
-            self._tasks[task.task_id] = task
-            if exclusivity is Exclusivity.MOTION:
-                self._motion_task = task
-                self.state.recompute_mode(has_motion_task=True)
-                self.state._apply_task_id(task.task_id)
-            self._emit_locked(
-                "task.started",
-                {
-                    "task_id": task.task_id,
-                    "capability": capability,
-                    "exclusivity": exclusivity.value,
-                },
-            )
-            return task
-
-    def mark_running(self, task_id: str) -> Task:
-        """``accepted → running``。重复调用无副作用。"""
-        with self._lock:
-            task = self._require_task(task_id)
-            if task.state is TaskState.ACCEPTED:
-                task.state = TaskState.RUNNING
-            return task
-
-    def pause_task(self, task_id: str, *, pause_expires_at: int) -> Task:
-        """``running → paused``（GH-48）。
-
-        只对运动任务有效，且只从 ``running`` 进入。幂等：已经 paused 时直接返回，
-        不重复发事件（用户可能连说两次「等一下」）。终态任务不允许暂停——
-        暂停不是复活手段。
-
-        ``pause_expires_at`` 由调用方（app 层）按配置上限算好：内核不持有定时器，
-        也不猜「多久算太久」；到期动作由 app 层显式调用 ``finish()``。
-        """
-        with self._lock:
-            task = self._require_task(task_id)
-            if task.terminal:
-                raise RobotdError(
-                    ErrorCode.STATE,
-                    f"任务 {task_id} 已终结（{task.state.value}），不能暂停",
-                    {"task_id": task_id, "state": task.state.value},
-                )
-            if task.exclusivity is not Exclusivity.MOTION:
-                raise RobotdError(
-                    ErrorCode.STATE,
-                    f"任务 {task_id} 不是运动任务，不能暂停",
-                    {"task_id": task_id, "exclusivity": task.exclusivity.value},
-                )
-            if task.state is TaskState.PAUSED:
-                return task
-            if task.state is not TaskState.RUNNING:
-                raise RobotdError(
-                    ErrorCode.STATE,
-                    f"任务 {task_id} 当前为 {task.state.value}，只有 running 可以暂停",
-                    {"task_id": task_id, "state": task.state.value},
-                )
-            task.state = TaskState.PAUSED
-            task.pause_expires_at = int(pause_expires_at)
-            task._paused_at_mono_ns = time.monotonic_ns()
-            self.state.recompute_mode(has_motion_task=False)
-            self._emit_locked(
-                "task.paused",
-                {
-                    "task_id": task.task_id,
-                    "capability": task.capability,
-                    "pause_expires_at": task.pause_expires_at,
-                },
-            )
-            return task
-
-    def resume_task(self, task_id: str) -> Task:
-        """``paused → running``。幂等：已经 running 时直接返回，不发事件。
-
-        **不新建任务、不重新签发审批凭据**：任务 id 与能力参数都没变，所以这里只改状态。
-        终态任务返回 ``E_STATE``，不允许借 resume 复活。
-        """
-        with self._lock:
-            task = self._require_task(task_id)
-            if task.terminal:
-                raise RobotdError(
-                    ErrorCode.STATE,
-                    f"任务 {task_id} 已终结（{task.state.value}），不能恢复",
-                    {"task_id": task_id, "state": task.state.value},
-                )
-            # 与 pause 对称：只有运动任务有暂停这件事，soft 任务的 resume 是调用错误，
-            # 不能靠「它本来就 running」返回 200 假装成功（契约写的是 409/E_STATE）。
-            if task.exclusivity is not Exclusivity.MOTION:
-                raise RobotdError(
-                    ErrorCode.STATE,
-                    f"任务 {task_id} 不是运动任务，不能恢复",
-                    {"task_id": task_id, "exclusivity": task.exclusivity.value},
-                )
-            if task.state is TaskState.RUNNING:
-                return task
-            if task.state is not TaskState.PAUSED:
-                raise RobotdError(
-                    ErrorCode.STATE,
-                    f"任务 {task_id} 当前为 {task.state.value}，只有 paused 可以恢复",
-                    {"task_id": task_id, "state": task.state.value},
-                )
-            started = task._paused_at_mono_ns
-            paused_ms = 0 if started is None else max(0, (time.monotonic_ns() - started) // 1_000_000)
-            task.state = TaskState.RUNNING
-            task.pause_expires_at = None
-            task._paused_at_mono_ns = None
-            self.state.recompute_mode(has_motion_task=True)
-            self._emit_locked(
-                "task.resumed",
-                {
-                    "task_id": task.task_id,
-                    "capability": task.capability,
-                    "paused_ms": paused_ms,
-                },
-            )
-            return task
-
-    def set_progress(self, task_id: str, progress: float, **extra: Any) -> None:
-        with self._lock:
-            task = self._require_task(task_id)
-            if task.terminal:
-                # 终态不可回转：晚到的进度事件不得把已完成任务改回 running/progress
-                return
-            task.progress = max(0.0, min(1.0, float(progress)))
-            payload: dict[str, Any] = {"task_id": task_id, "progress": task.progress}
-            payload.update(extra)
-            self._emit_locked("task.progress", payload)
-
-    def finish(
+    # ------------------------------------------------------------ 原子提交
+    def commit(
         self,
-        task_id: str,
-        state: TaskState,
-        *,
-        error: TaskError | None = None,
-        reason: str | None = None,
-    ) -> Task:
-        """提交终态。**只提交一次**：已终结的任务重复调用直接返回原对象。
+        event_type: str,
+        plan: Callable[[RobotStateStore], Mapping[str, Any] | None],
+    ) -> Event | None:
+        """命令式转移的唯一提交口：``plan`` 决定改写、内核负责原子发布。
 
-        这条是 R06 的核心：取消、自然结束、故障三者竞争时，谁先到谁算，
-        后面的不许把 completed 改写成 failed。
-        """
-        if not state.terminal:
-            raise ValueError("finish() 只接受终态")
-        with self._lock:
-            task = self._require_task(task_id)
-            if task.terminal:
-                return task
-            self._finish_locked(task, state, error=error, reason=reason)
-            return task
+        ``plan`` 在锁内拿到 State Store 的工作副本，改写 RobotTask /
+        ActionEpisode / 资源归属，并返回要发布的事件 payload。只有 ``plan``
+        正常返回后内核才分配序号、发布状态、写日志并分发——与 ``emit`` 的
+        「先算后发」同一条纪律。
 
-    def _finish_locked(
-        self,
-        task: Task,
-        state: TaskState,
-        *,
-        error: TaskError | None = None,
-        reason: str | None = None,
-    ) -> None:
-        """``finish()`` 的锁内实现：调用方必须已持有 ``self._lock``。"""
-        task.state = state
-        task.finished_at = now_ms()
-        task.error = error
-        task.reason = reason
-        # paused 的截止时间属于「这次暂停」，任务终结后必须清掉：
-        # 否则调用方会以为一个 cancelled 任务还有自动取消时刻。
-        task.pause_expires_at = None
-        task._paused_at_mono_ns = None
-        if state is TaskState.COMPLETED:
-            task.progress = 1.0
-        if self._motion_task is task:
-            self._motion_task = None
-            self.state._apply_task_id(None)
-            self.state.recompute_mode(has_motion_task=False)
-
-        event_map = {
-            TaskState.COMPLETED: "task.completed",
-            TaskState.FAILED: "task.failed",
-            TaskState.CANCELLED: "task.cancelled",
-        }
-        payload: dict[str, Any] = {
-            "task_id": task.task_id,
-            "capability": task.capability,
-        }
-        if state is TaskState.FAILED:
-            payload["error"] = (error or TaskError("E_INTERNAL", "未提供错误")).to_public()
-            payload["reason"] = reason or "unspecified"
-        elif state is TaskState.CANCELLED:
-            payload["reason"] = reason or "requested"
-        self._emit_locked(event_map[state], payload)
-
-    def expire_paused_task(self, task_id: str, *, announced: bool) -> bool:
-        """``paused → cancelled(reason=pause_timeout)`` 的**原子**收尾（GH-48）。
-
-        「还是 paused 吗」与「转终态」在**同一把锁**里完成，所以 ``resume`` 与暂停到期
-        不会交错出「刚恢复又被过期回调取消」的结果：
-
-        - ``resume`` 先到 → 这里返回 ``False``，任务保持 ``running``、不发任何事件；
-        - 到期先到 → 任务先变 ``cancelled``，``resume`` 只能拿到 ``409/E_STATE``。
-
-        事件发不出去只是时间线缺一条，**不能**因此把任务留在没有定时器的 ``paused``，
-        所以这里吞掉发射异常、照常收尾。
+        ``plan`` 返回 ``None`` 表示「这次不提交」（例如任务已是终态的幂等调用）：
+        不消耗序号、不发事件、副本丢弃。``plan`` 抛错时同样什么都不留。
         """
         with self._lock:
-            task = self._require_task(task_id)
-            if task.state is not TaskState.PAUSED:
-                return False
-            try:
-                self._emit_locked(
-                    "task.pause_expired",
-                    {"task_id": task.task_id, "announced": announced},
-                )
-            except Exception:  # noqa: BLE001 - 时间线缺一条也不许留下无上限的 paused
-                log.warning("暂停超时事件未能发出 %s（仍按 cancelled 收尾）", task_id, exc_info=True)
-            self._finish_locked(task, TaskState.CANCELLED, reason="pause_timeout")
-            return True
+            _require_registered_event(event_type)
+            staged = self.state._stage()
+            payload = plan(staged)
+            if payload is None:
+                return None
+            clean = scrub_payload(payload)
+            return self._publish_locked(event_type, clean, staged=staged)
 
-    def get_task(self, task_id: str) -> Task:
+    def read(self, fn: Callable[[RobotStateStore], T]) -> T:
+        """持锁只读权威状态。任务记录的唯一读取口，避免读到半发布的状态。"""
         with self._lock:
-            return self._require_task(task_id)
-
-    def list_tasks(self) -> list[Task]:
-        with self._lock:
-            return list(self._tasks.values())
-
-    def _require_task(self, task_id: str) -> Task:
-        task = self._tasks.get(task_id)
-        if task is None:
-            raise RobotdError(ErrorCode.NO_TASK, f"无此任务 {task_id}")
-        return task
+            return fn(self.state)
 
     # ------------------------------------------------------------ 事件入口
     def emit(self, event_type: str, payload: Mapping[str, Any] | None = None, **fields: Any) -> Event:
-        """**唯一的事件入口**。四类输入源都走这里。
+        """**事实事件的唯一入口**。四类输入源（串口/子进程/定时器/HTTP）都走这里。
+
+        命令式任务转移不走这里，走 :meth:`commit`：它们的副作用由 Task Executive
+        在提交时算好，内核只负责归并与发布。
 
         ``fields`` 是 payload 的便捷写法（``emit("device.ready", device="esp32")``）。
         payload 里的内部字段会被 ``scrub_payload`` 剔除——不是静默丢弃：
@@ -551,24 +317,24 @@ class EventKernel:
                 state._apply_link(DeviceStatus.READY, p.get("firmware"))
             else:
                 state._apply_device(str(device), "ready")
-            state.recompute_mode(has_motion_task=self._motion_active())
+            state.recompute_mode()
             self._reduce_step("device.ready.apply")
 
         elif t == "device.lost":
             device = str(p.get("device"))
             state._apply_device(device, "lost")
-            state.recompute_mode(has_motion_task=self._motion_active())
+            state.recompute_mode()
             self._reduce_step("device.lost.apply")
 
         elif t == "device.recovered":
             device = str(p.get("device"))
             state._apply_device(device, "ready")
-            state.recompute_mode(has_motion_task=self._motion_active())
+            state.recompute_mode()
             self._reduce_step("device.recovered.apply")
 
         elif t == "device.reset":
             # 板复位：板侧步数归零 → 位姿与里程来源失效。**不自动续跑旧任务**：
-            # 任务终止由 app 层在收到本事件后显式 finish(failed, reason=board_reset)，
+            # 任务终止由 Task Executive 在收到本事件后显式收尾，
             # 内核不替上层决定「哪个任务该失败」。
             if str(p.get("device")) == "esp32":
                 state._apply_link(DeviceStatus.READY, p.get("firmware"))
@@ -665,7 +431,7 @@ class EventKernel:
                 "log_size": len(self._log),
                 "log_max": self._log_max,
                 "subscriptions": len(self._subs),
-                "tasks": len(self._tasks),
+                "tasks": len(self.state.tasks),
                 "rejections": len(self._rejections),
             }
 

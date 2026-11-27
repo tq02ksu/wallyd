@@ -129,19 +129,24 @@ Per-capability truth remains in `robotd/src/robotd/capabilities.py` and tests.
 Implemented today:
 
 - `robotd`: configuration/startup validation, event-merging kernel,
-  single-authority state, task table with exclusivity, capability registry,
+  single-authority state store (RobotState + RobotTask + ActionEpisode),
+  Task Executive / Resource Arbiter / Safety Stop seams, capability registry,
   lifecycle/shutdown, loopback HTTP/WS transport with event cursors and resync,
-  and speech listen/speak through the resident audio bridge.
+  speech listen/speak through the resident audio bridge, and a static module
+  import gate with a shrink-only legacy allowlist.
 - `agentd`: contract/event allow-list, SQLite persistence, task lifecycle and
   idempotency, event cursors plus WS push, model configuration, body observation,
   stop bypass, and the daily UI.
 
 Not yet implemented or not validated:
 
-- Action-style `submitTask` with RobotTask + ActionEpisode lifecycle;
+- action-style `submitTask(goal)` with planning/feedback (the `RobotTask` and
+  `ActionEpisode` records already live in the state store; the goal interface
+  and its projection do not);
 - migration of Safety Word and deterministic routing from agentd into robotd's
   audio boundary, with Safety Word independent of `speech.final`;
-- static module boundaries and Runtime Guard for the new architecture;
+- Runtime Guard (parameter/state/safety-envelope validation at the execution
+  boundary) for the new architecture;
 - serial/calibration/real-hardware validation in `main`;
 - curated `robot-mcp` tool surface and removal of legacy broad HTTP projections;
 - recovery/perception/localization/world model beyond existing experiments.

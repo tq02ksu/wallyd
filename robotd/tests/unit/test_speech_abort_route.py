@@ -51,8 +51,8 @@ def test_speech_abort_without_active_playback_is_200_and_idempotent(tmp_path):
     second = call(app, {})
 
     assert first["status"] == "accepted" and second["status"] == "accepted"
-    assert app.kernel.get_task(first["task_id"]).state.value == "completed"
-    assert app.kernel.get_task(second["task_id"]).state.value == "completed"
+    assert app.tasks.get(first["task_id"]).state.value == "completed"
+    assert app.tasks.get(second["task_id"]).state.value == "completed"
     # 没有播报对象就不许伪造 speech.tts_cancelled。
     assert not [e for e in app.kernel.recent_events(20) if e.type == "speech.tts_cancelled"]
 

@@ -40,8 +40,8 @@ from ..core.announce import (
     render_clarification,
 )
 from ..core.errors import ErrorCode, RobotdError, wrap_unexpected
-from ..core.safety import StopCause, is_valid_cause
-from ..core.types import Exclusivity, TaskError, TaskState
+from ..safety import StopCause, is_valid_cause
+from ..core.types import Exclusivity
 from . import events as events_api
 from .ws import WsProtocolError, parse_handshake
 
@@ -259,7 +259,7 @@ def _h_stop(ctx: RouteContext) -> dict[str, Any]:
         result = _call_capability(
             ctx.app,
             "robot.stop",
-            lambda _cap: ctx.app.request_stop(cause=StopCause(str(cause)), detail=detail),
+            lambda _cap: ctx.app.safety.request_stop(cause=StopCause(str(cause)), detail=detail),
         )
         return _stop_result_or_timeout(result)
 
@@ -269,7 +269,7 @@ def _h_stop(ctx: RouteContext) -> dict[str, Any]:
     result = _call_capability(
         ctx.app,
         "robot.stop",
-        lambda _cap: ctx.app.request_stop(reason=reason, detail=detail),
+        lambda _cap: ctx.app.safety.request_stop(reason=reason, detail=detail),
     )
     return _stop_result_or_timeout(result)
 
@@ -287,23 +287,15 @@ def _stop_result_or_timeout(result: dict[str, Any]) -> dict[str, Any]:
 
 def _h_task_get(ctx: RouteContext) -> dict[str, Any]:
     task_id = ctx.params["task_id"]
-    return _call_capability(ctx.app, "task.get", lambda _cap: ctx.app.kernel.get_task(task_id).to_public())
+    return _call_capability(ctx.app, "task.get", lambda _cap: ctx.app.tasks.get(task_id).to_public())
 
 
 def _h_task_cancel(ctx: RouteContext) -> dict[str, Any]:
     task_id = ctx.params["task_id"]
-
-    def cancel(_cap: Any) -> dict[str, Any]:
-        task = ctx.app.kernel.get_task(task_id)
-        if task.terminal:
-            return task.to_public()
-        if task.exclusivity is Exclusivity.MOTION:
-            # 运动任务取消必须联动 stop：只改任务表会让电机继续跑
-            ctx.app.request_stop(reason="task_cancel")
-        ctx.app.clear_pause_timer(task_id)
-        return ctx.app.kernel.finish(task_id, TaskState.CANCELLED, reason="requested").to_public()
-
-    return _call_capability(ctx.app, "task.cancel", cancel)
+    # 取消策略（运动任务联动 stop）在 Safety；handler 只调用端口。
+    return _call_capability(
+        ctx.app, "task.cancel", lambda _cap: ctx.app.safety.cancel_task(task_id).to_public()
+    )
 
 
 def _h_task_pause(ctx: RouteContext) -> dict[str, Any]:
@@ -314,19 +306,19 @@ def _h_task_pause(ctx: RouteContext) -> dict[str, Any]:
     """
     task_id = ctx.params["task_id"]
     _reject_unknown(ctx.body, set())
-    return _call_capability(ctx.app, "task.pause", lambda _cap: ctx.app.pause_task(task_id))
+    return _call_capability(ctx.app, "task.pause", lambda _cap: ctx.app.tasks.pause(task_id).to_public())
 
 
 def _h_task_resume(ctx: RouteContext) -> dict[str, Any]:
     """``task_resume``：从 paused 回到 running；不新建任务、不重发动作能力。"""
     task_id = ctx.params["task_id"]
     _reject_unknown(ctx.body, set())
-    return _call_capability(ctx.app, "task.resume", lambda _cap: ctx.app.resume_task(task_id))
+    return _call_capability(ctx.app, "task.resume", lambda _cap: ctx.app.tasks.resume(task_id).to_public())
 
 
 def _h_tasks_list(ctx: RouteContext) -> dict[str, Any]:
     state_q = (ctx.query.get("state") or [""])[0]
-    tasks = [t.to_public() for t in ctx.app.kernel.list_tasks()]
+    tasks = [t.to_public() for t in ctx.app.tasks.list()]
     if state_q:
         tasks = [t for t in tasks if t["state"] == state_q]
     return {"tasks": tasks}
@@ -360,18 +352,12 @@ def _h_speak(ctx: RouteContext) -> dict[str, Any]:
 
     def run(_cap: Any) -> dict[str, Any]:
         runtime = ctx.app.audio
-        task = ctx.app.kernel.new_task("robot.speak", Exclusivity.SOFT)
+        task = ctx.app.tasks.submit("robot.speak", Exclusivity.SOFT)
         try:
-            ctx.app.kernel.mark_running(task.task_id)
             resp = runtime.new_response(task_id=task.task_id)
             runtime.speak(resp, text=text, voice=voice, rate=rate, interruptible=interruptible)
         except Exception as exc:  # noqa: BLE001
-            ctx.app.kernel.finish(
-                task.task_id,
-                TaskState.FAILED,
-                error=TaskError("E_UNAVAILABLE", str(exc)),
-                reason="audio_unavailable",
-            )
+            ctx.app.tasks.audio_unavailable(task.task_id, exc)
             raise RobotdError(
                 ErrorCode.UNAVAILABLE,
                 f"无法播报：{exc}",
@@ -458,11 +444,10 @@ def _h_announce(ctx: RouteContext) -> dict[str, Any]:
 
     def run(_cap: Any) -> dict[str, Any]:
         runtime = ctx.app.audio
-        # new_task 的 BUSY 直接向上抛（同类播报已在跑），不伪装成桥故障
-        task = ctx.app.kernel.new_task("robot.announce", Exclusivity.SOFT)
+        # submit 的 BUSY 直接向上抛（同类播报已在跑），不伪装成桥故障
+        task = ctx.app.tasks.submit("robot.announce", Exclusivity.SOFT)
         resp = None
         try:
-            ctx.app.kernel.mark_running(task.task_id)
             resp = runtime.new_response(task_id=task.task_id, approval_id=approval_id, kind=kind)
             runtime.speak(resp, text=text, interruptible=True)
         except Exception as exc:  # noqa: BLE001
@@ -471,12 +456,7 @@ def _h_announce(ctx: RouteContext) -> dict[str, Any]:
                 runtime.clear_response(resp)
                 # 已经发出去的句子要在桥侧停住；否则 agentd 判定失败后机器人还在念。
                 runtime.cancel_speaking("announce_failed")
-            ctx.app.kernel.finish(
-                task.task_id,
-                TaskState.FAILED,
-                error=TaskError("E_UNAVAILABLE", str(exc)),
-                reason="audio_unavailable",
-            )
+            ctx.app.tasks.audio_unavailable(task.task_id, exc)
             # 失败也必须可观测：agentd 不能因为「请求发出去了」就以为问过用户
             try:
                 failed: dict[str, Any] = {
@@ -522,9 +502,7 @@ def _h_follow(ctx: RouteContext) -> dict[str, Any]:
         raise RobotdError(ErrorCode.VALIDATION, "max_distance_m 不得超过 10 米")
 
     def run(_cap: Any) -> dict[str, Any]:
-        task = ctx.app.kernel.new_task("robot.follow", Exclusivity.MOTION)
-        ctx.app.kernel.mark_running(task.task_id)
-        return ctx.app.kernel.get_task(task.task_id).to_public()
+        return ctx.app.tasks.submit("robot.follow", Exclusivity.MOTION).to_public()
 
     return _call_capability(ctx.app, "robot.follow", run)
 
@@ -557,9 +535,8 @@ def _h_listen(ctx: RouteContext) -> dict[str, Any]:
                 "当前处于静音状态，不会开始新的识别；先调用 POST /v1/audio/unmute",
                 {"capability": "speech.listen", "muted": True},
             )
-        task = ctx.app.kernel.new_task("speech.listen", Exclusivity.SOFT)
+        task = ctx.app.tasks.submit("speech.listen", Exclusivity.SOFT)
         try:
-            ctx.app.kernel.mark_running(task.task_id)
             runtime.new_utterance(
                 task_id=task.task_id,
                 locale=locale.strip(),
@@ -567,12 +544,7 @@ def _h_listen(ctx: RouteContext) -> dict[str, Any]:
                 max_seconds=max_seconds,
             )
         except Exception as exc:  # noqa: BLE001
-            ctx.app.kernel.finish(
-                task.task_id,
-                TaskState.FAILED,
-                error=TaskError("E_UNAVAILABLE", str(exc)),
-                reason="audio_unavailable",
-            )
+            ctx.app.tasks.audio_unavailable(task.task_id, exc)
             raise RobotdError(
                 ErrorCode.UNAVAILABLE,
                 f"无法开始听音：{exc}",
@@ -584,7 +556,7 @@ def _h_listen(ctx: RouteContext) -> dict[str, Any]:
 
 
 def _h_audio_state(ctx: RouteContext) -> dict[str, Any]:
-    return _call_capability(ctx.app, "audio.state", lambda _cap: ctx.app.audio_state())
+    return _call_capability(ctx.app, "audio.state", lambda _cap: ctx.app.audio.state())
 
 
 def _h_speech_abort(ctx: RouteContext) -> dict[str, Any]:
@@ -605,29 +577,24 @@ def _h_speech_abort(ctx: RouteContext) -> dict[str, Any]:
             raise RobotdError(ErrorCode.VALIDATION, "字段 response_id 超过 64 字符上限")
 
     def run(_cap: Any) -> dict[str, Any]:
-        task = ctx.app.kernel.new_task("speech.abort", Exclusivity.SOFT)
-        ctx.app.kernel.mark_running(task.task_id)
+        task = ctx.app.tasks.submit("speech.abort", Exclusivity.SOFT)
         aborted = ctx.app.audio.abort_speaking(response_id=response_id, reason="user_cancel")
-        ctx.app.kernel.finish(
-            task.task_id,
-            TaskState.COMPLETED,
-            reason="aborted" if aborted else "no_active_playback",
-        )
+        ctx.app.tasks.abort_finished(task.task_id, played=aborted)
         return {"task_id": task.task_id, "status": "accepted"}
 
     return _call_capability(ctx.app, "speech.abort", run)
 
 
 def _h_audio_mute(ctx: RouteContext) -> dict[str, Any]:
-    return _call_capability(ctx.app, "audio.mute", lambda _cap: ctx.app.set_audio_muted(True))
+    return _call_capability(ctx.app, "audio.mute", lambda _cap: ctx.app.audio.set_muted(True))
 
 
 def _h_audio_unmute(ctx: RouteContext) -> dict[str, Any]:
-    return _call_capability(ctx.app, "audio.unmute", lambda _cap: ctx.app.set_audio_muted(False))
+    return _call_capability(ctx.app, "audio.unmute", lambda _cap: ctx.app.audio.set_muted(False))
 
 
 def _h_calib_get(ctx: RouteContext) -> dict[str, Any]:
-    return _call_capability(ctx.app, "robot.calibration.get", lambda _cap: ctx.app.read_calibration())
+    return _call_capability(ctx.app, "robot.calibration.get", lambda _cap: ctx.app.calibration.read())
 
 
 def _h_calib_set(ctx: RouteContext) -> dict[str, Any]:
@@ -638,7 +605,7 @@ def _h_calib_set(ctx: RouteContext) -> dict[str, Any]:
         raise RobotdError(ErrorCode.VALIDATION, "至少提供一个标定字段")
 
     def run(_cap: Any) -> dict[str, Any]:
-        return ctx.app.write_calibration(changes)
+        return ctx.app.calibration.write(changes)
 
     return _call_capability(ctx.app, "robot.calibration.set", run)
 
@@ -659,7 +626,7 @@ def _h_debug_state(ctx: RouteContext) -> dict[str, Any]:
 
 
 def _h_debug_tasks(ctx: RouteContext) -> dict[str, Any]:
-    return {"tasks": [t.to_public() for t in ctx.app.kernel.list_tasks()]}
+    return {"tasks": [t.to_public() for t in ctx.app.tasks.list()]}
 
 
 def _h_debug_events(ctx: RouteContext) -> dict[str, Any]:

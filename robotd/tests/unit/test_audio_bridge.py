@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from robotd.devices import audio_bridge as bridge_module
-from robotd.devices.audio_bridge import AudioBridge, AudioBridgeUnavailable
+from robotd.device import audio_bridge as bridge_module
+from robotd.device.audio_bridge import AudioBridge, AudioBridgeUnavailable
 
 
 def _captured_launch_args(tmp_path: Path, *, aec: bool) -> list[str]:

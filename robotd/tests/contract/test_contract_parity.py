@@ -18,7 +18,7 @@ from robotd.api.http import build_routes
 from robotd.capabilities import Implementation, Registry
 from robotd.core.announce import SUPPORTED_KINDS
 from robotd.core.errors import ErrorCode, RobotdError, http_status_for
-from robotd.core.safety import STOP_CAUSES
+from robotd.safety import STOP_CAUSES
 from robotd.core.types import TaskState
 
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts"

@@ -68,9 +68,9 @@ def test_shutdown_cancels_motion_task_first():
     board = FakeBoard()
     app = make_app(board=board)
     app.start()
-    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
+    task = app.tasks.submit("robot.follow", Exclusivity.MOTION)
     app.shutdown()
-    assert app.kernel.get_task(task.task_id).state.value == "cancelled"
+    assert app.tasks.get(task.task_id).state.value == "cancelled"
     ops = [op for op, _ in board.calls]
     assert "stop" in ops
     assert board.closed is True
@@ -80,19 +80,19 @@ def test_stop_reports_board_ack_truthfully():
     board = FakeBoard()
     app = make_app(board=board)
     app.start()
-    assert app.request_stop()["board_ack"] is True
+    assert app.safety.request_stop()["board_ack"] is True
 
     board2 = FakeBoard(fail_stop=True)
     app2 = make_app(board=board2)
     app2.start()
-    assert app2.request_stop()["board_ack"] is False  # 不把本地停止说成已送达
+    assert app2.safety.request_stop()["board_ack"] is False  # 不把本地停止说成已送达
 
 
 def test_stop_event_is_emitted():
     app = make_app()
     seen: list[str] = []
     app.kernel.subscribe(["safety.*"], lambda ev: seen.append(ev.type))
-    app.request_stop()
+    app.safety.request_stop()
     # 动作 + 结构化原因；判据只读 cause（见 test_safety_cause.py）。
     assert seen == ["safety.stopped", "safety.stop_requested"]
 

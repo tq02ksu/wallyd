@@ -13,9 +13,9 @@ from robotd.api.http import RouteContext, _h_stop
 from robotd.app import App
 from robotd.config import Config
 from robotd.core.errors import RobotdError
-from robotd.core.safety import STOP_CAUSES, StopCause, StopState
+from robotd.safety import STOP_CAUSES, StopCause, StopState
 from robotd.core.types import Exclusivity
-from robotd.devices.sim import SimBoard, SimFault
+from robotd.device.sim import SimBoard, SimFault
 from tests.helpers import FakeBoard, FakeClock
 
 
@@ -51,7 +51,7 @@ def call_stop(app: App, body: dict) -> dict:
 def test_production_stop_path_can_emit_every_required_cause(cause):
     app = make_app(board=FakeBoard())
     app.start()
-    app.report_safety_stop(cause=cause)
+    app.safety.report(cause=cause)
     ev = last_stop(app)
     assert ev.payload["cause"] == cause
     expected = "unknown" if cause == StopCause.DEVICE_LOST.value else "confirmed"
@@ -103,7 +103,7 @@ def test_board_watchdog_over_healthy_transport_is_confirmed():
     app = make_app()
     app.attach_sim_board(board)
     app.start()
-    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
+    task = app.tasks.submit("robot.follow", Exclusivity.MOTION)
 
     board.sim_board_stop("watchdog")
 
@@ -111,7 +111,7 @@ def test_board_watchdog_over_healthy_transport_is_confirmed():
     assert ev.payload["cause"] == StopCause.WATCHDOG_TIMEOUT.value
     assert ev.payload["state"] == StopState.CONFIRMED.value
     assert ev.payload["task_id"] == task.task_id
-    assert app.kernel.get_task(task.task_id).state.value == "cancelled"
+    assert app.tasks.get(task.task_id).state.value == "cancelled"
 
 
 def test_board_watchdog_with_lost_transport_is_unknown():
@@ -163,4 +163,4 @@ def test_request_stop_rejects_unknown_explicit_cause():
     app = make_app(board=FakeBoard())
     app.start()
     with pytest.raises(RobotdError):
-        app.request_stop(cause="not_a_cause")
+        app.safety.request_stop(cause="not_a_cause")

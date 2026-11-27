@@ -24,20 +24,34 @@ from robotd.core.event_registry import load_event_registry
 ROOT = Path(__file__).resolve().parents[3]
 SRC = ROOT / "robotd" / "src" / "robotd"
 KERNEL = SRC / "core" / "kernel.py"
-SIM_BOARD = SRC / "devices" / "sim.py"
+SIM_BOARD = SRC / "device" / "sim.py"
 CONTRACTS = ROOT / "contracts"
 
 #: 所有会最终把事件交给内核（或转给它）的入口名。
 #: ``_emit`` 是语音运行时注入的写入口；只扫 ``emit`` 会漏掉整个语音面。
-SINK_FUNCTIONS = {"emit", "_emit", "_emit_locked", "_publish_locked", "emit_state", "_audio_emit"}
+#: ``commit`` 是 Task Executive 的原子提交口（GH-84），它同样是事件发布点。
+SINK_FUNCTIONS = {
+    "emit",
+    "commit",
+    "_emit",
+    "_emit_locked",
+    "_publish_locked",
+    "emit_state",
+    "_audio_emit",
+}
 
 #: 首参不是字面量的转发点。每一处都必须写明为什么安全，并且由本文件的
 #: 其它断言补齐取值域——不允许用 ``continue`` 静默跳过。
 PASS_THROUGH = {
     ("core/kernel.py", "EventKernel.emit"): "event_type 原样转给 _emit_locked；登记校验在 _emit_locked 入口",
+    ("core/kernel.py", "EventKernel.commit"): (
+        "命令式转移的事件名由 Task Executive 给出，原样转给 _publish_locked；登记校验在入口完成"
+    ),
     ("core/kernel.py", "EventKernel._emit_locked"): "入口已校验，原样转给 _publish_locked",
     ("app.py", "App._audio_emit"): "语音运行时注入的转发器；_audio_emit 的调用点由本测试枚举",
-    ("app.py", "App._board_event"): "板侧适配注入的转发器；SimBoard 的上报由本测试枚举，最终仍由内核拒绝",
+    ("safety/stop.py", "StopCoordinator.handle_board_event"): (
+        "板侧适配注入的转发器；SimBoard 的上报由本测试枚举，最终仍由内核拒绝"
+    ),
 }
 
 

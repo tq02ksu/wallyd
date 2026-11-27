@@ -27,7 +27,7 @@ from robotd.app import App
 from robotd.approval_digest import approval_args_digest
 from robotd.config import Config
 from robotd.core.types import DeviceStatus
-from robotd.devices.sim import SimBoard
+from robotd.device.sim import SimBoard
 
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts"
 APPROVAL_REASON_MISSING = "missing_credential"

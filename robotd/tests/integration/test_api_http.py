@@ -26,7 +26,7 @@ from robotd.api.http import (
 )
 from robotd.app import App
 from robotd.config import Config
-from robotd.devices.sim import SimBoard, SimFault
+from robotd.device.sim import SimBoard, SimFault
 
 
 @pytest.fixture()
@@ -201,7 +201,7 @@ def test_options_not_allowed(live):
 # --------------------------------------------------------------------- 任务生命周期
 def test_task_get_and_cancel(live):
     app, port = live
-    task = app.kernel.new_task(
+    task = app.tasks.submit(
         "robot.follow", __import__("robotd.core.types", fromlist=["Exclusivity"]).Exclusivity.MOTION
     )
     status, body, _ = call(port, "GET", f"/v1/tasks/{task.task_id}")
@@ -223,8 +223,8 @@ def test_task_list_filter(live):
     app, port = live
     from robotd.core.types import Exclusivity
 
-    t = app.kernel.new_task("speech.listen", Exclusivity.SOFT)
-    status, body, _ = call(port, "GET", "/v1/tasks?state=accepted")
+    t = app.tasks.submit("speech.listen", Exclusivity.SOFT)
+    status, body, _ = call(port, "GET", "/v1/tasks?state=running")
     assert status == 200
     assert any(x["task_id"] == t.task_id for x in body["tasks"])
 
@@ -239,8 +239,7 @@ def test_task_pause_and_resume_over_http(live):
     # 那样「没有第二个 task.started」的断言就退化成恒真（0 == 1 反而变成假失败）。
     events: list = []
     app.kernel.subscribe(["task.*"], events.append)
-    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
-    app.kernel.mark_running(task.task_id)
+    task = app.tasks.submit("robot.follow", Exclusivity.MOTION)
 
     status, body, _ = call(port, "POST", f"/v1/tasks/{task.task_id}/pause")
     assert status == 200, body
@@ -271,14 +270,12 @@ def test_task_pause_rejects_terminal_and_soft_tasks(live):
     app, port = live
     from robotd.core.types import Exclusivity, TaskState
 
-    soft = app.kernel.new_task("speech.listen", Exclusivity.SOFT)
-    app.kernel.mark_running(soft.task_id)
+    soft = app.tasks.submit("speech.listen", Exclusivity.SOFT)
     status, body, _ = call(port, "POST", f"/v1/tasks/{soft.task_id}/pause")
     assert status == 409 and body["error"]["code"] == "E_STATE"
 
-    done = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
-    app.kernel.mark_running(done.task_id)
-    app.kernel.finish(done.task_id, TaskState.COMPLETED)
+    done = app.tasks.submit("robot.follow", Exclusivity.MOTION)
+    app.tasks.finish(done.task_id, TaskState.COMPLETED)
     status, body, _ = call(port, "POST", f"/v1/tasks/{done.task_id}/pause")
     assert status == 409 and body["error"]["code"] == "E_STATE"
     status, body, _ = call(port, "POST", f"/v1/tasks/{done.task_id}/resume")
@@ -292,8 +289,7 @@ def test_task_pause_unknown_task_is_404_and_unknown_field_is_400(live):
     status, body, _ = call(port, "POST", "/v1/tasks/nope/pause")
     assert status == 404 and body["error"]["code"] == "E_NO_TASK"
 
-    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
-    app.kernel.mark_running(task.task_id)
+    task = app.tasks.submit("robot.follow", Exclusivity.MOTION)
     status, body, _ = call(port, "POST", f"/v1/tasks/{task.task_id}/pause", {"seconds": 5})
     assert status == 400 and body["error"]["code"] == "E_VALIDATION"
 
@@ -303,8 +299,7 @@ def test_stop_still_cancels_a_paused_task(live):
     app, port = live
     from robotd.core.types import Exclusivity
 
-    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
-    app.kernel.mark_running(task.task_id)
+    task = app.tasks.submit("robot.follow", Exclusivity.MOTION)
     status, body, _ = call(port, "POST", f"/v1/tasks/{task.task_id}/pause")
     assert status == 200 and body["state"] == "paused"
 
@@ -458,7 +453,7 @@ def test_stop_interrupts_announcement(live):
     assert cancelled[-1].payload["approval_id"] == "appr-4"
     assert cancelled[-1].payload["reason"] == "stop"
 
-    task = app.kernel.get_task(body["task_id"])
+    task = app.tasks.get(body["task_id"])
     assert task.state.value == "cancelled"
 
 
