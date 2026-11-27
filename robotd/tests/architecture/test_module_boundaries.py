@@ -150,17 +150,54 @@ def test_audio_runtime_reports_facts_through_a_completion_port():
 
 
 # ---------------------------------------------------------------- 设备构造
-def test_device_objects_are_constructed_only_by_the_composition_root():
-    constructors = {"SimBoard", "AudioBridge"}
+DEVICE_CONSTRUCTORS = {"SimBoard", "AudioBridge"}
+
+
+def _imported_module(node: ast.ImportFrom) -> str:
+    """绝对模块名；相对导入按 robotd 包根展开（``from .device.sim import ...``）。"""
+    if node.level:
+        return f"robotd.{node.module}" if node.module else "robotd"
+    return node.module or ""
+
+
+def _device_constructor_sites(root: Path) -> dict[str, set[str]]:
+    """构造 ``SimBoard`` / ``AudioBridge`` 的位置；``import X as Y`` 的别名同样算数。"""
     found: dict[str, set[str]] = {}
-    for path in sorted(SRC.rglob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        aliases: dict[str, str] = {}
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _dotted(node.func) in constructors:
-                found.setdefault(_dotted(node.func), set()).add(path.relative_to(SRC).as_posix())
+            if isinstance(node, ast.ImportFrom) and _imported_module(node).startswith("robotd.device"):
+                for alias in node.names:
+                    if alias.name in DEVICE_CONSTRUCTORS:
+                        aliases[alias.asname or alias.name] = alias.name
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _dotted(node.func)
+            canonical = aliases.get(name, name)
+            if canonical in DEVICE_CONSTRUCTORS:
+                found.setdefault(canonical, set()).add(path.relative_to(root).as_posix())
+    return found
+
+
+def test_device_objects_are_constructed_only_by_the_composition_root():
+    found = _device_constructor_sites(SRC)
     assert found, "扫描器没有找到任何设备构造，说明检查失效"
     for name, files in found.items():
         assert files <= {"app.py"}, f"{name} 只允许由 Composition Root 构造，实际：{files}"
+
+
+def test_device_constructor_scan_sees_aliased_imports(tmp_path):
+    """``from robotd.device.sim import SimBoard as SB`` 之后 ``SB()`` 也必须被抓到。"""
+    (tmp_path / "sneaky.py").write_text(
+        "from robotd.device.sim import SimBoard as SB\n\nboard = SB()\n", encoding="utf-8"
+    )
+    (tmp_path / "wired.py").write_text(
+        "from .device.audio_bridge import AudioBridge\n\nbridge = AudioBridge(path)\n", encoding="utf-8"
+    )
+    found = _device_constructor_sites(tmp_path)
+    assert found == {"SimBoard": {"sneaky.py"}, "AudioBridge": {"wired.py"}}, found
 
 
 def test_seam_modules_are_real_and_used():

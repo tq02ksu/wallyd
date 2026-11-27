@@ -132,6 +132,46 @@ def test_plain_import_of_a_submodule_is_caught(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "source, imported",
+    [
+        # ``import robotd`` 之后走属性链：AST 里没有 ImportFrom，但依赖真实存在。
+        (
+            "import robotd\n\n\ndef f():\n    return robotd.task.executive.TaskExecutive\n",
+            "robotd.task.executive",
+        ),
+        # 给包起别名同样能绕过根名检查。
+        (
+            "import robotd as r\n\n\ndef f():\n    return r.task.executive.TaskExecutive\n",
+            "robotd.task.executive",
+        ),
+    ],
+)
+def test_module_attribute_chain_is_caught(tmp_path, source, imported):
+    """``import robotd`` + ``robotd.task.x`` 不能绕过 ``device -> task``。"""
+    _write_tree(tmp_path, "task/__init__.py", "")
+    _write_tree(tmp_path, "task/executive.py", "")
+    _write_tree(tmp_path, "device/board.py", source)
+    violations = scan(tmp_path)
+    assert any(
+        v.importer == "robotd.device.board" and v.imported == imported and v.rule == "forbidden"
+        for v in violations
+    ), violations
+
+
+def test_module_name_in_a_string_is_not_a_dependency(tmp_path):
+    """日志名、错误文案里出现的 ``robotd.task`` 是字符串，不是 import，不能误报。"""
+    _write_tree(tmp_path, "task/__init__.py", "")
+    _write_tree(tmp_path, "device/board.py", 'import logging\n\nlog = logging.getLogger("robotd.task")\n')
+    assert scan(tmp_path) == []
+
+
+def test_attribute_on_the_package_itself_is_not_a_dependency(tmp_path):
+    """``robotd.__version__`` 不是一个模块依赖，不该被当成 ``robotd`` 违规。"""
+    _write_tree(tmp_path, "device/board.py", "import robotd\n\nVERSION = robotd.__version__\n")
+    assert scan(tmp_path) == []
+
+
+@pytest.mark.parametrize(
     "relative, importer, imported",
     [
         # 同一行的模块互不依赖：两个方向都必须变红。

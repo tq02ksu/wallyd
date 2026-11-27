@@ -92,11 +92,17 @@ def imported_modules(path: Path, module: str, known: set[str]) -> set[str]:
     因此把 ``node.module`` 与每个 alias 一起展开成候选绝对名（``*`` 除外），
     但只有扫描树里真实存在的模块才算数——``from mod import SomeClass`` 导入的是
     属性，不会变成一个幽灵子模块，也不会污染 allowlist 的精确匹配。
+
+    ``import robotd`` 后直接用属性访问（``robotd.task.executive``）同样是依赖，
+    但 AST 里没有 ``ImportFrom``；所以再解析一次属性链，取 ``known`` 里最长前缀。
+    字符串常量（``logging.getLogger("robotd.task")``）不是 import，不计入。
     """
     is_package = path.name == "__init__.py"
     base = module if is_package else module.rpartition(".")[0]
     found: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    aliases = _module_aliases(tree)
+    for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.level:
                 parts = base.split(".") if base else []
@@ -118,7 +124,53 @@ def imported_modules(path: Path, module: str, known: set[str]) -> set[str]:
                     found.add(candidate)
         elif isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Attribute):
+            # ``import robotd`` / ``import robotd as r`` 之后的 ``robotd.task.x``。
+            resolved = _attribute_module(_dotted(node), aliases, known)
+            if resolved is not None:
+                found.add(resolved)
     return {name for name in found if name == "robotd" or name.startswith("robotd.")}
+
+
+def _dotted(node: ast.AST) -> str:
+    """纯属性链的 ``a.b.c`` 形式；根不是名字时返回空串。"""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def _module_aliases(tree: ast.AST) -> dict[str, str]:
+    """``import robotd as r`` 的本地名 → 模块名。无别名的 import 不需要（名字不变）。"""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+    return aliases
+
+
+def _attribute_module(dotted: str, aliases: dict[str, str], known: set[str]) -> str | None:
+    """把属性链解析成真实模块（取最长已知前缀）；根不是 robotd 模块时返回 ``None``。"""
+    if not dotted:
+        return None
+    root, _, rest = dotted.partition(".")
+    base = aliases.get(root, root if root == "robotd" else None)
+    if base is None:
+        return None
+    full = f"{base}.{rest}" if rest else base
+    parts = full.split(".")
+    for end in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:end])
+        if candidate in known:
+            # ``robotd`` 本身不提供依赖方向（``robotd.__version__`` 不是模块依赖）。
+            return candidate if candidate != "robotd" else None
+    return None
 
 
 def _layer_entry(module: str) -> tuple[int, str] | None:
