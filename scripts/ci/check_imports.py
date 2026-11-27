@@ -3,12 +3,13 @@
 
 为什么不用 import-linter 本体：运行环境没有外网，``uv sync``/pip 装不了新依赖。
 这里只用标准库 AST，规则与 import-linter 的 ``layers`` + ``forbidden`` 同构，
+再加一条「同一行的模块互不依赖」（rule=``siblings``），
 并多一个 legacy allowlist：清单里的违规必须写明理由，且只能减不能增（棘轮由
 ``robotd/tests/architecture/test_import_contracts.py`` 锁死）。
 
 用法::
 
-    python3 scripts/ci/check-imports.py --root .
+    python3 scripts/ci/check_imports.py --root .
 
 退出码：0 = 通过；1 = 有未允许的违规，或 allowlist 里有已失效条目。
 """
@@ -22,7 +23,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-#: 分层（从上到下）。同一行的模块互不依赖；下层不得 import 上层。
+#: 分层（从上到下）。同一行的模块互不依赖（兄弟边也禁止）；下层不得 import 上层。
 LAYERS: tuple[tuple[str, ...], ...] = (
     ("robotd.api",),
     ("robotd.app",),
@@ -72,8 +73,26 @@ def module_name(path: Path, src: Path) -> str:
     return ".".join(parts)
 
 
-def imported_modules(path: Path, module: str) -> set[str]:
-    """该文件直接 import 的 robotd 模块（绝对名）。解析不了的目标跳过。"""
+def _known_modules(package: Path) -> set[str]:
+    """扫描树里真实存在的模块/包名（含隐式父包）。"""
+    src = package.parent
+    known: set[str] = set()
+    for path in package.rglob("*.py"):
+        parts = module_name(path, src).split(".")
+        for end in range(1, len(parts) + 1):
+            known.add(".".join(parts[:end]))
+    return known
+
+
+def imported_modules(path: Path, module: str, known: set[str]) -> set[str]:
+    """该文件直接 import 的 robotd 模块（绝对名）。解析不了的目标跳过。
+
+    ``from pkg import name`` 里 ``name`` 可能是子模块：只解析 ``node.module`` 会把
+    ``from robotd import task`` 误当成 ``robotd``，从而绕过 ``device -> task``。
+    因此把 ``node.module`` 与每个 alias 一起展开成候选绝对名（``*`` 除外），
+    但只有扫描树里真实存在的模块才算数——``from mod import SomeClass`` 导入的是
+    属性，不会变成一个幽灵子模块，也不会污染 allowlist 的精确匹配。
+    """
     is_package = path.name == "__init__.py"
     base = module if is_package else module.rpartition(".")[0]
     found: set[str] = set()
@@ -90,15 +109,24 @@ def imported_modules(path: Path, module: str) -> set[str]:
             target = ".".join(part for part in parts if part)
             if target:
                 found.add(target)
+            # alias 可能是子模块（``from robotd import task`` / ``from .. import task``）。
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                candidate = f"{target}.{alias.name}" if target else alias.name
+                if candidate in known:
+                    found.add(candidate)
         elif isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
     return {name for name in found if name == "robotd" or name.startswith("robotd.")}
 
 
-def _layer_of(module: str) -> int | None:
+def _layer_entry(module: str) -> tuple[int, str] | None:
+    """返回 ``(层序号, 该行里匹配到的模块前缀)``；未列入契约时返回 ``None``。"""
     for index, layer in enumerate(LAYERS):
-        if any(module == prefix or module.startswith(f"{prefix}.") for prefix in layer):
-            return index
+        for prefix in layer:
+            if module == prefix or module.startswith(f"{prefix}."):
+                return index, prefix
     return None
 
 
@@ -115,18 +143,23 @@ def scan(root: Path) -> list[Violation]:
     """扫描 ``<root>/robotd/src/robotd`` 的 import 图。"""
     src = root / "robotd" / "src"
     package = src / "robotd"
+    known = _known_modules(package)
     violations: list[Violation] = []
     for path in sorted(package.rglob("*.py")):
         importer = module_name(path, src)
-        for imported in sorted(imported_modules(path, importer)):
+        source = _layer_entry(importer)
+        for imported in sorted(imported_modules(path, importer, known)):
             forbidden = _forbidden_rule(importer, imported)
             if forbidden is not None:
                 violations.append(Violation(importer, imported, "forbidden", forbidden))
                 continue
-            source_layer = _layer_of(importer)
-            target_layer = _layer_of(imported)
-            if source_layer is None or target_layer is None:
+            if source is None:
                 continue  # 未列入契约的顶层模块（config/capabilities/...）不参与分层
+            target = _layer_entry(imported)
+            if target is None:
+                continue
+            source_layer, source_row = source
+            target_layer, target_row = target
             if source_layer > target_layer:
                 violations.append(
                     Violation(
@@ -134,6 +167,16 @@ def scan(root: Path) -> list[Violation]:
                         imported,
                         "layers",
                         f"{importer} 在下层，不得 import 上层的 {imported}",
+                    )
+                )
+            elif source_layer == target_layer and source_row != target_row:
+                # 同一行的模块互不依赖：motion 与 device 是并列资源，谁都不许 import 谁。
+                violations.append(
+                    Violation(
+                        importer,
+                        imported,
+                        "siblings",
+                        f"{importer} 与 {imported} 在同一层，模块之间不得互相 import",
                     )
                 )
     return violations
@@ -184,9 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
     allowlist_path = (
-        Path(args.allowlist).resolve()
-        if args.allowlist
-        else root / "robotd" / "architecture-allowlist.json"
+        Path(args.allowlist).resolve() if args.allowlist else root / "robotd" / "architecture-allowlist.json"
     )
     remaining, stale = check(root, allowlist_path)
     for violation in remaining:
@@ -197,7 +238,10 @@ def main(argv: list[str] | None = None) -> int:
             f"{entry['importer']} -> {entry['imported']}（{entry['rule']}）：已不是违规，请删除"
         )
     if remaining or stale:
-        print(f"import contract failed: {len(remaining)} new, {len(stale)} stale", file=sys.stderr)
+        print(
+            f"import contract failed: {len(remaining)} new, {len(stale)} stale",
+            file=sys.stderr,
+        )
         return 1
     print("import contract ok")
     return 0

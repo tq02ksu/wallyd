@@ -407,24 +407,32 @@ def test_pause_expiry_still_cancels_when_the_event_cannot_be_emitted(monkeypatch
     scheduler = FakeScheduler()
     audio = FakeAudio()
     app = make_app(audio=audio, scheduler=scheduler)
+    events = collect(app.kernel)
     task_id = make_motion_task(app.tasks)
     app.tasks.pause(task_id)
 
-    # 到期收尾是内核里的一次原子转移（检查 paused 与转终态同锁），
-    # 所以注入点在 ``_emit_locked``，不是 ``emit``。
-    real_emit = app.kernel._emit_locked
+    # GH-84：到期收尾改由 Task Executive 走 ``kernel.commit("task.pause_expired", ...)``，
+    # 所以故障注入必须落在真实的提交口上；只让这一条事件提交失败。
+    real_commit = app.kernel.commit
 
-    def flaky_emit(type_: str, payload: Any):
-        if type_ == "task.pause_expired":
+    def flaky_commit(event_type: str, plan: Any):
+        if event_type == "task.pause_expired":
             raise RuntimeError("event log unavailable")
-        return real_emit(type_, payload)
+        return real_commit(event_type, plan)
 
-    monkeypatch.setattr(app.kernel, "_emit_locked", flaky_emit)
+    monkeypatch.setattr(app.kernel, "commit", flaky_commit)
 
     scheduler.fire_all()
 
-    assert app.tasks.get(task_id).state is TaskState.CANCELLED
-    assert app.tasks.get(task_id).reason == "pause_timeout"
+    task = app.tasks.get(task_id)
+    assert task.state is TaskState.CANCELLED
+    assert task.reason == "pause_timeout"
+    # 证明注入确实生效：缺失的是 pause_expired 那条，收尾的 task.cancelled 仍在。
+    types = [ev.type for ev in events]
+    assert "task.pause_expired" not in types
+    assert types.count("task.cancelled") == 1
+    # 尽力播报仍然发生；事件没发出去不等于跳过播报。
+    assert audio.spoken == [PAUSE_EXPIRED_TEXT]
     app.shutdown()
 
 
