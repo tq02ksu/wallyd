@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..core.types import DeviceStatus, now_ms
+from ..interfaces.ports import TaskCompletionPort
 
 log = logging.getLogger("robotd.audio")
 
@@ -155,6 +156,7 @@ class AudioRuntime:
         auto_idle_timeout_ms: int = DEFAULT_AUTO_IDLE_TIMEOUT_MS,
         now: Callable[[], int] | None = None,
         schedule: Callable[[int, Callable[[], None]], Any] | None = None,
+        completion: TaskCompletionPort | None = None,
     ) -> None:
         self._emit = emit
         self._lock = threading.RLock()
@@ -184,9 +186,9 @@ class AudioRuntime:
         self.barge_in_erle_floor_db = float(barge_in_erle_floor_db)
         #: 哪几项门限被显式配置覆盖（``"margin"`` / ``"floor"``），用于状态回显。
         self.barge_in_erle_overridden = tuple(barge_in_erle_overridden)
-        #: 最近一次 utterance 的终态回调（由 app 注入，用于把任务表收尾）
-        self.on_utterance_done: Callable[[Utterance, str, str | None], None] | None = None
-        self.on_response_done: Callable[[Response, str], None] | None = None
+        #: 音频会话结束端口（由 Composition Root 注入 Task Executive）。
+        #: 音频层只报事实；任务该转成什么状态不由本层决定。
+        self.completion = completion
         #: 两轮之间的最小间隔（robotd 侧防抖），可注入小值 / 0 做反向验证。
         self.inter_utterance_ms = max(0, int(inter_utterance_ms))
         self.auto_idle_timeout_ms = max(0, int(auto_idle_timeout_ms))
@@ -474,8 +476,7 @@ class AudioRuntime:
                 "no_speech": False,
             },
         )
-        if self.on_utterance_done is not None:
-            self.on_utterance_done(utt, "cancelled", reason)
+        self._notify_utterance(utt, "cancelled", reason)
         self.emit_state()
 
     # ------------------------------------------------------------ 播报
@@ -507,9 +508,8 @@ class AudioRuntime:
         if in_flight is not None:
             # 这一轮不是「用户说完」，不产 final；桥稍后的 final 会因没有当前轮而被丢弃。
             bridge.send({"cmd": "stop", "reason": "speaking"}, best_effort=True)
-            if self.on_utterance_done is not None:
-                # api 轮若还挂着任务，必须在任务表收尾，不能让它停在 running。
-                self.on_utterance_done(in_flight, "cancelled", "speaking")
+            # api 轮若还挂着任务，必须在任务表收尾，不能让它停在 running。
+            self._notify_utterance(in_flight, "cancelled", "speaking")
         self.emit_state()
         return resp
 
@@ -577,8 +577,7 @@ class AudioRuntime:
             "speech.tts_cancelled",
             self._response_payload(resp, reason=reason, played=played, **self._count_extra(dropped, resp)),
         )
-        if self.on_response_done is not None:
-            self.on_response_done(resp, "cancelled")
+        self._notify_response(resp, "cancelled")
         self._after_response()
 
     def clear_response(self, resp: Response) -> None:
@@ -1014,8 +1013,7 @@ class AudioRuntime:
             if utt.silence_ms is not None:
                 idle_endpoint["silence_ms"] = utt.silence_ms
             self._emit("speech.endpoint", idle_endpoint)
-            if self.on_utterance_done is not None:
-                self.on_utterance_done(utt, "completed", None)
+            self._notify_utterance(utt, "completed", None)
             self._mark_round_end(thinking=False)
             return
         stop_reason = raw_stop_reason
@@ -1033,13 +1031,12 @@ class AudioRuntime:
                 "no_speech": no_speech,
             },
         )
-        if self.on_utterance_done is not None:
-            failed = stop_reason in {"engine_unavailable", "engine_error"}
-            if failed:
-                # 引擎不可用不会因重试自愈；停掉自动续听，等显式 listen 再恢复。
-                with self._lock:
-                    self._halted = True
-            self.on_utterance_done(utt, "failed" if failed else "completed", stop_reason if failed else None)
+        failed = stop_reason in {"engine_unavailable", "engine_error"}
+        if failed:
+            # 引擎不可用不会因重试自愈；停掉自动续听，等显式 listen 再恢复。
+            with self._lock:
+                self._halted = True
+        self._notify_utterance(utt, "failed" if failed else "completed", stop_reason if failed else None)
         self._mark_round_end(thinking=bool(text) and not no_speech)
 
     def _tts_started(self, ev: dict[str, Any]) -> None:
@@ -1110,8 +1107,7 @@ class AudioRuntime:
                 "speech.tts_finished",
                 self._response_payload(resp, chunks=chunks, played=played, **extra),
             )
-        if self.on_response_done is not None:
-            self.on_response_done(resp, "cancelled" if cancelled else "completed")
+        self._notify_response(resp, "cancelled" if cancelled else "completed")
         self._after_response()
 
     def _on_bridge_exit(self, reason: str) -> None:
@@ -1133,8 +1129,7 @@ class AudioRuntime:
                     "no_speech": False,
                 },
             )
-            if self.on_utterance_done is not None:
-                self.on_utterance_done(utt, "failed", "bridge_exit")
+            self._notify_utterance(utt, "failed", "bridge_exit")
         if resp is not None:
             played, dropped = self._settle_counts(resp)
             self._emit(
@@ -1146,9 +1141,18 @@ class AudioRuntime:
                     **self._count_extra(dropped, resp),
                 ),
             )
-            if self.on_response_done is not None:
-                self.on_response_done(resp, "failed")
+            self._notify_response(resp, "failed")
         self.emit_state()
+
+    # ------------------------------------------------------------ 完成端口
+    def _notify_utterance(self, utt: Utterance, outcome: str, reason: str | None) -> None:
+        """把「这一轮怎么结束的」交给端口；本层不决定任务状态。"""
+        if self.completion is not None:
+            self.completion.utterance_finished(utt.task_id, outcome, reason)
+
+    def _notify_response(self, resp: Response, outcome: str) -> None:
+        if self.completion is not None:
+            self.completion.response_finished(resp.task_id, outcome)
 
     @staticmethod
     def _response_payload(resp: Response, **extra: Any) -> dict[str, Any]:

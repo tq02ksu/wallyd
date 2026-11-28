@@ -44,7 +44,7 @@ from typing import Any, Callable
 
 from ..core.types import DeviceStatus
 
-log = logging.getLogger("robotd.devices.audio_bridge")
+log = logging.getLogger("robotd.device.audio_bridge")
 
 #: 桥自报就绪的超时。冷启动要初始化 AVAudioEngine + ASR 资产，实测 2~4s 量级。
 READY_TIMEOUT_S = 15.0

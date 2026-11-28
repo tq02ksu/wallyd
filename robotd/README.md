@@ -86,9 +86,13 @@ robotd/
   pyproject.toml
   src/robotd/
     __main__.py     # CLI：health / check-config / serve
-    app.py          # 装配、生命周期、依赖注入、信号关闭
+    app.py          # Composition Root：装配、生命周期、设备注入、信号关闭
     config.py       # 配置与启动校验（回环强制）
     capabilities.py # 能力注册表 + 审批门 + 未声明字段拒绝
+    interfaces/     # 端口协议（Clock / BoardPort / TaskCompletionPort / SystemAnnouncer）
+    task/           # Task Executive：RobotTask / ActionEpisode 状态转移
+    motion/         # Resource Arbiter：base_motion 与 soft 资源准入
+    safety/         # 停止原因/确认状态、停止编排、板侧停止上报
     api/
       http.py       # 公开 HTTP 路由（contracts/openapi.yaml 投影）
       ws.py         # WebSocket 握手与帧
@@ -96,16 +100,18 @@ robotd/
     core/
       errors.py     # 稳定错误码与 HTTP 映射（不把内部故障伪装成 400）
       types.py      # 公开 DTO / 内部记录 / payload 脱敏
-      state.py      # 权威状态 + derive_mode 唯一推导
-      kernel.py     # 事件归并、序号、保留日志、订阅、任务表
-      audio_runtime.py # 语音任务与音频桥事件
-    devices/
+      state.py      # 权威状态 + RobotTask/ActionEpisode 记录 + derive_mode 唯一推导
+      kernel.py     # 事件归并、原子提交、序号、保留日志、订阅、快照
+      audio_runtime.py # 音频事实与会话状态（任务收尾经完成端口交给 Task Executive）
+    device/
       audio_bridge.py  # 常驻音频桥适配（ADR-0011）
       sim.py           # 仿真板
+      calibration.py   # 标定读写（R11 之前只读为空）
   tests/
     unit/           # 配置、状态、内核、生命周期
     contract/       # Python 实现 ↔ 契约 一致性
     integration/    # 真监听回环端口的 HTTP/WS 测试
+    architecture/   # import 契约、legacy allowlist 棘轮、模块边界
 ```
 
 ## 待决策

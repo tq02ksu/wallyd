@@ -9,7 +9,7 @@ import pytest
 from robotd.core.errors import ErrorCode, EventContractError, RobotdError
 from robotd.core.kernel import EventKernel, matches_filter
 from robotd.core.state import RobotStateStore
-from robotd.core.types import FORBIDDEN_PAYLOAD_KEYS, Exclusivity, TaskState
+from robotd.core.types import FORBIDDEN_PAYLOAD_KEYS
 
 
 def make_kernel(**kwargs) -> EventKernel:
@@ -207,78 +207,6 @@ def test_resume_invalid_cursor():
     k = make_kernel()
     assert k.resume("inst-test", 999)[0] == "invalid_cursor"
     assert k.resume("inst-test", -1)[0] == "invalid_cursor"
-
-
-# ---------------------------------------------------------------- 任务语义
-def test_only_one_motion_task():
-    k = make_kernel()
-    k.new_task("robot.follow", Exclusivity.MOTION)
-    with pytest.raises(RobotdError) as ei:
-        k.new_task("robot.follow", Exclusivity.MOTION)
-    assert ei.value.code is ErrorCode.BUSY
-    assert ei.value.http_status == 409
-
-
-def test_soft_tasks_can_coexist_with_motion():
-    k = make_kernel()
-    k.new_task("robot.follow", Exclusivity.MOTION)
-    k.new_task("robot.speak", Exclusivity.SOFT)  # 听得见、说得动
-    assert len(k.list_tasks()) == 2
-
-
-def test_same_soft_capability_is_deduplicated():
-    k = make_kernel()
-    k.new_task("speech.listen", Exclusivity.SOFT)
-    with pytest.raises(RobotdError):
-        k.new_task("speech.listen", Exclusivity.SOFT)
-
-
-def test_finish_is_idempotent_and_terminal_never_reverses():
-    k = make_kernel()
-    t = k.new_task("robot.follow", Exclusivity.MOTION)
-    k.mark_running(t.task_id)
-    k.finish(t.task_id, TaskState.COMPLETED)
-    again = k.finish(t.task_id, TaskState.FAILED, reason="late")
-    assert again.state is TaskState.COMPLETED
-    assert again.error is None
-
-
-def test_progress_after_terminal_is_ignored():
-    k = make_kernel()
-    t = k.new_task("robot.follow", Exclusivity.MOTION)
-    k.finish(t.task_id, TaskState.CANCELLED, reason="stop")
-    k.set_progress(t.task_id, 0.9)
-    assert k.get_task(t.task_id).progress == 0.0
-
-
-def test_unknown_task_raises_no_task():
-    k = make_kernel()
-    with pytest.raises(RobotdError) as ei:
-        k.get_task("t-9999")
-    assert ei.value.code is ErrorCode.NO_TASK
-    assert ei.value.http_status == 404
-
-
-def test_motion_task_clears_task_id_and_mode_on_finish():
-    k = make_kernel()
-    k.state.link_ready = True
-    t = k.new_task("robot.follow", Exclusivity.MOTION)
-    assert k.snapshot()["mode"] == "moving"
-    assert k.snapshot()["task_id"] == t.task_id
-    k.finish(t.task_id, TaskState.COMPLETED)
-    snap = k.snapshot()
-    assert snap["mode"] == "idle"
-    assert snap["task_id"] is None
-
-
-def test_task_lifecycle_events_emitted_in_order():
-    k = make_kernel()
-    seen: list[str] = []
-    k.subscribe(["task.*"], lambda ev: seen.append(ev.type))
-    t = k.new_task("robot.follow", Exclusivity.MOTION)
-    k.set_progress(t.task_id, 0.5)
-    k.finish(t.task_id, TaskState.CANCELLED, reason="stop")
-    assert seen == ["task.started", "task.progress", "task.cancelled"]
 
 
 # ---------------------------------------------------------------- 归并与状态

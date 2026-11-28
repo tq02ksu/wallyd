@@ -96,10 +96,11 @@ class TaskError:
 
 
 @dataclass
-class Task:
-    """任务记录。
+class RobotTask:
+    """任务记录（State Store 的权威记录之一）。
 
-    ``accepted`` 阶段存在但极短：受理即返回 ``task_id``，随后在同一归并路径里转 ``running``。
+    受理即在同一次 ``task.started`` 提交里落成 ``running``；``ACCEPTED`` 仍保留在枚举里
+    以兼容契约取值，但 M0 不再有「受理后不发事件地改成 running」的第二写入点。
     终态不可再转移（``finish()`` 幂等，重复调用只保留第一次）。
     """
 
@@ -119,6 +120,8 @@ class Task:
     _t0_mono_ns: int = field(default_factory=time.monotonic_ns, repr=False)
     #: 内部：本次暂停开始的单调时钟；用于 ``task.resumed.paused_ms``，不进公开 DTO
     _paused_at_mono_ns: int | None = field(default=None, repr=False)
+    #: 内部：本任务唯一动作回合的 id（M0 一个任务执行一个动作）；不进公开 DTO
+    episode_id: str = field(default="", repr=False)
 
     @property
     def terminal(self) -> bool:
@@ -142,6 +145,37 @@ class Task:
         if self.state is TaskState.PAUSED:
             out["pause_expires_at"] = self.pause_expires_at
         return out
+
+
+#: 兼容旧导入名；权威类型名是 ``RobotTask``。
+Task = RobotTask
+
+
+@dataclass
+class ActionEpisode:
+    """一次动作回合的权威记录。
+
+    M0 的一个 RobotTask 只执行一个动作（`capability`），因此受理时同时开一条
+    episode，任务转终态时在同一把锁里收尾。它不是公开 DTO：对外仍只看 RobotTask。
+    `outcome` 取终态取值（completed / failed / cancelled），未知就是 None。
+    """
+
+    episode_id: str
+    task_id: str
+    action: str
+    started_at: int = field(default_factory=now_ms)
+    finished_at: int | None = None
+    outcome: str | None = None
+    reason: str | None = None
+
+    @property
+    def open(self) -> bool:
+        return self.finished_at is None
+
+    def close(self, outcome: str, reason: str | None = None) -> None:
+        self.finished_at = now_ms()
+        self.outcome = outcome
+        self.reason = reason
 
 
 @dataclass(frozen=True)

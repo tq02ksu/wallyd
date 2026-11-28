@@ -27,7 +27,7 @@ from typing import Any, Callable
 
 from ..core.errors import ErrorCode, RobotdError
 
-log = logging.getLogger("robotd.devices.sim")
+log = logging.getLogger("robotd.device.sim")
 
 
 class SimFault(str, Enum):

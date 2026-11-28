@@ -6,6 +6,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT/robotd"
 
+printf '[robotd] import contracts\n'
+# GH-84：import-linter 的离线等价门禁（分层 + 禁用边 + legacy allowlist ratchet）。
+# 故意写错依赖方向时这里必须先红，不要等到运行时才炸。
+uv run --locked python ../scripts/ci/check_imports.py --root ..
+
 printf '[robotd] ruff format\n'
 uv run --locked ruff format --check src tests
 

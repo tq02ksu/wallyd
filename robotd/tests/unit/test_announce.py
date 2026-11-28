@@ -180,7 +180,7 @@ def test_stop_interrupts_announcement_and_cancels_task():
     result = _h_announce(ctx(app, valid_body()))
     speak = [c for c in bridge.sent if c.get("cmd") == "speak"][-1]
 
-    app.request_stop(reason="user")
+    app.safety.request_stop(reason="user")
 
     assert any(c.get("cmd") == "stop_speak" for c in bridge.sent)
     cancelled = [e for e in app.kernel.recent_events(30) if e.type == "speech.tts_cancelled"]
@@ -188,7 +188,7 @@ def test_stop_interrupts_announcement_and_cancels_task():
     assert cancelled[-1].payload["response_id"] == speak["response_id"]
     assert cancelled[-1].payload["approval_id"] == "appr-1"
     assert cancelled[-1].payload["reason"] == "stop"
-    assert app.kernel.get_task(result["task_id"]).state.value == "cancelled"
+    assert app.tasks.get(result["task_id"]).state.value == "cancelled"
 
 
 def test_announce_completion_event_only_after_bridge_finishes():

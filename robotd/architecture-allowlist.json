@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "comment": "Legacy import violations, grandfathered at GH-84. Entries may only be deleted, never added: robotd/tests/architecture/test_import_contracts.py pins this list to an empty baseline and fails on any new entry or stale entry.",
+  "entries": []
+}

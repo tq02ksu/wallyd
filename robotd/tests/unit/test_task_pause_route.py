@@ -55,8 +55,7 @@ def call(app: App, handler, task_id: str, body: dict | None = None) -> dict:
 
 
 def motion_task(app: App) -> str:
-    task = app.kernel.new_task("robot.follow", Exclusivity.MOTION)
-    app.kernel.mark_running(task.task_id)
+    task = app.tasks.submit("robot.follow", Exclusivity.MOTION)
     return task.task_id
 
 
@@ -80,7 +79,7 @@ def test_pause_then_resume_through_handlers():
     resumed = call(app, _h_task_resume, task_id)
     assert resumed["task_id"] == task_id
     assert resumed["state"] == "running"
-    assert [t.task_id for t in app.kernel.list_tasks()] == [task_id]
+    assert [t.task_id for t in app.tasks.list()] == [task_id]
     app.shutdown()
 
 
@@ -96,7 +95,7 @@ def test_pause_rejects_unknown_body_fields():
 def test_pause_terminal_task_is_state_conflict():
     app = make_app()
     task_id = motion_task(app)
-    app.kernel.finish(task_id, TaskState.COMPLETED)
+    app.tasks.finish(task_id, TaskState.COMPLETED)
     with pytest.raises(RobotdError) as err:
         call(app, _h_task_pause, task_id)
     assert err.value.code is ErrorCode.STATE
@@ -119,5 +118,5 @@ def test_stop_handler_cancels_paused_task():
     )
     _h_stop(ctx)
 
-    assert app.kernel.get_task(task_id).state is TaskState.CANCELLED
+    assert app.tasks.get(task_id).state is TaskState.CANCELLED
     app.shutdown()

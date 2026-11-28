@@ -1,5 +1,9 @@
 """权威状态持有与派生。
 
+权威记录有三类：RobotState（公开快照的来源）、RobotTask 与 ActionEpisode
+（公开 DTO 不暴露，但任务与动作回合的权威副本在这里）。Task Executive 在
+``_stage()`` 的工作副本上改写它们，EventKernel 在提交时整体发布。
+
 **唯一写入方式**：``RobotStateStore`` 的 ``apply_*`` 方法由 ``EventKernel`` 调用。
 对外只暴露 ``snapshot()``，返回不可变副本。
 
@@ -19,7 +23,10 @@ import copy
 from dataclasses import dataclass, field, fields
 from typing import Any, Mapping
 
-from .types import DeviceStatus, Pose, RobotMode, now_ms
+from .types import ActionEpisode, DeviceStatus, Pose, RobotMode, RobotTask, TaskState, now_ms
+
+#: 基础运动这一逻辑资源的名字。谁持有它，谁就是 ``state.task_id`` 指向的任务。
+BASE_MOTION = "base_motion"
 
 
 class StateRejection(Exception):
@@ -115,6 +122,16 @@ class RobotStateStore:
 
     firmware: str | None = None
     task_id: str | None = None
+
+    # ------------------------------------------------------------ 权威任务记录
+    #: 任务与动作回合是权威记录（不是投影）：Task Executive 在同一把锁里改写，
+    #: 由内核在提交时整体发布。它们不进公开快照。
+    tasks: dict[str, RobotTask] = field(default_factory=dict)
+    episodes: dict[str, ActionEpisode] = field(default_factory=dict)
+    #: 逻辑资源 → 持有者 task_id（M0：``base_motion`` 与 ``soft:<capability>``）。
+    resources: dict[str, str] = field(default_factory=dict)
+    next_task_seq: int = 0
+
     ts: int = 0
     event_seq: int = 0
     version: int = 1
@@ -123,9 +140,32 @@ class RobotStateStore:
     link_ready: bool = False
 
     # ------------------------------------------------------------ 派生
-    def recompute_mode(self, *, has_motion_task: bool) -> RobotMode:
+    def motion_task(self) -> RobotTask | None:
+        owner = self.resources.get(BASE_MOTION)
+        return self.tasks.get(owner) if owner else None
+
+    def has_active_motion(self) -> bool:
+        """是否真有排他运动任务在驱动运动。
+
+        ``paused`` 仍占运动槽位（新运动任务照样 409），但它不产生 ``mode: moving``：
+        ``mode`` 表示身体在不在动，任务粒度由 ``RobotTask.state`` 表达（GH-48 D3）。
+        """
+        task = self.motion_task()
+        return task is not None and not task.terminal and task.state is not TaskState.PAUSED
+
+    def recompute_mode(self, *, has_motion_task: bool | None = None) -> RobotMode:
+        if has_motion_task is None:
+            has_motion_task = self.has_active_motion()
         self.mode = derive_mode(link_ready=self.link_ready, has_motion_task=has_motion_task)
         return self.mode
+
+    def project_tasks(self) -> None:
+        """把权威任务记录投影成公开状态字段（``task_id`` / ``mode``）。
+
+        只在任务或资源记录改变后的同一个提交里调用一次，避免各处各写一份推导。
+        """
+        self.task_id = self.resources.get(BASE_MOTION)
+        self.recompute_mode()
 
     # ------------------------------------------------------------ 快照
     def snapshot(self, *, event_seq: int | None = None, ts: int | None = None) -> dict[str, Any]:

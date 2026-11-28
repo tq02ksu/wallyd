@@ -31,6 +31,20 @@ class FakeBridge:
         self.sent.append(cmd)
 
 
+class RecordingCompletion:
+    """``TaskCompletionPort`` 的替身：只记录音频层报告了什么事实。"""
+
+    def __init__(self) -> None:
+        self.utterances: list[tuple[str | None, str, str | None]] = []
+        self.responses: list[tuple[str | None, str]] = []
+
+    def utterance_finished(self, task_id: str | None, outcome: str, reason: str | None) -> None:
+        self.utterances.append((task_id, outcome, reason))
+
+    def response_finished(self, task_id: str | None, outcome: str) -> None:
+        self.responses.append((task_id, outcome))
+
+
 def make_runtime(**kwargs) -> tuple[AudioRuntime, list[tuple[str, dict]]]:
     emitted: list[tuple[str, dict]] = []
     rt = AudioRuntime(emit=lambda t, p: emitted.append((t, p)), **kwargs)
@@ -221,9 +235,8 @@ def test_explicit_listen_reuses_in_flight_auto_utterance():
 
 def test_engine_unavailable_is_a_failure_not_no_speech():
     """sherpa not-implemented 必须显式失败，不能被空文本重判成「用户没说话」。"""
-    rt, emitted = make_runtime()
-    done: list[tuple[str, str | None]] = []
-    rt.on_utterance_done = lambda _utt, outcome, reason: done.append((outcome, reason))
+    completion = RecordingCompletion()
+    rt, emitted = make_runtime(completion=completion)
     rt.new_utterance(task_id="t-engine")
 
     rt.handle_bridge_event(
@@ -240,7 +253,7 @@ def test_engine_unavailable_is_a_failure_not_no_speech():
     final = [p for t, p in emitted if t == "speech.final"][-1]
     assert final["no_speech"] is False
     assert final["stop_reason"] == "engine_unavailable"
-    assert done == [("failed", "engine_unavailable")]
+    assert completion.utterances == [("t-engine", "failed", "engine_unavailable")]
 
 
 # ---------------------------------------------------------------- 播报期 VAD 门控（GH-5 / V02）
@@ -280,9 +293,8 @@ def gates(emitted: list[tuple[str, dict]]) -> list[dict]:
 
 def test_barge_in_passes_when_user_speech_exceeds_threshold():
     """A1：播报中用户开口（门限以上、ERLE 新鲜）→ gate pass + 立即停播。"""
-    rt, emitted = make_runtime()
-    done: list[str] = []
-    rt.on_response_done = lambda _resp, outcome: done.append(outcome)
+    completion = RecordingCompletion()
+    rt, emitted = make_runtime(completion=completion)
     calibrate(rt)
     start_speaking(rt)
     probe_erle(rt, erle=32.0, render=-10.0)
@@ -311,7 +323,7 @@ def test_barge_in_passes_when_user_speech_exceeds_threshold():
     assert len(cancelled) == 1
     assert cancelled[0]["reason"] == "barge_in"
     assert rt.response is None
-    assert done == ["cancelled"]
+    assert completion.responses == [("t-barge", "cancelled")]
     assert [c for c in rt.bridge.sent if c.get("cmd") == "stop_speak"]
 
 
