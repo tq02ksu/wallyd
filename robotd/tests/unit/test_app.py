@@ -116,10 +116,11 @@ def test_unimplemented_capabilities_report_unavailable():
 
 
 def test_every_public_operation_has_a_capability_entry():
-    """契约里的 14 个 HTTP operationId + WS 的 events_subscribe 都必须能在能力表里找到。
+    """契约里的每个 HTTP operationId + WS 的 events_subscribe 都必须能在能力表里找到。
 
     缺条目会退化成 404（「好像没这个功能」），而目标行为是 503 + 明确原因。
     `events_subscribe` 不进 MCP 工具面（`x-websocket`），但仍是一项公开操作。
+    GH-85 的 `task_submit` 也在此列：契约先行，能力标 UNIMPLEMENTED 并返回 503。
     """
     registry = Registry()
     public = {c.public_name for c in registry.all() if c.public_name}
@@ -142,6 +143,7 @@ def test_every_public_operation_has_a_capability_entry():
         "task_cancel",
         "task_pause",
         "task_resume",
+        "task_submit",
         "events_subscribe",
     }
     assert expected == public

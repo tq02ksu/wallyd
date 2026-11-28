@@ -224,6 +224,9 @@ const eventIndex = {
   envelope: events.envelope,
   filter_semantics: events.filter_semantics,
   retention: events.retention,
+  // GH-85：停止确认语义（write_success_is / confirmed_requires / unaddressed_stop）
+  // 必须进入生成物，Python 门禁读生成物而不是源码。
+  ...(events.stop_confirmation ? { stop_confirmation: events.stop_confirmation } : {}),
   // 订阅白名单：每个类别的 prefix.* + 通配，供 WS hello 的 supported_event_types 使用
   supported_event_types: [
     ...new Set((events.events ?? []).map((e) => `${e.type.split('.')[0]}.*`)),

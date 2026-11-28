@@ -48,6 +48,21 @@ cancelTask(task_id)
 Complete architecture and ADR-0014/0016/0019 live in
 [`projects/wallyd`](https://github.com/tq02ksu/persona/tree/main/projects/wallyd/design).
 
+The machine-readable `submitTask` contract is `POST /v1/tasks` (`task_submit`). It
+accepts only SI-named fields: `distance_m` (metres) and optional `speed_mps`
+(metres/second); the unitless `distance` field is rejected. HTTP 200 returns a
+`TaskHandle` containing only `task_id`; it means accepted, not started and not
+at the goal. `Task.episode` projects the ActionEpisode and `Task.result` carries
+`TaskResult {lifecycle, goal_achieved, evidence}`. `TaskResult` policy
+(`x-task-result-policy`) requires `sensor_verified` evidence before
+`goal_achieved` may be `true`; a `motion.done` board report yields
+`{lifecycle: completed, goal_achieved: null, evidence: board_reported}`.
+`contracts/events.json.stop_confirmation` defines stop confirmation: serial write
+success is at most `requested`, and a stop without a request id can never become
+`confirmed`. The `task_submit` route is contract-first and returns
+`503/E_UNAVAILABLE` until Task Executive lands in #86; it is excluded from the
+curated Codex tool surface with `x-mcp-exclude`.
+
 No new API is considered available until the owning machine-readable contract,
 the curated agent tool schema (when exposed to Codex), implementation behavior,
 events, and generated types agree.

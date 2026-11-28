@@ -16,6 +16,22 @@
     "log_max": 1000,
     "note": "有限内存日志，尽力而为补发；不是持久事件存储。cursor 早于窗口 → resync_required/cursor_expired。"
   },
+  "stop_confirmation": {
+    "states": ["requested", "confirmed", "unknown"],
+    "confirmed_requires": "board_stop_reply_with_matching_request_id",
+    "write_success_is": "requested",
+    "unaddressed_stop": {
+      "request_has_id": false,
+      "max_state": "unknown",
+      "allowed_states": ["requested", "unknown"],
+      "note": "没有 id 的串口 stop 没有可匹配的板侧应答：写成功只能证明字节发出，状态上限是 unknown，不得报 confirmed。"
+    },
+    "notes": [
+      "confirmed 只表示「带同一 request id 的板侧 stop 应答到了」，仍不是物理静止证明。",
+      "requested/confirmed/unknown 与 safety.stop_requested.state、POST /v1/robot/stop 响应的 state 枚举同源。",
+      "本块是唯一机器可读的确认语义；实现与测试不得各自解释串口写成功。"
+    ]
+  },
   "events": [
     {
       "type": "task.started",
@@ -23,6 +39,7 @@
       "no_state": true,
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode（GH-86 起随任务受理产生；当前实现尚未产出，故暂为可选）。"},
         "capability": {"type": "string", "required": true},
         "exclusivity": {"type": "string", "enum": ["motion", "soft"], "required": true}
       }
@@ -33,6 +50,7 @@
       "no_state": true,
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode；当前实现尚未产出。"},
         "progress": {"type": "number", "minimum": 0, "maximum": 1, "required": true}
       }
     },
@@ -42,8 +60,10 @@
       "no_state": true,
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode；终态不因此自动推出 goal_achieved。"},
         "capability": {"type": "string", "required": true}
-      }
+      },
+      "notes": "只表示任务生命周期完成；不表示物理到位或目标达成。达成结论只在 TaskResult 里，且需要 sensor_verified 证据。"
     },
     {
       "type": "task.failed",
@@ -51,6 +71,7 @@
       "no_state": true,
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode；当前实现尚未产出。"},
         "capability": {"type": "string", "required": true},
         "error": {"type": "object", "required": true, "$ref": "TaskError"},
         "reason": {
@@ -66,6 +87,7 @@
       "no_state": true,
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode；当前实现尚未产出。"},
         "capability": {"type": "string", "required": true},
         "reason": {
           "type": "string",
@@ -81,6 +103,7 @@
       "no_state": true,
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode；当前实现尚未产出。"},
         "capability": {"type": "string", "required": true},
         "pause_expires_at": {
           "type": "integer",
@@ -96,6 +119,7 @@
       "no_state": true,
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode；当前实现尚未产出。"},
         "capability": {"type": "string", "required": true},
         "paused_ms": {"type": "integer", "required": true, "notes": "本次暂停持续时长（毫秒）。"}
       },
@@ -107,6 +131,7 @@
       "no_state": true,
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode；当前实现尚未产出。"},
         "announced": {
           "type": "boolean",
           "required": true,
@@ -120,12 +145,58 @@
       "category": "motion",
       "payload": {
         "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": false, "notes": "对应的 ActionEpisode；当前实现尚未产出。"},
         "left_steps": {"type": "integer", "required": true},
         "right_steps": {"type": "integer", "required": true},
         "eta_ms": {"type": "integer", "required": false},
         "note": {"type": "string", "required": false}
       },
       "notes": "计划摘要，不代表已到位；应发步数不是实际位移证明。"
+    },
+    {
+      "type": "motion.done",
+      "category": "motion",
+      "no_state": true,
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": true, "notes": "被收尾的 ActionEpisode。"},
+        "action": {"type": "string", "required": true, "enum": ["move_distance"], "notes": "动作名，不是板侧 op 名。"},
+        "evidence": {
+          "type": "string",
+          "required": true,
+          "enum": ["board_reported"],
+          "notes": "只证明板侧报告动作结束；不是实际位移、也不是物理达成。"
+        },
+        "reported_steps": {
+          "type": "integer",
+          "required": false,
+          "notes": "板侧回报的步数（open-loop 事实）；不能换算成「已到位」。"
+        }
+      },
+      "notes": "动作结束事实，不是成功证明。**不得携带 goal_achieved**：TaskResult 从本事件最多得到 {lifecycle: completed, goal_achieved: null, evidence: board_reported}；只有可观测传感器证据才能把 goal_achieved 评为 true。GH-86 接入 Task Executive 后移除 no_state 并加 _reduce 分支。"
+    },
+    {
+      "type": "motion.aborted",
+      "category": "motion",
+      "no_state": true,
+      "payload": {
+        "task_id": {"type": "string", "required": true},
+        "episode_id": {"type": "string", "required": true, "notes": "被中止的 ActionEpisode。"},
+        "action": {"type": "string", "required": true, "enum": ["move_distance"], "notes": "动作名，不是板侧 op 名。"},
+        "reason": {
+          "type": "string",
+          "required": true,
+          "enum": ["stop", "board_abort", "link_lost", "timeout", "fault", "internal"],
+          "notes": "动作被中止的稳定原因码；与 task.failed/cancelled 的 reason 不是同一套字段。"
+        },
+        "evidence": {
+          "type": "string",
+          "required": true,
+          "enum": ["board_reported", "unknown"],
+          "notes": "board_reported = 板侧报告中止；unknown = 没有可匹配的板侧事实（例如断链），不得升级成完成或达成。"
+        }
+      },
+      "notes": "动作被中止。它收尾 ActionEpisode，但**不证明物理已停稳**（停止证明见 safety.stop_requested 的 state）。同样不得携带 goal_achieved；GH-86 接入后移除 no_state。"
     },
     {
       "type": "safety.stopped",
@@ -137,7 +208,8 @@
           "enum": ["stop", "watchdog", "watchdog_release", "task_cancel", "task_pause", "link_lost", "startup"]
         },
         "source": {"type": "string", "required": true, "enum": ["host", "board"]},
-        "task_id": {"type": "string", "required": false}
+        "task_id": {"type": "string", "required": false},
+        "episode_id": {"type": "string", "required": false, "notes": "被停止的 ActionEpisode（若有运动回合被打断）；用于把安全停止关联回动作回合。"}
       },
       "notes": "只表示停止动作已发生，不表示物理静止（板侧应答 ≠ 物理静止证明）。"
     },
@@ -173,6 +245,11 @@
           "type": "string",
           "required": false,
           "notes": "被停止的运动任务（若本次停止确实终止了一个运动任务）；agentd 用它把安全停止关联回发起该任务的 run。"
+        },
+        "episode_id": {
+          "type": "string",
+          "required": false,
+          "notes": "被打断的 ActionEpisode（若有）；与 motion.aborted / task.cancelled 共同构成动作回合的时间线。"
         },
         "run_id": {
           "type": "string",
@@ -531,6 +608,8 @@
     "为什么单独一份 JSON 而不是塞进 OpenAPI：OpenAPI 3.0 的 oneOf + discriminator 无法表达『type 取值决定 payload 形状』这一组 20+ 变体，塞进去会让 schema 比散文更难读。独立登记表仍可被 generate.mjs 校验与生成。",
     "登记表与 openapi.yaml 的 components.schemas 共用 envelope：WsEvent。两份文件的 version 必须一致。",
     "新增事件时必须同时改本文件与 docs/spec/robotd-interface-contract.md §6.2 的类别表。",
-    "每条事件必须二选一：在 robotd/src/robotd/core/kernel.py 的 _reduce 有显式分支（改状态），或标 no_state: true（合法但只记日志）。robotd/tests/contract/test_event_registry.py 双向校验；未登记的事件名在分配序号前即被拒绝。"
+    "每条事件必须二选一：在 robotd/src/robotd/core/kernel.py 的 _reduce 有显式分支（改状态），或标 no_state: true（合法但只记日志）。robotd/tests/contract/test_event_registry.py 双向校验；未登记的事件名在分配序号前即被拒绝。",
+    "GH-85：motion.done / motion.aborted 现在标 no_state（契约先行，Task Executive 在 #86 接入后移除并加 _reduce 分支）。事件只表达动作回合事实；**任何事件都不携带 goal_achieved**，达成结论只在 TaskResult 里，且需要 sensor_verified 证据。",
+    "GH-85：stop_confirmation 是停止确认语义的唯一机器可读来源；无 id 的串口 stop 写成功不得升级为 confirmed。"
   ]
 }

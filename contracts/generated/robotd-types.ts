@@ -260,7 +260,32 @@ export interface paths {
          */
         get: operations["task_list"];
         put?: never;
-        post?: never;
+        /**
+         * 提交任务（M0 仅 move_distance）并返回 TaskHandle
+         * @description 语义化任务入口，对应 canonical `submitTask(goal) -> TaskHandle`；**不是**
+         *     `robot_move` 设备原语。只接受显式 SI 参数：`distance_m`（米）与可选
+         *     `speed_mps`（米/秒）。**没有无单位的 `distance`**：写了会被
+         *     `additionalProperties: false` 拒绝（400/E_VALIDATION）。
+         *
+         *     分账规则（ADR-0014）：
+         *
+         *     - `200` 只表示任务已受理并返回 `task_id`（`TaskHandle` 只是引用）；
+         *       不代表已开始运动，更不代表到位。
+         *     - 进度/状态读 `GET /v1/tasks/{task_id}` 与 `task.*` 事件；终态的目标达成看
+         *       `Task.result`（`TaskResult`）。`lifecycle`、`goal_achieved`、`evidence`
+         *       三者分开：开环移动即使收到 `motion.done` 也只能得到
+         *       `evidence: board_reported`，`goal_achieved` 必须为 null；只有可观测传感器
+         *       证据才能给出 true（见 `TaskResult.x-task-result-policy`）。
+         *     - 幂等：同一 `Idempotency-Key` 在进程内重复提交且参数一致时返回同一个
+         *       `task_id`，不新建任务、不发第二个 `task.started`；同 key 不同参数
+         *       → `409/E_STATE`。省略该头则不承诺去重。
+         *     - 资源占用 → `409/E_BUSY`；Task Executive 未就绪 → `503/E_UNAVAILABLE`；
+         *       板侧链路不可用 → `503/E_LINK`。都不排队、不伪造受理。
+         *
+         *     **当前状态（GH-85）**：契约先行，路由已声明但能力未实现，显式返回
+         *     `503/E_UNAVAILABLE`；不得据此认为任务已创建。
+         */
+        post: operations["task_submit"];
         delete?: never;
         options?: never;
         head?: never;
@@ -760,12 +785,70 @@ export interface components {
             warnings?: string[];
         };
         /**
+         * @description 任务引用。**只有标识**：没有进度、状态、`goal_achieved` 或 `evidence`。
+         *     `submitTask` 的 200 响应就是它；HTTP 200 只表示已受理。
+         *     读投影用 `GET /v1/tasks/{task_id}`，进度/事件用 `task.*`。
+         */
+        TaskHandle: {
+            task_id: string;
+        };
+        /**
+         * @description 反馈投影（不是权威记录）：`task.*` 事件与查询快照共用的最小形状。
+         *     反馈里的 `state` 是任务生命周期状态，不是 `TaskResult.lifecycle`，
+         *     也不携带 `goal_achieved`/`evidence`——那两项只在终态 `Task.result` 里。
+         */
+        TaskFeedback: {
+            task_id: string;
+            /** @description 对应的 ActionEpisode；当前实现暂未产生，故不设为必填。 */
+            episode_id?: string;
+            state: components["schemas"]["TaskState"];
+            /** @description 0–1；未知进度时保持 0，不得编造。 */
+            progress: number;
+            /** @description 投影时间，Unix epoch 毫秒；省略时以事件封套 timestamp 为准。 */
+            at?: number;
+        };
+        /**
+         * @description 任务提交请求，按 `action` 判别。M0 只有 `move_distance`。
+         *     单位是契约的一部分：距离必须是 `distance_m`（米），速度必须是 `speed_mps`
+         *     （米/秒）。**不存在无单位的 `distance`**；各变体都是
+         *     `additionalProperties: false`，写了未声明字段（包括 `distance`）直接拒绝。
+         */
+        TaskSubmitRequest: components["schemas"]["MoveDistanceRequest"];
+        /**
+         * @description 直线位移动作。`distance_m` 为相对当前朝向的位移（正=前进，负=后退），
+         *     不是板侧步数。板侧单位换算由 Device Adapter 负责（#89）。
+         *     范围取文档化的台面手动驾驶步长：|distance_m| ∈ [0.05, 0.3] 米且不等于 0；
+         *     JSON Schema 3.0 无法表达「区间内非零」，所以额外用 `x-nonzero` /
+         *     `x-min-abs` 声明，由契约测试与 Runtime Guard（#87）执行。
+         */
+        MoveDistanceRequest: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            action: "move_distance";
+            /**
+             * Format: double
+             * @description 位移，米（SI）。不允许无单位字段。
+             */
+            distance_m: number;
+            /**
+             * Format: double
+             * @description 速度，米/秒（SI）；上限是安全边界，实现不得自行放宽。
+             * @default 0.15
+             */
+            speed_mps?: number;
+        };
+        /**
          * @description 任务生命周期：`accepted → running → completed | failed | cancelled`，
          *     以及 `running → paused → running | cancelled | failed`。
          *     `paused` **不是终态**：任务不终结、`finished_at` 仍为 null，只是运动速度归零；
          *     `pause`/`resume` 只对运动任务有效，恢复时不需要重新签发审批凭据
          *     （没有改变任何被确认过的参数）。
          *     终态不可再转移；任务仅在当前进程生命周期内可查询（不持久化）。
+         *     本 schema 是 `TaskFeedback` 的超集：反馈只投影 `task_id`/`episode_id`/`state`/
+         *     `progress`/`at`；查询投影另含能力、终态时间、`episode` 与 `result`。
+         *     `episode` 与 `result` 非终态时省略；`goal_achieved`/`evidence` 只出现在 `result` 里。
          */
         Task: {
             task_id: string;
@@ -791,6 +874,8 @@ export interface components {
              * @enum {string}
              */
             exclusivity?: "motion" | "soft";
+            episode?: components["schemas"]["ActionEpisode"];
+            result?: components["schemas"]["TaskResult"];
             /** @description 稳定错误码；未失败的任务该字段为 null（见 TaskError）。 */
             error?: components["schemas"]["TaskError"] | null;
         };
@@ -808,6 +893,69 @@ export interface components {
             details?: {
                 [key: string]: unknown;
             };
+        };
+        /**
+         * @description 任务**终态**的生命周期结论，不是 `TaskState` 的别名：
+         *     `accepted`/`running`/`paused` 不是合法结果。
+         *     `cancelled` = 调用方主动取消（含 pause_timeout/deadline）；
+         *     `interrupted` = 被安全停止、抢占或设备丢失打断（原因码见
+         *     `TaskResult.x-task-result-policy.interrupted_causes`）。
+         * @enum {string}
+         */
+        TaskLifecycle: "completed" | "failed" | "cancelled" | "interrupted";
+        /**
+         * @description 完成结论的证据等级，强弱顺序 `unknown < board_reported < sensor_verified`。
+         *     `board_reported` 只表示板侧报告动作结束（例如 `motion.done`），
+         *     不表示实际位移正确，更不表示 `goal_achieved`。
+         * @enum {string}
+         */
+        CompletionEvidence: "unknown" | "board_reported" | "sensor_verified";
+        /**
+         * @description 一次动作回合的投影。M0 一个 RobotTask 执行一个动作（一个 episode），
+         *     但两者边界不同：任务回答「目标」，episode 回答「这次动作怎么结束」。
+         *     `finished_at: null` / `outcome: null` 表示回合仍打开。
+         */
+        ActionEpisode: {
+            episode_id: string;
+            task_id: string;
+            /** @description 动作名（M0 为 `move_distance`），不是板侧 op 名。 */
+            action: string;
+            /** @description Unix epoch 毫秒 */
+            started_at: number;
+            /** @description 回合结束时间，Unix epoch 毫秒；未结束为 null。 */
+            finished_at?: number | null;
+            /**
+             * @description 回合结局；未结束为 null。它不携带 `goal_achieved`。
+             * @enum {string|null}
+             */
+            outcome?: "completed" | "failed" | "cancelled" | "interrupted" | null;
+            /** @description 稳定原因码（如 stop / board_abort / link_lost）；无则省略。 */
+            reason?: string;
+        };
+        /**
+         * @description 终态结果，只在任务终态出现在 `Task.result`。三个概念分开记账：
+         *
+         *     - `lifecycle`：任务生命周期怎么结束；
+         *     - `goal_achieved`：目标是否**真的**达成；未知必须是 null，不是 false；
+         *     - `evidence`：支撑结论的证据等级。
+         *
+         *     开环移动收到 `motion.done` 只能得到
+         *     `{lifecycle: completed, goal_achieved: null, evidence: board_reported}`；
+         *     `goal_achieved: true` 只能配 `evidence: sensor_verified`。
+         *     策略是机器可读的 `x-task-result-policy`，由契约测试逐条执行。
+         */
+        TaskResult: {
+            lifecycle: components["schemas"]["TaskLifecycle"];
+            /**
+             * @description true = 有可观测证据证明目标达成；false = 有证据证明未达成；
+             *     null = 无法判断（开环移动的默认值）。不得用 false 冒充「未知」。
+             */
+            goal_achieved: boolean | null;
+            evidence: components["schemas"]["CompletionEvidence"];
+            /** @description 稳定原因码（cancelled/interrupted 的来源）；无则省略。 */
+            reason?: string;
+            /** @description 失败时的稳定错误；非 failed 为 null 或省略。 */
+            error?: components["schemas"]["TaskError"] | null;
         };
         Error: {
             /** @enum {boolean} */
@@ -970,6 +1118,12 @@ export interface components {
          *     `docs/design/GH-18.md`。
          */
         ApprovalCredential: string;
+        /**
+         * @description 提交幂等键（进程内有效，不持久化）。同一 key 且参数完全一致时重复提交返回
+         *     同一个 `task_id`，不新建任务、不发第二个 `task.started`；同 key 不同参数
+         *     返回 `409/E_STATE`。省略则不承诺去重（进程重启后 key 表清空）。
+         */
+        IdempotencyKey: string;
     };
     requestBodies: never;
     headers: never;
@@ -1417,7 +1571,10 @@ export interface operations {
                         stopped: boolean;
                         /** @description 受理时间，Unix epoch 毫秒 */
                         at: number;
-                        /** @description 是否收到板侧 stop 应答；未收到为 false（此时应报 504，不返回 200） */
+                        /**
+                         * @description 是否收到**与请求 id 匹配**的板侧 stop 应答；未收到为 false（此时应报 504，不返回 200）。
+                         *     无 id 的串口 stop 没有可匹配的应答，写成功不等于板侧确认：只能是 null/false。
+                         */
                         board_ack?: boolean | null;
                         /**
                          * @description 结构化停止原因，与 safety.stop_requested.cause 一致
@@ -1425,7 +1582,10 @@ export interface operations {
                          */
                         cause?: "user_voice" | "user_stop_api" | "obstacle" | "watchdog_timeout" | "param_out_of_range" | "observation_stale" | "device_lost" | "bridge_exit" | "internal_error";
                         /**
-                         * @description confirmed 仅表示板侧应答了停止；unknown 表示无法确认停稳
+                         * @description `confirmed` 只允许由带匹配 request id 的板侧 stop 应答产生，
+                         *     仅表示板侧应答了停止（仍不是物理静止证明）；`unknown` 表示无法确认停稳。
+                         *     串口写成功最多是 `requested`；无 id 的 stop 上限是 `unknown`。
+                         *     语义与枚举同源：`contracts/events.json` 的 `stop_confirmation`。
                          * @enum {string}
                          */
                         state?: "requested" | "confirmed" | "unknown";
@@ -1463,6 +1623,64 @@ export interface operations {
                     "application/json": {
                         tasks: components["schemas"]["Task"][];
                     };
+                };
+            };
+        };
+    };
+    task_submit: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description 提交幂等键（进程内有效，不持久化）。同一 key 且参数完全一致时重复提交返回
+                 *     同一个 `task_id`，不新建任务、不发第二个 `task.started`；同 key 不同参数
+                 *     返回 `409/E_STATE`。省略则不承诺去重（进程重启后 key 表清空）。
+                 */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description 已受理（只返回引用；不代表运动已开始或目标达成） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskHandle"];
+                };
+            };
+            /** @description 参数不合法（缺单位、越界、未知 action/字段） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 已有排他任务在跑（E_BUSY）或幂等键参数冲突（E_STATE） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 能力未实现/未就绪（E_UNAVAILABLE）或板侧链路不可用（E_LINK） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };

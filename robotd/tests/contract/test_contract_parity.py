@@ -81,18 +81,36 @@ def test_error_body_matches_contract_shape():
 def test_mcp_tool_face_matches_contract_tools(tools):
     """MCP 工具面由契约投影，不由内部能力表决定。"""
     registry = Registry()
-    public_names = {cap.public_name for cap in registry.all() if cap.public_name}
-    # 系统路径（robot_announce）也在能力表里，但显式排除出 Agent 工具面。
-    assert public_names - {"events_subscribe", "robot_announce"} == {tool["name"] for tool in tools}
+    # 系统路径（robot_announce）与契约先行尚未进入 curated 面的能力（task_submit）
+    # 都在能力表里，但用 mcp_exclude 显式排除；不再靠测试里手维护排除名单。
+    public_names = {cap.public_name for cap in registry.all() if cap.public_name and not cap.mcp_exclude}
+    assert public_names - {"events_subscribe"} == {tool["name"] for tool in tools}
     # debug 与 websocket 必须被排除
     names = {t["name"] for t in tools}
     assert "debug_serial" not in names
     assert "events_subscribe" not in names
     assert "robot_announce" not in names
     # GH-6 新增 speech_abort：14 → 15；GH-48 新增 task_pause/task_resume：15 → 17。
+    # GH-85 新增 task_submit，但契约标 x-mcp-exclude（实现前不进 Codex 工具面），仍为 17。
     # 数量是契约的一部分，增删端点必须同时改这里，
     # 否则「契约悄悄多了一条路」不会被发现。
     assert len(tools) == 17, f"MCP 工具面必须保持 17 项，实际 {len(tools)}"
+
+
+def test_mcp_exclude_flags_match_contract(spec):
+    """GH-85：能力表的 mcp_exclude 必须与契约 x-mcp-exclude 一一对应。
+
+    两条方向都要查：能力表漏标 → 工具面多出一个未实现的工具；契约漏标 →
+    内部能力被自动投影成 Codex 工具。任一方向漂移都必须红。
+    """
+    declared = {
+        operation["operationId"]
+        for item in spec["paths"].values()
+        for operation in item.values()
+        if isinstance(operation, dict) and operation.get("x-mcp-exclude") is True
+    }
+    flagged = {cap.public_name for cap in Registry().all() if cap.mcp_exclude}
+    assert declared == flagged
 
 
 def test_robot_announce_is_contract_declared_system_path(spec, tools):

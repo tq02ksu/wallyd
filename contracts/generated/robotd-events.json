@@ -28,6 +28,29 @@
     "log_max": 1000,
     "note": "有限内存日志，尽力而为补发；不是持久事件存储。cursor 早于窗口 → resync_required/cursor_expired。"
   },
+  "stop_confirmation": {
+    "states": [
+      "requested",
+      "confirmed",
+      "unknown"
+    ],
+    "confirmed_requires": "board_stop_reply_with_matching_request_id",
+    "write_success_is": "requested",
+    "unaddressed_stop": {
+      "request_has_id": false,
+      "max_state": "unknown",
+      "allowed_states": [
+        "requested",
+        "unknown"
+      ],
+      "note": "没有 id 的串口 stop 没有可匹配的板侧应答：写成功只能证明字节发出，状态上限是 unknown，不得报 confirmed。"
+    },
+    "notes": [
+      "confirmed 只表示「带同一 request id 的板侧 stop 应答到了」，仍不是物理静止证明。",
+      "requested/confirmed/unknown 与 safety.stop_requested.state、POST /v1/robot/stop 响应的 state 枚举同源。",
+      "本块是唯一机器可读的确认语义；实现与测试不得各自解释串口写成功。"
+    ]
+  },
   "supported_event_types": [
     "*",
     "audio.*",
@@ -46,6 +69,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "capability",
         "exclusivity"
       ],
@@ -62,6 +86,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "progress"
       ],
       "required_fields": [
@@ -76,6 +101,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "capability"
       ],
       "required_fields": [
@@ -90,6 +116,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "capability",
         "error",
         "reason"
@@ -107,6 +134,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "capability",
         "reason"
       ],
@@ -123,6 +151,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "capability",
         "pause_expires_at"
       ],
@@ -139,6 +168,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "capability",
         "paused_ms"
       ],
@@ -155,6 +185,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "announced"
       ],
       "required_fields": [
@@ -168,6 +199,7 @@
       "payload_ref": null,
       "payload_fields": [
         "task_id",
+        "episode_id",
         "left_steps",
         "right_steps",
         "eta_ms",
@@ -180,13 +212,53 @@
       ]
     },
     {
+      "type": "motion.done",
+      "category": "motion",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "episode_id",
+        "action",
+        "evidence",
+        "reported_steps"
+      ],
+      "required_fields": [
+        "task_id",
+        "episode_id",
+        "action",
+        "evidence"
+      ]
+    },
+    {
+      "type": "motion.aborted",
+      "category": "motion",
+      "no_state": true,
+      "payload_ref": null,
+      "payload_fields": [
+        "task_id",
+        "episode_id",
+        "action",
+        "reason",
+        "evidence"
+      ],
+      "required_fields": [
+        "task_id",
+        "episode_id",
+        "action",
+        "reason",
+        "evidence"
+      ]
+    },
+    {
       "type": "safety.stopped",
       "category": "safety",
       "payload_ref": null,
       "payload_fields": [
         "reason",
         "source",
-        "task_id"
+        "task_id",
+        "episode_id"
       ],
       "required_fields": [
         "reason",
@@ -203,6 +275,7 @@
         "state",
         "detail",
         "task_id",
+        "episode_id",
         "run_id"
       ],
       "required_fields": [

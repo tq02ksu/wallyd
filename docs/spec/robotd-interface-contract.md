@@ -64,7 +64,7 @@ ADR-0006 仍标记为 proposed；ADR-0007 已于 2026-10-23 接受。
 | 标定 | `GET/PUT /v1/robot/odometry/calibration` | 读取或更新 robotd 权威的标定值；更新会下发板侧，不能静默部分成功 |
 | 运动/行为 | `POST /v1/robot/follow`、`POST /v1/robot/stop` | 跟随返回任务；stop 是无审批、幂等、可抢占的有序停止 |
 | 语音 | `POST /v1/robot/speak`、`POST /v1/robot/announce`、`POST /v1/speech/listen`、`GET /v1/audio/state`、`POST /v1/audio/mute`、`POST /v1/audio/unmute` | 请求播报/系统审批复述/流式听音、读常听状态、切换静音 |
-| 任务 | `GET /v1/tasks/{task_id}`、`DELETE /v1/tasks/{task_id}` | 查询与取消任务；任务状态变化也经事件流通知 |
+| 任务 | `POST /v1/tasks`、`GET /v1/tasks`、`GET /v1/tasks/{task_id}`、`DELETE /v1/tasks/{task_id}` | 提交（M0 `move_distance`）、查询与取消任务；任务状态变化也经事件流通知。提交只返回 `TaskHandle {task_id}`；`lifecycle`/`goal_achieved`/`evidence` 只在终态 `Task.result`（`TaskResult`）里分账 |
 | 实时订阅 | `GET /v1/events`（WebSocket Upgrade） | 初始状态同步后接收增量事件 |
 
 `operationId` 是公开工具名，所有物理动作的审批属性必须由契约明确表达，不能依赖 Agent 自行判断。
@@ -223,8 +223,8 @@ accepted → running → completed | failed | cancelled
 
 | 类别 | 事件示例 | 最低必要信息 |
 | --- | --- | --- |
-| 任务 | `task.started`, `task.progress`, `task.paused`, `task.resumed`, `task.pause_expired`, `task.completed`, `task.failed`, `task.cancelled` | `task_id`、能力名、进度或终态/错误；暂停带 `pause_expires_at`，恢复带 `paused_ms` |
-| 运动/安全 | `motion.plan`, `safety.stopped`, `safety.stop_requested`, `safety.slowdown` | 计划摘要、停止动作、结构化停止原因与确认状态；`slowdown` 仅在减速状态变化时发；不宣称实际到位 |
+| 任务 | `task.started`, `task.progress`, `task.paused`, `task.resumed`, `task.pause_expired`, `task.completed`, `task.failed`, `task.cancelled` | `task_id`、能力名、进度或终态/错误；`episode_id` 关联 ActionEpisode（实现后必带）；暂停带 `pause_expires_at`，恢复带 `paused_ms`。**任何 `task.*` 事件都不携带 `goal_achieved`** |
+| 运动/安全 | `motion.plan`, `motion.done`, `motion.aborted`, `safety.stopped`, `safety.stop_requested`, `safety.slowdown` | 计划摘要、动作回合结束/中止、停止动作、结构化停止原因与确认状态；`motion.done` 只表达动作结束或 `board_reported`，不推出 `goal_achieved=true`；`slowdown` 仅在减速状态变化时发；不宣称实际到位 |
 | 设备 | `device.ready`, `device.lost`, `device.recovered`, `device.reset`, `device.changed` | 设备名、变化/原因、可确认的固件信息 |
 | 状态 | `state.rejected` | 被拒事件的 `type`、`payload_keys` 与 `reason`；不含 payload 原文 |
 | 视觉 | `vision.*`, `camera.*`, `people.*`, `person.*` | 观测、有效性与时间信息；人物观测面是 `person.appeared/moved/lost`（`track_id` 只标识 track，不是身份；`person.moved` ≤5Hz/track，上限写在 agentd 事件契约里）；不得把模型原始格式直接作为稳定能力契约 |
@@ -233,6 +233,11 @@ accepted → running → completed | failed | cancelled
 事件只表达已发生的增量；当前状态以快照为准。部分识别文本须带修订号并标明 `partial`，
 不得与 `final` 混淆。模型输出必须有 `grounded` 等来源有效性标记；`grounded=false` 时不得当作视觉观测。
 内部字段（包括 `ts_mono_ns`、模型自检中间文本）不得出现在 Agent 可见事件中。
+
+停止确认语义由 `contracts/events.json` 的 `stop_confirmation` 块定义，而不是由实现各写一套：
+`confirmed` 只允许由**带匹配 request id** 的板侧 stop 应答产生；串口写成功最多是
+`requested`；无 id 的 stop 没有可匹配的应答，上限是 `unknown`，不得报 `confirmed`，
+也不得据此宣称物理静止。`safety.stopped` 只表示停止动作发生。
 
 ## 7. 安全、背压与时间约束
 
