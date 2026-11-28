@@ -230,3 +230,45 @@ def test_allowlisting_a_violation_silences_it_and_becomes_stale_once_fixed(tmp_p
     remaining, stale = apply_allowlist(scan(tmp_path), [entry])
     assert remaining == []
     assert stale == [entry], "违规修好后 allowlist 条目变成失效项，必须删除"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # 动态 import 是同一个依赖：``importlib.import_module("robotd.task")``。
+        'import importlib\n\n\ndef f():\n    return importlib.import_module("robotd.task")\n',
+        # 给 importlib 起别名同样不能绕过。
+        'import importlib as il\n\n\ndef f():\n    return il.import_module("robotd.task.executive")\n',
+        # ``from importlib import import_module [as X]`` 的两种写法。
+        'from importlib import import_module\n\n\ndef f():\n    return import_module("robotd.task")\n',
+        'from importlib import import_module as load\n\n\ndef f():\n    return load("robotd.task.executive")\n',
+        # 内建 ``__import__``。
+        'def f():\n    return __import__("robotd.task.executive")\n',
+    ],
+)
+def test_dynamic_import_of_a_real_module_is_caught(tmp_path, source):
+    """``importlib`` / ``__import__`` 是标准库的 import 写法，不能靠它躲开 ``device -> task``。"""
+    _write_tree(tmp_path, "task/__init__.py", "")
+    _write_tree(tmp_path, "task/executive.py", "")
+    _write_tree(tmp_path, "device/board.py", source)
+    violations = scan(tmp_path)
+    assert any(
+        v.importer == "robotd.device.board" and v.imported.startswith("robotd.task") for v in violations
+    ), violations
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # 目标不是字面量：静态门禁判不出来，宁可漏报也不误报。
+        "import importlib\n\n\ndef f(name):\n    return importlib.import_module(name)\n",
+        # 导入包根本身不携带依赖方向（``robotd`` 本身不是模块依赖）。
+        'import importlib\n\n\ndef f():\n    return importlib.import_module("robotd")\n',
+        # 非 importlib 的 ``import_module`` 同名方法不是动态 import。
+        'class Loader:\n    def import_module(self, name):\n        return name\n\n\ndef f(loader):\n    return loader.import_module("robotd.task")\n',
+    ],
+)
+def test_dynamic_import_lookalikes_are_not_dependencies(tmp_path, source):
+    _write_tree(tmp_path, "task/__init__.py", "")
+    _write_tree(tmp_path, "device/board.py", source)
+    assert scan(tmp_path) == []

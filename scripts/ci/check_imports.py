@@ -95,6 +95,8 @@ def imported_modules(path: Path, module: str, known: set[str]) -> set[str]:
 
     ``import robotd`` 后直接用属性访问（``robotd.task.executive``）同样是依赖，
     但 AST 里没有 ``ImportFrom``；所以再解析一次属性链，取 ``known`` 里最长前缀。
+    ``importlib.import_module("robotd.task")`` / ``__import__("robotd.task")`` 是同一
+    依赖的标准库写法，字面量目标同样展开（非字面量判不出来，不猜）。
     字符串常量（``logging.getLogger("robotd.task")``）不是 import，不计入。
     """
     is_package = path.name == "__init__.py"
@@ -102,6 +104,7 @@ def imported_modules(path: Path, module: str, known: set[str]) -> set[str]:
     found: set[str] = set()
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     aliases = _module_aliases(tree)
+    dynamic_calls = _dynamic_import_callables(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.level:
@@ -129,7 +132,55 @@ def imported_modules(path: Path, module: str, known: set[str]) -> set[str]:
             resolved = _attribute_module(_dotted(node), aliases, known)
             if resolved is not None:
                 found.add(resolved)
+        elif isinstance(node, ast.Call):
+            # 动态 import：``importlib.import_module("robotd.task")`` / ``__import__(...)``。
+            if _dotted(node.func) in dynamic_calls:
+                target = _literal_first_arg(node)
+                if target is not None:
+                    resolved = _longest_known_prefix(target, known)
+                    if resolved is not None:
+                        found.add(resolved)
     return {name for name in found if name == "robotd" or name.startswith("robotd.")}
+
+
+def _literal_first_arg(node: ast.Call) -> str | None:
+    """``Call`` 的第一个位置参数是字符串字面量时返回它；其余返回 ``None``。"""
+    if not node.args:
+        return None
+    first = node.args[0]
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        return first.value
+    return None
+
+
+def _dynamic_import_callables(tree: ast.AST) -> set[str]:
+    """本文件里指向动态 import 的可调用名（本地写法 → ``__import__`` 语义）。
+
+    ``importlib.import_module`` 的三种常见本地形态都算：
+    ``importlib.import_module``、``import importlib as il`` 后的 ``il.import_module``、
+    ``from importlib import import_module [as load]`` 后的本地名；外加内建 ``__import__``。
+    """
+    callables = {"__import__"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    callables.add(f"{alias.asname or 'importlib'}.import_module")
+        elif isinstance(node, ast.ImportFrom) and node.module == "importlib" and not node.level:
+            for alias in node.names:
+                if alias.name == "import_module":
+                    callables.add(alias.asname or "import_module")
+    return callables
+
+
+def _longest_known_prefix(name: str, known: set[str]) -> str | None:
+    """把模块名解析到扫描树里真实存在的最长前缀；包根 ``robotd`` 不算依赖。"""
+    parts = name.split(".")
+    for end in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:end])
+        if candidate in known:
+            return candidate if candidate != "robotd" else None
+    return None
 
 
 def _dotted(node: ast.AST) -> str:

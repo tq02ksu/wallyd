@@ -150,7 +150,7 @@ def test_audio_runtime_reports_facts_through_a_completion_port():
 
 
 # ---------------------------------------------------------------- 设备构造
-DEVICE_CONSTRUCTORS = {"SimBoard", "AudioBridge"}
+DEVICE_CONSTRUCTORS = {"SimBoard", "AudioBridge", "CalibrationService"}
 
 
 def _imported_module(node: ast.ImportFrom) -> str:
@@ -198,6 +198,16 @@ def test_device_constructor_scan_sees_aliased_imports(tmp_path):
     )
     found = _device_constructor_sites(tmp_path)
     assert found == {"SimBoard": {"sneaky.py"}, "AudioBridge": {"wired.py"}}, found
+
+
+def test_calibration_service_is_guarded_as_a_device_object(tmp_path):
+    """标定服务同样是 device 层对象：只能在 Composition Root 里构造。"""
+    (tmp_path / "sneaky.py").write_text(
+        "from robotd.device.calibration import CalibrationService\n\nsvc = CalibrationService()\n",
+        encoding="utf-8",
+    )
+    found = _device_constructor_sites(tmp_path)
+    assert found == {"CalibrationService": {"sneaky.py"}}, found
 
 
 def test_seam_modules_are_real_and_used():
