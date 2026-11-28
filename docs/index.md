@@ -113,6 +113,7 @@
 - [GH-11 语音确认通道设计](design/GH-11.md) - `waiting_confirmation` 的语音 settle、窗口/回声规则与凭据签发
 - [GH-48 任务暂停/恢复](design/GH-48.md) - `POST /v1/tasks/{id}/pause|resume`、`TaskState.paused`、暂停上限与安全优先级；resume 不重签审批
 - [GH-84 M0 边界抽取与 import 门禁](design/GH-84.md) - interfaces/task/motion/device/safety/app 六个最小模块、EventKernel 只做归并提交、Task Executive 决定转移、音频完成端口、分层 import 门禁与只减不增的 allowlist
+- [GH-85 move_distance / ActionEpisode 契约](design/GH-85.md) - `task_submit` 的 SI 参数与幂等/错误语义、`TaskHandle`/`TaskFeedback`/`ActionEpisode`/`TaskResult` 边界、`lifecycle`/`goal_achieved`/`evidence` 分账、`motion.done` 不推出达成、无 id stop 不产生板侧确认
 - [GH-36 macOS CI 门禁分档](design/macos-ci.md) - `apple` lane 的编译/纯逻辑测试/AEC3 fail-closed 口径，以及哪些真机判据永远留给人
 - [GH-14 语音回归基线](design/GH-14.md) - 夹具 + 一条命令量出 §11 的 6 项门槛；离线/真机两档、逐项 measured/SKIP、绝对值与 20% 相对退步取严
 

@@ -111,6 +111,231 @@ for (const s of ['accepted', 'running', 'paused', 'completed', 'failed', 'cancel
   if (verbRoutes.length) semantic.push(`出现并行的暂停/恢复动词路由（只允许任务资源子路径）：${verbRoutes.join(', ')}`);
 }
 
+// 2.3b GH-85：submitTask(move_distance) / ActionEpisode / TaskResult / stop 确认语义
+//
+// 防的是「schema 看起来对，但语义仍可以伪造」：
+//   - 任务入口只接受带 SI 单位的字段（无单位的 distance 必须被拒）；
+//   - TaskHandle 只是引用（不能顺手塞 status/progress/goal_achieved）；
+//   - lifecycle / goal_achieved / evidence 分账，motion.done 不能推出达成；
+//   - 无 id 的串口 stop 写成功不得变成 confirmed。
+{
+  const schemas = spec.components?.schemas ?? {};
+  const schemaOf = (node) =>
+    typeof node?.$ref === 'string' ? schemas[node.$ref.split('/').pop()] : node;
+
+  const submit = spec.paths?.['/v1/tasks']?.post;
+  if (!submit || submit.operationId !== 'task_submit') {
+    semantic.push('缺少 POST /v1/tasks（task_submit）：submitTask(move_distance) 没有入口');
+  } else {
+    if (submit['x-mcp-exclude'] !== true) {
+      semantic.push('task_submit 必须标 x-mcp-exclude: true：契约先行阶段不得自动投影成 Codex 工具');
+    }
+    if (approvalOf(submit) !== null) semantic.push('task_submit 不得要求逐动作审批（ADR-0014/0016）');
+    const handle = schemas.TaskHandle;
+    if (!handle) semantic.push('缺 TaskHandle schema');
+    else {
+      if (handle.additionalProperties !== false) semantic.push('TaskHandle 必须 additionalProperties: false');
+      if (JSON.stringify([...(handle.required ?? [])].sort()) !== JSON.stringify(['task_id'])) {
+        semantic.push(`TaskHandle 只能 required: [task_id]，实际 ${JSON.stringify(handle.required)}`);
+      }
+      if (JSON.stringify(Object.keys(handle.properties ?? {})) !== JSON.stringify(['task_id'])) {
+        semantic.push('TaskHandle 只能是 task_id 引用，不得携带 status/进度/达成结论');
+      }
+    }
+    const okSchema = schemaOf(submit.responses?.['200']?.content?.['application/json']?.schema);
+    if (okSchema !== schemas.TaskHandle) {
+      semantic.push('task_submit 的 200 响应必须是 TaskHandle（受理 ≠ 运动开始/到位）');
+    }
+  }
+
+  const req = schemas.TaskSubmitRequest;
+  if (!req?.oneOf?.length) {
+    semantic.push('TaskSubmitRequest 必须按 action 变体（oneOf）声明');
+  } else {
+    const variants = req.oneOf.map(schemaOf).filter(Boolean);
+    const move = variants.find((v) => v?.properties?.action?.enum?.includes('move_distance'));
+    if (!move) {
+      semantic.push('TaskSubmitRequest 缺 move_distance 变体');
+    } else {
+      if (move.additionalProperties !== false) {
+        semantic.push('MoveDistanceRequest 必须 additionalProperties: false（否则无单位 distance 可混入）');
+      }
+      for (const field of ['action', 'distance_m']) {
+        if (!(move.required ?? []).includes(field)) semantic.push(`MoveDistanceRequest 必须 required ${field}`);
+      }
+      if ('distance' in (move.properties ?? {})) {
+        semantic.push('MoveDistanceRequest 不得声明无单位的 distance；只允许 distance_m');
+      }
+      const d = move.properties?.distance_m ?? {};
+      const s = move.properties?.speed_mps ?? {};
+      if (d['x-unit'] !== 'm') semantic.push('distance_m 必须声明 x-unit: m');
+      if (s['x-unit'] !== 'm/s') semantic.push('speed_mps 必须声明 x-unit: m/s');
+      if ((move['x-units'] ?? {}).distance_m !== 'm' || (move['x-units'] ?? {}).speed_mps !== 'm/s') {
+        semantic.push('MoveDistanceRequest.x-units 必须声明 distance_m=m / speed_mps=m/s');
+      }
+      if (d['x-nonzero'] !== true || d['x-min-abs'] !== 0.05) {
+        semantic.push('distance_m 必须用 x-nonzero / x-min-abs 明确「区间内非零」约束');
+      }
+      if (typeof d.minimum !== 'number' || typeof d.maximum !== 'number' || !(d.minimum < 0 && d.maximum > 0)) {
+        semantic.push('distance_m 必须声明有符号的 minimum/maximum');
+      }
+      if (typeof s.minimum !== 'number' || typeof s.maximum !== 'number' || typeof s.default !== 'number') {
+        semantic.push('speed_mps 必须声明 minimum/maximum/default');
+      }
+    }
+  }
+
+  const result = schemas.TaskResult;
+  const lifecycle = schemas.TaskLifecycle?.enum ?? [];
+  const evidence = schemas.CompletionEvidence?.enum ?? [];
+  if (!result) {
+    semantic.push('缺 TaskResult schema（lifecycle / goal_achieved / evidence 无处表达）');
+  } else {
+    for (const field of ['lifecycle', 'goal_achieved', 'evidence']) {
+      if (!(result.required ?? []).includes(field)) semantic.push(`TaskResult 必须 required ${field}`);
+    }
+    if (schemaOf(result.properties?.lifecycle) !== schemas.TaskLifecycle) {
+      semantic.push('TaskResult.lifecycle 必须引用 TaskLifecycle');
+    }
+    if (schemaOf(result.properties?.evidence) !== schemas.CompletionEvidence) {
+      semantic.push('TaskResult.evidence 必须引用 CompletionEvidence');
+    }
+    if (result.properties?.goal_achieved?.type !== 'boolean' || result.properties?.goal_achieved?.nullable !== true) {
+      semantic.push('TaskResult.goal_achieved 必须是可为 null 的 boolean（未知 ≠ false）');
+    }
+    const policy = result['x-task-result-policy'];
+    if (!policy) {
+      semantic.push('TaskResult 缺 x-task-result-policy：lifecycle/goal_achieved/evidence 的对应关系必须机器可读');
+    } else {
+      const want = [
+        'goal_achieved_true_requires_sensor_verified',
+        'non_completed_lifecycle_requires_goal_achieved_null',
+        'board_reported_is_not_goal_achieved',
+      ];
+      if (JSON.stringify(policy.invariants) !== JSON.stringify(want)) {
+        semantic.push(`TaskResult.x-task-result-policy.invariants 必须精确是 ${want.join(', ')}`);
+      }
+      if (policy.goal_achieved_true_requires?.evidence !== 'sensor_verified') {
+        semantic.push('goal_achieved=true 只能由 sensor_verified 支撑');
+      }
+      const nullFor = policy.goal_achieved_must_be_null_for ?? [];
+      if (nullFor.includes('completed')) semantic.push('completed 结果不应被强制 goal_achieved=null（可达成也可未知）');
+      for (const l of nullFor) {
+        if (!lifecycle.includes(l)) semantic.push(`policy.goal_achieved_must_be_null_for 含未知 lifecycle ${l}`);
+      }
+      if (JSON.stringify(policy.evidence_order) !== JSON.stringify(['unknown', 'board_reported', 'sensor_verified'])) {
+        semantic.push('evidence_order 必须是 unknown < board_reported < sensor_verified');
+      }
+      if (policy.motion_done_implies?.goal_achieved !== null) {
+        semantic.push('motion_done_implies.goal_achieved 必须是 null：motion.done 不能推出目标达成');
+      }
+      if (policy.motion_done_implies?.evidence !== 'board_reported') {
+        semantic.push('motion_done_implies.evidence 必须是 board_reported');
+      }
+      if (policy.motion_done_implies?.lifecycle !== 'completed') {
+        semantic.push('motion_done_implies.lifecycle 必须是 completed（动作/任务结束 ≠ 到位）');
+      }
+    }
+  }
+  for (const l of ['accepted', 'running', 'paused']) {
+    if (lifecycle.includes(l)) semantic.push(`TaskLifecycle 不得包含非终态 ${l}`);
+  }
+  if (!['unknown', 'board_reported', 'sensor_verified'].every((e) => evidence.includes(e))) {
+    semantic.push('CompletionEvidence 必须包含 unknown / board_reported / sensor_verified');
+  }
+  const episode = schemas.ActionEpisode;
+  if (!episode) {
+    semantic.push('缺 ActionEpisode schema');
+  } else {
+    if (!['episode_id', 'task_id', 'action', 'started_at'].every((f) => (episode.required ?? []).includes(f))) {
+      semantic.push('ActionEpisode 必须 required episode_id/task_id/action/started_at');
+    }
+    if ('goal_achieved' in (episode.properties ?? {})) {
+      semantic.push('ActionEpisode 不得携带 goal_achieved（达成结论只在 TaskResult）');
+    }
+  }
+  for (const field of ['episode', 'result']) {
+    if (!(field in (schemas.Task?.properties ?? {}))) semantic.push(`Task 投影缺可选字段 ${field}`);
+  }
+
+  const eventOf = (type) => (events.events ?? []).find((e) => e.type === type);
+  const done = eventOf('motion.done');
+  const aborted = eventOf('motion.aborted');
+  for (const [name, ev] of [['motion.done', done], ['motion.aborted', aborted]]) {
+    if (!ev) {
+      semantic.push(`events.json 缺 ${name}`);
+      continue;
+    }
+    if ('goal_achieved' in (ev.payload ?? {})) {
+      semantic.push(`${name} 不得携带 goal_achieved：动作结束不是目标达成`);
+    }
+    for (const field of ['task_id', 'episode_id', 'action', 'evidence']) {
+      if (ev.payload?.[field]?.required !== true) {
+        semantic.push(`${name}.${field} 必须必填（事件必须能关联 ActionEpisode）`);
+      }
+    }
+  }
+  if (done && JSON.stringify(done.payload?.evidence?.enum) !== JSON.stringify(['board_reported'])) {
+    semantic.push('motion.done.evidence 只能是 board_reported（板侧报告 ≠ 传感器验证）');
+  }
+  if (aborted?.payload?.evidence?.enum?.includes('sensor_verified')) {
+    semantic.push('motion.aborted.evidence 不得声明 sensor_verified（中止不产生完成证据）');
+  }
+  for (const ev of events.events ?? []) {
+    if (/^task\./.test(ev.type) && 'goal_achieved' in (ev.payload ?? {})) {
+      semantic.push(`${ev.type} 不得携带 goal_achieved：任务事件只报生命周期`);
+    }
+  }
+
+  const stop = events.stop_confirmation;
+  if (!stop) {
+    semantic.push('events.json 缺 stop_confirmation：无 id 的串口 stop 确认语义必须机器可读');
+  } else {
+    const states = stop.states ?? [];
+    if (JSON.stringify(states) !== JSON.stringify(['requested', 'confirmed', 'unknown'])) {
+      semantic.push(`stop_confirmation.states 必须是 requested/confirmed/unknown，实际 ${JSON.stringify(states)}`);
+    }
+    if (stop.confirmed_requires !== 'board_stop_reply_with_matching_request_id') {
+      semantic.push('stop_confirmation.confirmed_requires 必须是带匹配 request id 的板侧应答');
+    }
+    if (stop.write_success_is !== 'requested') {
+      semantic.push('stop_confirmation.write_success_is 必须是 requested：写成功不是板侧确认');
+    }
+    if (stop.unaddressed_stop?.request_has_id !== false || stop.unaddressed_stop?.max_state !== 'unknown') {
+      semantic.push('无 id 的 stop 必须声明 request_has_id=false 且上限 max_state=unknown');
+    }
+    if (stop.unaddressed_stop?.allowed_states?.includes('confirmed')) {
+      semantic.push('无 id 的 stop 不得把 confirmed 列为允许状态');
+    }
+    const declared = eventOf('safety.stop_requested')?.payload?.state?.enum ?? [];
+    if (JSON.stringify(declared) !== JSON.stringify(states)) {
+      semantic.push(`safety.stop_requested.state 枚举与 stop_confirmation.states 不一致：${JSON.stringify(declared)}`);
+    }
+    const stopStates =
+      spec.paths?.['/v1/robot/stop']?.post?.responses?.['200']?.content?.['application/json']?.schema
+        ?.properties?.state?.enum ?? [];
+    if (JSON.stringify(stopStates) !== JSON.stringify(states)) {
+      semantic.push(`POST /v1/robot/stop 的 state 枚举与 stop_confirmation.states 不一致：${JSON.stringify(stopStates)}`);
+    }
+  }
+
+  const mcpPath = path.join(ROOT, 'generated', 'mcp-tools.json');
+  if (fs.existsSync(mcpPath)) {
+    const names = JSON.parse(fs.readFileSync(mcpPath, 'utf8')).map((t) => t.name);
+    if (names.includes('task_submit')) semantic.push('task_submit 在实现前不得进入 mcp-tools.json');
+    if (names.some((n) => /robot_move|move_distance/.test(n))) {
+      semantic.push('mcp-tools.json 出现了直接 robot_move/move_distance 工具（设备原语禁令）');
+    }
+  }
+  for (const item of Object.values(spec.paths ?? {})) {
+    for (const method of ['get', 'post', 'put', 'delete', 'patch']) {
+      if (item[method]?.operationId === 'robot_move') {
+        semantic.push('出现直接 robot_move 操作；只允许语义化 task_submit');
+      }
+    }
+  }
+}
+
 // 2.4 servers 只绑回环
 for (const s of spec.servers ?? []) {
   if (/0\.0\.0\.0/.test(s.url ?? '')) semantic.push(`servers.url 含 0.0.0.0：${s.url}`);

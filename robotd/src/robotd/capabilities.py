@@ -48,6 +48,9 @@ class Capability:
     # 审批凭据必须绑定的字段（契约 ``x-requires-approval.params`` 的实现侧镜像）。
     # 摘要规范化由 ``approval_digest`` 执行；这里只保存「绑定哪些字段」。
     approval_params: tuple[str, ...] = ()
+    #: 契约标了 ``x-mcp-exclude``：不是 Agent 工具（系统路径，或尚未进入 curated 面）。
+    #: 公开工具面由契约投影，这个标记只让契约一致性测试不必手维护排除名单。
+    mcp_exclude: bool = False
     handler: Callable[..., Awaitable[Any]] | None = None
     unavailable_reason: str | None = None
 
@@ -137,6 +140,20 @@ def default_capabilities() -> list[Capability]:
             summary="从 paused 恢复原任务；不新建任务、不重新签发审批凭据",
             requires_approval=False,
         ),
+        # GH-85：契约先行。submitTask(move_distance) 的 HTTP/schema 已发布，
+        # Task Executive 与 fake Motion 由 #86 实现；未实现前统一 503/E_UNAVAILABLE，
+        # 不伪造 task_id。它也不进 MCP 工具面（契约 x-mcp-exclude）。
+        Capability(
+            name="task.submit",
+            public_name="task_submit",
+            group="tasks",
+            implementation=Implementation.UNIMPLEMENTED,
+            summary="提交 move_distance 任务并返回 TaskHandle（契约先行；实现待 #86）",
+            exclusivity=Exclusivity.MOTION,
+            requires_approval=False,
+            mcp_exclude=True,
+            unavailable_reason="Task Executive 与 fake Motion 尚未实现（#86）；GH-85 只发布契约",
+        ),
         Capability(
             name="robot.calibration.get",
             public_name="robot_calibration_get",
@@ -187,6 +204,7 @@ def default_capabilities() -> list[Capability]:
             implementation=Implementation.IMPLEMENTED,
             summary="系统播报审批复述与澄清追问（免审批；不接受任意自由文本）",
             requires_approval=False,
+            mcp_exclude=True,
         ),
         Capability(
             name="speech.listen",

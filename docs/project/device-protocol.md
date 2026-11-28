@@ -13,7 +13,9 @@ Key protocol properties:
   calibration metadata;
 - continuous `velocity` messages while motion is intended, with a board-side
   watchdog stop;
-- idempotent, preempting `stop` that remains available without the agent;
+- idempotent, preempting `stop` that remains available without the agent; a
+  successful write is only `requested`, and a stop without a request id has no
+  matching board reply, so it must never become `confirmed`;
 - explicit errors for busy, range, state, firmware mismatch, and hardware faults;
 - no silent success when a requested capability is unavailable.
 - target motion fields are explicitly device-facing steps and step rates;

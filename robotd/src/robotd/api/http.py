@@ -290,6 +290,47 @@ def _h_task_get(ctx: RouteContext) -> dict[str, Any]:
     return _call_capability(ctx.app, "task.get", lambda _cap: ctx.app.tasks.get(task_id).to_public())
 
 
+def _h_task_submit(ctx: RouteContext) -> dict[str, Any]:
+    """``task_submit``（GH-85 契约先行）。
+
+    本轮只做契约级参数检查：缺单位、越界、未知 action 必须给出 400，而不是让
+    「未实现」的 503 掩盖调用方写错了字段。真正的受理（返回 TaskHandle、建
+    RobotTask/ActionEpisode）由 #86 的 Task Executive 实现；能力未实现前
+    ``_call_capability`` 统一返回 503/E_UNAVAILABLE，**不伪造 task_id**。
+    """
+    body = ctx.body
+    if "distance" in body:
+        raise RobotdError(
+            ErrorCode.VALIDATION,
+            "字段 distance 没有单位；距离必须用 distance_m（米）",
+            {"allowed": ["action", "distance_m", "speed_mps"]},
+        )
+    _reject_unknown(body, {"action", "distance_m", "speed_mps"})
+    if body.get("action") != "move_distance":
+        raise RobotdError(ErrorCode.VALIDATION, "字段 action 目前只能是 move_distance")
+    distance = _optional_number(body, "distance_m")
+    if distance is None:
+        raise RobotdError(
+            ErrorCode.VALIDATION,
+            "缺少 distance_m（米）；不接受无单位的 distance",
+            {"allowed": ["action", "distance_m", "speed_mps"]},
+        )
+    if distance == 0.0 or abs(distance) > 0.3 or abs(distance) < 0.05:
+        raise RobotdError(
+            ErrorCode.VALIDATION,
+            "distance_m 必须在 ±0.05–0.3 米之间且不为 0",
+            {"min_abs": 0.05, "max_abs": 0.3},
+        )
+    speed = _optional_number(body, "speed_mps", minimum=0.05)
+    if speed is not None and speed > 0.4:
+        raise RobotdError(
+            ErrorCode.VALIDATION,
+            "speed_mps 不得超过 0.4",
+            {"min": 0.05, "max": 0.4},
+        )
+    return _call_capability(ctx.app, "task.submit", lambda _cap: {})
+
+
 def _h_task_cancel(ctx: RouteContext) -> dict[str, Any]:
     task_id = ctx.params["task_id"]
     # 取消策略（运动任务联动 stop）在 Safety；handler 只调用端口。
@@ -641,6 +682,8 @@ def build_routes(*, debug: bool) -> list[Route]:
         Route("GET", "/v1/robot/state", _h_state, operation_id="robot_state"),
         Route("POST", "/v1/robot/stop", _h_stop, operation_id="robot_stop"),
         Route("GET", "/v1/tasks", _h_tasks_list, operation_id="task_list"),
+        # GH-85：submitTask(move_distance) 的契约入口。能力未实现 → 503/E_UNAVAILABLE。
+        Route("POST", "/v1/tasks", _h_task_submit, operation_id="task_submit"),
         Route("GET", "/v1/tasks/{task_id}", _h_task_get, operation_id="task_get"),
         Route("DELETE", "/v1/tasks/{task_id}", _h_task_cancel, operation_id="task_cancel"),
         # GH-48：暂停/恢复挂在任务资源下；都不需要审批（没有改变已确认参数）。
